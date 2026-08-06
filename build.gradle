@@ -1,0 +1,367 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'signing'
+    id 'jacoco'
+}
+
+def releaseVersion = providers.gradleProperty('releaseVersion').getOrElse('0.1.0-SNAPSHOT')
+def signingKey = providers.gradleProperty('signingKey')
+def signingPassword = providers.gradleProperty('signingPassword')
+def centralStagingDirectory = layout.buildDirectory.dir('central-staging')
+
+group = 'com.webjetcms'
+version = releaseVersion
+description = 'Framework-neutral Java client for OpenAI, Google Gemini, and OpenRouter'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+    withSourcesJar()
+    withJavadocJar()
+}
+
+dependencies {
+    implementation 'org.apache.httpcomponents:httpclient:4.5.14'
+    implementation 'org.apache.httpcomponents:httpmime:4.5.14'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.1'
+    implementation 'org.apache.commons:commons-text:1.14.0'
+
+    testImplementation platform('org.junit:junit-bom:6.0.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter-api'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+
+jar {
+    manifest {
+        attributes('Automatic-Module-Name': 'com.webjetcms.ai')
+    }
+    from(project.file('LICENSE')) {
+        into 'META-INF'
+    }
+    from(project.file('NOTICE')) {
+        into 'META-INF'
+    }
+}
+
+test {
+    useJUnitPlatform()
+    finalizedBy jacocoTestReport
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+def forbiddenImportPrefixes = [
+    'sk.iway.',
+    'org.springframework.',
+    'jakarta.servlet.',
+    'javax.servlet.',
+    'jakarta.persistence.',
+    'javax.persistence.'
+]
+
+def checkStandaloneBoundary = tasks.register('checkStandaloneBoundary') {
+    group = 'verification'
+    description = 'Rejects host-framework imports from the standalone AI library.'
+    inputs.files(sourceSets.main.allJava)
+
+    doLast {
+        def violations = []
+        sourceSets.main.allJava.files.sort().each { sourceFile ->
+            int lineNumber = 0
+            sourceFile.eachLine('UTF-8') { line ->
+                lineNumber++
+                String importedType = line.trim()
+                if (importedType.startsWith('import ')) {
+                    importedType = importedType.substring('import '.length()).trim()
+                    if (importedType.startsWith('static ')) {
+                        importedType = importedType.substring('static '.length()).trim()
+                    }
+                    String forbiddenPrefix = forbiddenImportPrefixes.find { importedType.startsWith(it) }
+                    if (forbiddenPrefix != null) {
+                        violations.add("${sourceFile}:${lineNumber}: ${line.trim()}")
+                    }
+                }
+            }
+        }
+
+        if (violations.isEmpty() == false) {
+            throw new GradleException(
+                'webjet-ai must remain independent of WebJET CMS, Spring, servlet, and JPA APIs:\n'
+                    + violations.join('\n')
+            )
+        }
+    }
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            artifactId = 'webjet-ai'
+            from components.java
+            pom {
+                name = 'WebJET AI'
+                description = project.description
+                url = 'https://github.com/webjetcms/webjet-ai'
+                inceptionYear = '2026'
+                licenses {
+                    license {
+                        name = 'The Apache License, Version 2.0'
+                        url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                        distribution = 'repo'
+                    }
+                }
+                developers {
+                    developer {
+                        name = 'Lubos Balat'
+                        email = 'info@webjet.eu'
+                        organization = 'InterWay, a. s.'
+                        organizationUrl = 'https://www.interway.sk'
+                    }
+                }
+                scm {
+                    connection = 'scm:git:https://github.com/webjetcms/webjet-ai.git'
+                    developerConnection = 'scm:git:ssh://git@github.com/webjetcms/webjet-ai.git'
+                    url = 'https://github.com/webjetcms/webjet-ai'
+                }
+                withXml {
+                    def issueManagement = asNode().appendNode('issueManagement')
+                    issueManagement.appendNode('system', 'GitHub')
+                    issueManagement.appendNode('url', 'https://github.com/webjetcms/webjet-ai/issues')
+                }
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = 'CentralStaging'
+            url = centralStagingDirectory
+        }
+    }
+}
+
+if (signingKey.isPresent()) {
+    signing {
+        useInMemoryPgpKeys(signingKey.get(), signingPassword.orNull)
+        sign publishing.publications.mavenJava
+    }
+}
+
+// The Central bundle intentionally contains only Maven-standard artifacts.
+tasks.withType(org.gradle.api.publish.tasks.GenerateModuleMetadata).configureEach {
+    enabled = false
+}
+
+def verifyPublicationArtifacts = tasks.register('verifyPublicationArtifacts') {
+    group = 'verification'
+    description = 'Checks the public JAR manifest, legal files, and Maven POM metadata.'
+    dependsOn tasks.named('jar')
+    dependsOn tasks.named('sourcesJar')
+    dependsOn tasks.named('javadocJar')
+    dependsOn tasks.named('generatePomFileForMavenJavaPublication')
+
+    doLast {
+        File mainJar = tasks.named('jar').get().archiveFile.get().asFile
+        File sourcesJar = tasks.named('sourcesJar').get().archiveFile.get().asFile
+        File javadocJar = tasks.named('javadocJar').get().archiveFile.get().asFile
+        [mainJar, sourcesJar, javadocJar].each { artifact ->
+            if (artifact.isFile() == false || artifact.length() == 0) {
+                throw new GradleException("Missing publication artifact: ${artifact}")
+            }
+        }
+
+        new java.util.jar.JarFile(mainJar).withCloseable { archive ->
+            String moduleName = archive.manifest.mainAttributes.getValue('Automatic-Module-Name')
+            if ('com.webjetcms.ai'.equals(moduleName) == false) {
+                throw new GradleException("Unexpected Automatic-Module-Name: ${moduleName}")
+            }
+            ['META-INF/LICENSE', 'META-INF/NOTICE'].each { entry ->
+                if (archive.getEntry(entry) == null) {
+                    throw new GradleException("The main JAR is missing ${entry}")
+                }
+            }
+        }
+
+        File pomFile = layout.buildDirectory.file('publications/mavenJava/pom-default.xml').get().asFile
+        def pom = new groovy.xml.XmlSlurper().parse(pomFile)
+        def requiredValues = [
+            'groupId': 'com.webjetcms',
+            'artifactId': 'webjet-ai',
+            'version': releaseVersion,
+            'name': 'WebJET AI',
+            'url': 'https://github.com/webjetcms/webjet-ai'
+        ]
+        requiredValues.each { element, expected ->
+            String actual = pom."${element}".text()
+            if (expected.equals(actual) == false) {
+                throw new GradleException("Unexpected POM ${element}: ${actual}")
+            }
+        }
+        if ('The Apache License, Version 2.0'.equals(pom.licenses.license.name.text()) == false) {
+            throw new GradleException('The generated POM does not declare Apache License 2.0')
+        }
+        if ('https://github.com/webjetcms/webjet-ai'.equals(pom.scm.url.text()) == false) {
+            throw new GradleException('The generated POM contains an unexpected SCM URL')
+        }
+    }
+}
+
+def validateReleaseConfiguration = tasks.register('validateReleaseConfiguration') {
+    group = 'publishing'
+    description = 'Rejects snapshots, malformed release versions, and missing signing credentials.'
+    inputs.property('releaseVersion', releaseVersion)
+
+    doLast {
+        String selectedVersion = releaseVersion
+        if ((selectedVersion ==~ /(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)/) == false) {
+            throw new GradleException(
+                "Central publication requires a stable semantic version such as 0.1.0; received ${selectedVersion}"
+            )
+        }
+        if (signingKey.isPresent() == false || signingKey.get().isBlank()) {
+            throw new GradleException('The signingKey Gradle property is required for Central publication')
+        }
+        if (signingPassword.isPresent() == false || signingPassword.get().isBlank()) {
+            throw new GradleException('The signingPassword Gradle property is required for Central publication')
+        }
+    }
+}
+
+def prepareCentralStaging = tasks.register('prepareCentralStaging', Delete) {
+    group = 'publishing'
+    description = 'Removes stale files before creating a Central deployment bundle.'
+    delete centralStagingDirectory
+}
+
+tasks.named('publishMavenJavaPublicationToCentralStagingRepository') {
+    dependsOn validateReleaseConfiguration
+    dependsOn prepareCentralStaging
+    mustRunAfter prepareCentralStaging
+}
+
+def generateCentralChecksums = tasks.register('generateCentralChecksums') {
+    group = 'publishing'
+    description = 'Adds the MD5 and SHA-1 checksum files required by Maven Central.'
+    dependsOn tasks.named('publishMavenJavaPublicationToCentralStagingRepository')
+    doNotTrackState('The task augments a Maven repository generated by maven-publish.')
+
+    doLast {
+        File stagingDirectory = centralStagingDirectory.get().asFile
+        if (stagingDirectory.isDirectory() == false) {
+            throw new GradleException("Central staging directory was not created: ${stagingDirectory}")
+        }
+
+        def stagedFiles = []
+        stagingDirectory.eachFileRecurse(groovy.io.FileType.FILES) { stagedFiles.add(it) }
+        stagedFiles.findAll { file ->
+            file.name.startsWith('maven-metadata')
+                || file.name.endsWith('.md5')
+                || file.name.endsWith('.sha1')
+                || file.name.endsWith('.sha256')
+                || file.name.endsWith('.sha512')
+        }.each { generatedFile ->
+            if (generatedFile.delete() == false) {
+                throw new GradleException("Unable to remove generated file: ${generatedFile}")
+            }
+        }
+
+        stagedFiles.findAll { file ->
+            file.exists() && file.name.endsWith('.asc') == false
+        }.sort().each { artifact ->
+            [MD5: '.md5', SHA1: '.sha1'].each { algorithm, extension ->
+                byte[] digest = java.security.MessageDigest.getInstance(algorithm).digest(artifact.bytes)
+                new File(artifact.parentFile, artifact.name + extension)
+                    .setText(digest.encodeHex().toString() + System.lineSeparator(), 'US-ASCII')
+            }
+        }
+    }
+}
+
+def validateCentralBundle = tasks.register('validateCentralBundle') {
+    group = 'publishing'
+    description = 'Verifies the exact Maven Central repository layout before it is zipped.'
+    dependsOn generateCentralChecksums
+
+    doLast {
+        String artifactVersion = releaseVersion
+        File versionDirectory = centralStagingDirectory
+            .map { it.dir("com/webjetcms/webjet-ai/${artifactVersion}") }
+            .get()
+            .asFile
+        def baseNames = [
+            "webjet-ai-${artifactVersion}.pom",
+            "webjet-ai-${artifactVersion}.jar",
+            "webjet-ai-${artifactVersion}-sources.jar",
+            "webjet-ai-${artifactVersion}-javadoc.jar"
+        ]
+        def expectedNames = [] as Set
+        baseNames.each { baseName ->
+            expectedNames.add(baseName)
+            expectedNames.add(baseName + '.asc')
+            expectedNames.add(baseName + '.md5')
+            expectedNames.add(baseName + '.sha1')
+        }
+
+        if (versionDirectory.isDirectory() == false) {
+            throw new GradleException("Missing Maven version directory: ${versionDirectory}")
+        }
+        Set<String> actualNames = versionDirectory.listFiles()
+            .findAll { it.isFile() }
+            .collect { it.name } as Set
+        if (actualNames != expectedNames) {
+            throw new GradleException(
+                "Unexpected Central bundle files. Missing: ${expectedNames - actualNames}; extra: ${actualNames - expectedNames}"
+            )
+        }
+
+        baseNames.each { baseName ->
+            File signature = new File(versionDirectory, baseName + '.asc')
+            String md5 = new File(versionDirectory, baseName + '.md5').getText('US-ASCII').trim()
+            String sha1 = new File(versionDirectory, baseName + '.sha1').getText('US-ASCII').trim()
+            if (signature.length() == 0 || (md5 ==~ /[0-9a-f]{32}/) == false || (sha1 ==~ /[0-9a-f]{40}/) == false) {
+                throw new GradleException("Invalid signature or checksum for ${baseName}")
+            }
+        }
+    }
+}
+
+tasks.register('centralBundle', Zip) {
+    group = 'publishing'
+    description = 'Creates the signed Maven-layout bundle accepted by the Central Publisher API.'
+    dependsOn validateCentralBundle
+    from centralStagingDirectory
+    destinationDirectory = layout.buildDirectory.dir('central')
+    archiveFileName = 'central-bundle.zip'
+}
+
+tasks.named('check') {
+    dependsOn checkStandaloneBoundary
+    dependsOn verifyPublicationArtifacts
+    dependsOn jacocoTestReport
+}
+
+tasks.named('jar') {
+    dependsOn checkStandaloneBoundary
+}

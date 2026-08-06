@@ -1,0 +1,292 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag and changelog
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tags must use vMAJOR.MINOR.PATCH, for example v0.1.0." >&2
+            exit 1
+          fi
+
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")"
+          if [[ "$(jq -r '.object.type' <<< "${ref_json}")" != "tag" ]]; then
+            echo "Release tags must be annotated and cryptographically signed." >&2
+            exit 1
+          fi
+          tag_object="$(jq -r '.object.sha' <<< "${ref_json}")"
+          tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}")"
+          if [[ "$(jq -r '.verification.verified // false' <<< "${tag_json}")" != "true" ]]; then
+            reason="$(jq -r '.verification.reason // "unknown"' <<< "${tag_json}")"
+            echo "GitHub did not verify the release tag signature (${reason})." >&2
+            exit 1
+          fi
+          if [[ "$(jq -r '.object.type' <<< "${tag_json}")" != "commit" ]] \
+              || [[ "$(jq -r '.object.sha' <<< "${tag_json}")" != "${GITHUB_SHA}" ]]; then
+            echo "The release tag must point directly to the checked-out commit." >&2
+            exit 1
+          fi
+
+          git fetch origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "Release tags must point to a commit on main." >&2
+            exit 1
+          fi
+          if ! grep -Fq "## [${version}]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no entry for ${version}." >&2
+            exit 1
+          fi
+          echo "value=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build release candidate
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: ./gradlew --no-daemon clean check javadoc -PreleaseVersion="${RELEASE_VERSION}"
+
+  publish:
+    name: Publish to Maven Central
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment:
+      name: maven-central
+      url: https://central.sonatype.com/publishing
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Validate release credentials
+        shell: bash
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${CENTRAL_USERNAME:?CENTRAL_USERNAME is not configured}"
+          : "${CENTRAL_PASSWORD:?CENTRAL_PASSWORD is not configured}"
+          : "${SIGNING_KEY:?SIGNING_KEY is not configured}"
+          : "${SIGNING_PASSWORD:?SIGNING_PASSWORD is not configured}"
+
+      - name: Build signed Central bundle
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.SIGNING_PASSWORD }}
+        run: ./gradlew --no-daemon clean centralBundle -PreleaseVersion="${RELEASE_VERSION}"
+
+      - name: Preserve Central bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: central-bundle-${{ needs.validate.outputs.version }}
+          path: build/central/central-bundle.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload to Maven Central
+        id: central
+        shell: bash
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          central_token="$(printf '%s:%s' "${CENTRAL_USERNAME}" "${CENTRAL_PASSWORD}" | base64 | tr -d '\r\n')"
+          echo "::add-mask::${central_token}"
+          deployment_id="$(
+            curl --request POST --silent --show-error --fail-with-body \
+              --header "Authorization: Bearer ${central_token}" \
+              --form "bundle=@build/central/central-bundle.zip;type=application/octet-stream" \
+              "https://central.sonatype.com/api/v1/publisher/upload?name=com.webjetcms%3Awebjet-ai%3A${RELEASE_VERSION}&publishingType=AUTOMATIC"
+          )"
+          deployment_id="$(printf '%s' "${deployment_id}" | tr -d '\r\n')"
+          if [[ ! "${deployment_id}" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+            echo "Central returned an invalid deployment identifier." >&2
+            exit 1
+          fi
+          echo "deployment-id=${deployment_id}" >> "${GITHUB_OUTPUT}"
+          echo "Central deployment: ${deployment_id}"
+
+      - name: Wait for Maven Central publication
+        shell: bash
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          DEPLOYMENT_ID: ${{ steps.central.outputs.deployment-id }}
+        run: |
+          set -euo pipefail
+          central_token="$(printf '%s:%s' "${CENTRAL_USERNAME}" "${CENTRAL_PASSWORD}" | base64 | tr -d '\r\n')"
+          echo "::add-mask::${central_token}"
+          published=false
+          for attempt in $(seq 1 120); do
+            status_json="$(
+              curl --request POST --silent --show-error --fail-with-body \
+                --header "Authorization: Bearer ${central_token}" \
+                "https://central.sonatype.com/api/v1/publisher/status?id=${DEPLOYMENT_ID}"
+            )"
+            state="$(printf '%s' "${status_json}" | jq -er '.deploymentState')"
+            echo "Central state (${attempt}/120): ${state}"
+            case "${state}" in
+              PUBLISHED)
+                published=true
+                break
+                ;;
+              FAILED)
+                printf '%s' "${status_json}" | jq -r '.errors // []'
+                exit 1
+                ;;
+              PENDING|VALIDATING|VALIDATED|PUBLISHING)
+                sleep 15
+                ;;
+              *)
+                echo "Unexpected Central deployment state: ${state}" >&2
+                exit 1
+                ;;
+            esac
+          done
+          if [[ "${published}" != true ]]; then
+            echo "Timed out waiting for Maven Central publication." >&2
+            exit 1
+          fi
+
+      - name: Verify anonymous Maven Central resolution
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          consumer_dir="$(mktemp -d)"
+          cache_dir="${RUNNER_TEMP}/webjet-ai-central-consumer-cache"
+          trap 'rm -rf "${consumer_dir}"' EXIT
+          mkdir -p "${consumer_dir}/src/main/java"
+
+          cat > "${consumer_dir}/settings.gradle" <<'EOF'
+          rootProject.name = 'webjet-ai-central-consumer'
+          EOF
+          cat > "${consumer_dir}/build.gradle" <<EOF
+          plugins {
+              id 'application'
+          }
+          repositories {
+              mavenCentral()
+          }
+          dependencies {
+              implementation 'com.webjetcms:webjet-ai:${RELEASE_VERSION}'
+          }
+          application {
+              mainClass = 'VerifyConsumer'
+          }
+          EOF
+          cat > "${consumer_dir}/src/main/java/VerifyConsumer.java" <<'EOF'
+          import com.webjetcms.ai.AiClient;
+          import com.webjetcms.ai.AiProviderConfig;
+          import com.webjetcms.ai.AiProviderException;
+          import com.webjetcms.ai.AiRequest;
+          import com.webjetcms.ai.provider.openai.OpenAiProvider;
+
+          public final class VerifyConsumer {
+              public static void main(String[] args) throws Exception {
+                  AiProviderConfig config = AiProviderConfig.builder("consumer-test-key").build();
+                  AiRequest request = AiRequest.builder().build();
+                  try (AiClient client = AiClient.of(new OpenAiProvider())) {
+                      try {
+                          client.execute("openai", request, config);
+                          throw new IllegalStateException("Expected local request validation to fail");
+                      } catch (AiProviderException expected) {
+                          if (expected.getMessage().contains("model") == false) {
+                              throw expected;
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          resolved=false
+          for attempt in $(seq 1 60); do
+            if ./gradlew --no-daemon --refresh-dependencies \
+                --gradle-user-home "${cache_dir}" \
+                -p "${consumer_dir}" run; then
+              resolved=true
+              break
+            fi
+            echo "Artifact is not anonymously resolvable yet (${attempt}/60)."
+            sleep 15
+          done
+          if [[ "${resolved}" != true ]]; then
+            echo "Timed out resolving com.webjetcms:webjet-ai:${RELEASE_VERSION} from Maven Central." >&2
+            exit 1
+          fi
+
+  github-release:
+    name: Create GitHub Release
+    needs:
+      - validate
+      - publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          gh release create "v${RELEASE_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --title "WebJET AI ${RELEASE_VERSION}" \
+            --generate-notes
