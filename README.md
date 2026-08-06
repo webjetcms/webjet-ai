@@ -114,7 +114,7 @@ verifies anonymous resolution, and then creates the GitHub Release. Snapshot
 artifacts are not published.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development rules,
-[SECURITY.md](SECURITY.md) for private vulnerability reporting, and
+[SECURITY.md](SECURITY.md) for responsible vulnerability reporting, and
 [PROVENANCE.md](PROVENANCE.md) for the extraction history.
 
 ## License
