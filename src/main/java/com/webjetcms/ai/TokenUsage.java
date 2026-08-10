@@ -1,6 +1,8 @@
 package com.webjetcms.ai;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Provider-neutral token accounting.
@@ -25,5 +27,32 @@ public record TokenUsage(long inputTokens, long outputTokens, long totalTokens, 
      */
     public TokenUsage {
         details = details == null ? Map.of() : Map.copyOf(details);
+    }
+
+    /**
+     * Adds two immutable usage values, including matching provider-specific detail counters.
+     *
+     * @param other usage to add
+     * @return combined usage
+     * @throws NullPointerException when {@code other} is {@code null}
+     * @throws ArithmeticException when a counter overflows a {@code long}
+     */
+    public TokenUsage plus(TokenUsage other) {
+        Objects.requireNonNull(other, "other");
+        if (EMPTY.equals(this)) return other;
+        if (EMPTY.equals(other)) return this;
+
+        Map<String, Long> combinedDetails = new LinkedHashMap<>(details);
+        other.details.forEach((name, value) -> combinedDetails.merge(
+            name,
+            value,
+            (left, right) -> Math.addExact(left, right)
+        ));
+        return new TokenUsage(
+            Math.addExact(inputTokens, other.inputTokens),
+            Math.addExact(outputTokens, other.outputTokens),
+            Math.addExact(totalTokens, other.totalTokens),
+            combinedDetails
+        );
     }
 }

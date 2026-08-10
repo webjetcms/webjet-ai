@@ -1,5 +1,8 @@
 package com.webjetcms.ai;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Objects;
 
@@ -11,6 +14,25 @@ import java.util.Objects;
  * @param fileName source file name, possibly {@code null}
  */
 public record BinaryContent(byte[] data, String mediaType, String fileName) {
+
+    /**
+     * Reads file bytes and derives the file name from the path.
+     *
+     * @param path file to read
+     * @param mediaType MIME type, or a null/blank value for the binary default
+     * @return immutable binary content
+     * @throws IOException when the file cannot be read
+     * @throws NullPointerException when {@code path} is {@code null}
+     */
+    public static BinaryContent from(Path path, String mediaType) throws IOException {
+        Objects.requireNonNull(path, "path");
+        Path fileName = path.getFileName();
+        return new BinaryContent(
+            Files.readAllBytes(path),
+            mediaType,
+            fileName == null ? null : fileName.toString()
+        );
+    }
 
     /**
      * Creates binary input while normalizing its data and media type.

@@ -5,6 +5,14 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Automatic immutable request preparation in `AiClient`, with host-auditable
+  detection metadata exposed by `AiRequest`.
+- Safe, repeatable standard prompt expansion through `AiPromptTemplate`.
+- Filesystem-to-binary, generated-image MIME, token-usage aggregation, response
+  text-copy, and model display-label conveniences.
+
 ## [0.1.0] - 2026-08-06
 
 ### Added

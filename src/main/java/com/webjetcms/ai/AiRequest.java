@@ -1,6 +1,12 @@
 package com.webjetcms.ai;
 
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.Objects;
+import java.util.Set;
+
+import com.webjetcms.ai.security.PromptInjectionDefense;
+import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 
 /** Immutable request passed from a host application to an AI provider. */
 public final class AiRequest {
@@ -13,6 +19,7 @@ public final class AiRequest {
     private final BinaryContent inputMedia;
     private final boolean store;
     private final ImageOptions imageOptions;
+    private final Set<UntrustedSource> suspiciousSources;
 
     private AiRequest(Builder builder) {
         operation = Objects.requireNonNullElse(builder.operation, AiOperation.TEXT);
@@ -23,6 +30,7 @@ public final class AiRequest {
         inputMedia = builder.inputMedia;
         store = builder.store;
         imageOptions = builder.imageOptions;
+        suspiciousSources = detectSuspiciousSources(inputText, userPrompt);
     }
 
     /**
@@ -87,6 +95,29 @@ public final class AiRequest {
      * @return image options, or {@code null} to use provider defaults
      */
     public ImageOptions imageOptions() { return imageOptions; }
+
+    /**
+     * Returns untrusted fields whose content matched prompt-injection patterns or reserved markers.
+     *
+     * <p>The request retains the original field values. {@link AiClient} applies prompt defenses
+     * automatically to an immutable copy before delegating to a provider.</p>
+     *
+     * @return immutable set of suspicious untrusted sources
+     */
+    public Set<UntrustedSource> suspiciousSources() { return suspiciousSources; }
+
+    private static Set<UntrustedSource> detectSuspiciousSources(String inputText, String userPrompt) {
+        EnumSet<UntrustedSource> sources = EnumSet.noneOf(UntrustedSource.class);
+        if (PromptInjectionDefense.protectUntrustedText(inputText, UntrustedSource.INPUT_TEXT)
+                .suspiciousContentDetected()) {
+            sources.add(UntrustedSource.INPUT_TEXT);
+        }
+        if (PromptInjectionDefense.protectUntrustedText(userPrompt, UntrustedSource.USER_PROMPT)
+                .suspiciousContentDetected()) {
+            sources.add(UntrustedSource.USER_PROMPT);
+        }
+        return Collections.unmodifiableSet(sources);
+    }
 
     /** Builds an immutable {@link AiRequest}. */
     public static final class Builder {

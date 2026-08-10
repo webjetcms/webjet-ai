@@ -72,6 +72,7 @@ public final class AiClient implements AutoCloseable {
 
     /**
      * Executes a non-streaming request using a registered provider.
+     * The provider receives an immutable copy with prompt defenses applied.
      *
      * @param providerId registered provider identifier
      * @param request operation and inputs to execute
@@ -84,7 +85,7 @@ public final class AiClient implements AutoCloseable {
         throws AiProviderException {
         AiProvider selectedProvider = provider(providerId);
         try {
-            return selectedProvider.execute(request, config);
+            return selectedProvider.execute(prepareRequest(request), config);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
@@ -94,6 +95,7 @@ public final class AiClient implements AutoCloseable {
 
     /**
      * Executes a streaming request using a registered provider.
+     * The provider receives an immutable copy with prompt defenses applied.
      *
      * @param providerId registered provider identifier
      * @param request operation and inputs to execute
@@ -111,7 +113,7 @@ public final class AiClient implements AutoCloseable {
     ) throws AiProviderException {
         AiProvider selectedProvider = provider(providerId);
         try {
-            return selectedProvider.stream(request, config, listener);
+            return selectedProvider.stream(prepareRequest(request), config, listener);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
@@ -126,6 +128,10 @@ public final class AiClient implements AutoCloseable {
     ) {
         return new AiProviderException(providerId, "Unexpected AI provider failure", cause)
             .redactSecrets(config);
+    }
+
+    private static AiRequest prepareRequest(AiRequest request) {
+        return request == null ? null : AiRequestPreparer.prepare(request);
     }
 
     private AiProvider provider(String providerId) {

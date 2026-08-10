@@ -39,4 +39,14 @@ public record AiResponse(
     public static AiResponse text(String text) {
         return new AiResponse(text, List.of(), TokenUsage.EMPTY, null);
     }
+
+    /**
+     * Returns a copy with replaced text and unchanged media, usage, and completion metadata.
+     *
+     * @param replacementText replacement response text, possibly {@code null}
+     * @return response copy containing the replacement text
+     */
+    public AiResponse withText(String replacementText) {
+        return new AiResponse(replacementText, media, usage, finishReason);
+    }
 }

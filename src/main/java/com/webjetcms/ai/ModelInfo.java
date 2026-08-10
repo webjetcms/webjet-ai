@@ -18,4 +18,13 @@ public record ModelInfo(String id, String displayName, Long createdAt) {
     public ModelInfo(String id, String displayName) {
         this(id, displayName, null);
     }
+
+    /**
+     * Returns the human-readable name, falling back to the provider identifier.
+     *
+     * @return non-blank display label when either source value is non-blank
+     */
+    public String displayLabel() {
+        return displayName == null || displayName.isBlank() ? id : displayName;
+    }
 }

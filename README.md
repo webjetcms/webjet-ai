@@ -61,6 +61,39 @@ try (AiClient client = AiClient.of(new OpenAiProvider())) {
 `AiClient` receives provider instances explicitly. The bundled providers use the
 identifiers `openai`, `gemini`, and `openrouter`.
 
+## Automatic request preparation
+
+Pass the immutable `AiRequest` directly to `AiClient.execute(...)` or
+`AiClient.stream(...)`. The client automatically prepares a protected copy before
+delegating to the provider: it hardens trusted instructions and protects untrusted
+input text and user prompts. The original request keeps its readable input values.
+
+Hosts with an audit trail can inspect the immutable `request.suspiciousSources()`
+metadata. Ordinary callers do not need to handle request preparation or detection
+metadata. Bundled providers also apply the defenses idempotently so direct provider
+calls remain protected.
+
+Standard `{inputText}` and `{userPrompt}` instruction placeholders can be expanded
+without giving replacement values instruction authority:
+
+```java
+AiPromptTemplate.ExpansionResult expanded = AiPromptTemplate.expand(
+    "Summarize: {inputText}\nStyle: {userPrompt}",
+    sourceText,
+    userPrompt
+);
+```
+
+Expansion is single-pass and repeat-safe: placeholders introduced inside an
+untrusted value remain literal, canonical untrusted-data blocks are not scanned
+again, and consumed or suspicious fields are reported to the host.
+
+## Media and response values
+
+Additional immutable value helpers include `BinaryContent.from(path, mediaType)`,
+`GeneratedMedia.isImage()` and `suggestedFileExtension()`, `TokenUsage.plus(...)`,
+`AiResponse.withText(...)`, and `ModelInfo.displayLabel()`.
+
 ## Host-supplied configuration
 
 The host application owns credentials and runtime settings. Resolve them

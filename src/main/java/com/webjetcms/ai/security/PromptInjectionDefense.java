@@ -216,6 +216,16 @@ public final class PromptInjectionDefense {
     }
 
     /**
+     * Indicates whether protected text carries the library's suspicious-content notice.
+     *
+     * @param value protected or plain text, possibly {@code null}
+     * @return {@code true} when the canonical security notice is present
+     */
+    public static boolean hasSuspiciousContentNotice(String value) {
+        return value != null && value.contains(SECURITY_NOTE);
+    }
+
+    /**
      * Reconstructs the canonical wrapper from its data payload before trusting it.
      * This rejects duplicate/forged boundary markers and also rescans an idempotent
      * value instead of trusting a caller-supplied security note.
@@ -341,7 +351,7 @@ public final class PromptInjectionDefense {
         if (isBlank(value)) return false;
 
         for (String marker : getReservedMarkers()) {
-            if (value.contains(marker)) return true;
+            if (value.contains(marker) || value.contains(neutralizedReservedMarker(marker))) return true;
         }
         return false;
     }
@@ -351,18 +361,20 @@ public final class PromptInjectionDefense {
 
         String safeValue = value;
         for (String marker : getReservedMarkers()) {
-            safeValue = safeValue.replace(
-                marker,
-                "RESERVED_MARKER(" + marker.substring(1, marker.length() - 1) + ")"
-            );
+            safeValue = safeValue.replace(marker, neutralizedReservedMarker(marker));
         }
         return safeValue;
+    }
+
+    private static String neutralizedReservedMarker(String marker) {
+        return "RESERVED_MARKER(" + marker.substring(1, marker.length() - 1) + ")";
     }
 
     private static List<String> getReservedMarkers() {
         return List.of(
             SECURITY_BEGIN,
             SECURITY_END,
+            SECURITY_NOTE,
             TASK_BEGIN,
             TASK_END,
             getUntrustedBeginMarker(UntrustedSource.INPUT_TEXT),
@@ -372,11 +384,23 @@ public final class PromptInjectionDefense {
         );
     }
 
-    private static String getUntrustedBeginMarker(UntrustedSource source) {
+    /**
+     * Returns the canonical opening boundary for an untrusted source.
+     *
+     * @param source untrusted source
+     * @return opening boundary marker
+     */
+    public static String getUntrustedBeginMarker(UntrustedSource source) {
         return "[BEGIN_UNTRUSTED_" + source.name() + "]";
     }
 
-    private static String getUntrustedEndMarker(UntrustedSource source) {
+    /**
+     * Returns the canonical closing boundary for an untrusted source.
+     *
+     * @param source untrusted source
+     * @return closing boundary marker
+     */
+    public static String getUntrustedEndMarker(UntrustedSource source) {
         return "[END_UNTRUSTED_" + source.name() + "]";
     }
 

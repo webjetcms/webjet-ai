@@ -6,7 +6,9 @@ import java.util.List;
  * Service-provider interface implemented by each supported AI backend.
  *
  * <p>Provider implementations may own reusable transport resources. Applications
- * should therefore reuse provider instances and close them during shutdown.</p>
+ * should therefore reuse provider instances and close them during shutdown.
+ * Applications normally invoke providers through {@link AiClient}, which applies
+ * prompt defenses before delegation.</p>
  */
 public interface AiProvider extends AutoCloseable {
 
