@@ -11,6 +11,7 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
@@ -76,6 +77,7 @@ public final class OpenAiProvider implements AiProvider {
     public OpenAiProvider() {
         this(HttpClients.custom()
             .useSystemProperties()
+            .disableAutomaticRetries()
             .disableRedirectHandling()
             .disableCookieManagement()
             .setMaxConnTotal(MAX_CONNECTIONS)
@@ -640,7 +642,7 @@ public final class OpenAiProvider implements AiProvider {
     }
 
     private static String mediaType(String format) {
-        String normalized = format == null ? "png" : format.toLowerCase().replace(".", "");
+        String normalized = format == null ? "png" : format.toLowerCase(Locale.ROOT).replace(".", "");
         return switch (normalized) {
             case "jpg", "jpeg" -> "image/jpeg";
             case "webp" -> "image/webp";

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -166,6 +167,27 @@ class ProviderTransportTest {
         }
 
         assertEquals("output_modalities=all", query.get());
+    }
+
+    @Test
+    void openAiDoesNotAutomaticallyRetryDroppedConnections() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/no-retry-openai/models", exchange -> {
+            requests.incrementAndGet();
+            exchange.close();
+        });
+
+        try (OpenAiProvider provider = new OpenAiProvider()) {
+            AiProviderException exception = assertThrows(
+                AiProviderException.class,
+                () -> provider.listModels(config("openai-key", "/no-retry-openai/"))
+            );
+
+            assertEquals(-1, exception.statusCode());
+            assertTrue(exception.retryable());
+        }
+
+        assertEquals(1, requests.get());
     }
 
     @Test

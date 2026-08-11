@@ -19,6 +19,10 @@ uses [Semantic Versioning](https://semver.org/).
 - Local release signing with GPG keyring keys, including interactive version
   confirmation before publication.
 - Signed stable and snapshot artifact publication to GitHub Packages.
+- Reused immutable prompt-protection results while preparing provider requests,
+  avoiding redundant scans of untrusted text.
+- Disabled automatic HTTP retries for OpenAI, aligning its transport policy
+  with the bundled Gemini and OpenRouter providers.
 
 ## [0.1.0] - 2026-08-06
 

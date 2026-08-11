@@ -11,6 +11,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import org.apache.http.HttpEntity;
 import org.apache.http.client.config.RequestConfig;
@@ -71,8 +72,8 @@ public final class OpenRouterProvider implements AiProvider {
     }
 
     OpenRouterProvider(CloseableHttpClient httpClient, ObjectMapper mapper) {
-        this.httpClient = httpClient;
-        this.mapper = mapper;
+        this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
+        this.mapper = Objects.requireNonNull(mapper, "mapper");
     }
 
     @Override

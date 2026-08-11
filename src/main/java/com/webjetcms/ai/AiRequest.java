@@ -6,6 +6,7 @@ import java.util.Objects;
 import java.util.Set;
 
 import com.webjetcms.ai.security.PromptInjectionDefense;
+import com.webjetcms.ai.security.PromptInjectionDefense.ProtectionResult;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 
 /** Immutable request passed from a host application to an AI provider. */
@@ -19,9 +20,23 @@ public final class AiRequest {
     private final BinaryContent inputMedia;
     private final boolean store;
     private final ImageOptions imageOptions;
+    private final ProtectionResult inputTextProtection;
+    private final ProtectionResult userPromptProtection;
     private final Set<UntrustedSource> suspiciousSources;
 
     private AiRequest(Builder builder) {
+        this(
+            builder,
+            PromptInjectionDefense.protectUntrustedText(builder.inputText, UntrustedSource.INPUT_TEXT),
+            PromptInjectionDefense.protectUntrustedText(builder.userPrompt, UntrustedSource.USER_PROMPT)
+        );
+    }
+
+    private AiRequest(
+        Builder builder,
+        ProtectionResult inputTextProtection,
+        ProtectionResult userPromptProtection
+    ) {
         operation = Objects.requireNonNullElse(builder.operation, AiOperation.TEXT);
         model = builder.model;
         instructions = builder.instructions;
@@ -30,7 +45,24 @@ public final class AiRequest {
         inputMedia = builder.inputMedia;
         store = builder.store;
         imageOptions = builder.imageOptions;
-        suspiciousSources = detectSuspiciousSources(inputText, userPrompt);
+        this.inputTextProtection = Objects.requireNonNull(inputTextProtection, "inputTextProtection");
+        this.userPromptProtection = Objects.requireNonNull(userPromptProtection, "userPromptProtection");
+        suspiciousSources = collectSuspiciousSources(inputTextProtection, userPromptProtection);
+    }
+
+    /** Creates a provider-facing copy that reuses the source's immutable protection results. */
+    static AiRequest preparedCopy(AiRequest source, String preparedInstructions) {
+        Objects.requireNonNull(source, "source");
+        Builder builder = new Builder()
+            .operation(source.operation)
+            .model(source.model)
+            .instructions(preparedInstructions)
+            .inputText(source.inputTextProtection.protectedText())
+            .userPrompt(source.userPromptProtection.protectedText())
+            .inputMedia(source.inputMedia)
+            .store(source.store)
+            .imageOptions(source.imageOptions);
+        return new AiRequest(builder, source.inputTextProtection, source.userPromptProtection);
     }
 
     /**
@@ -106,14 +138,15 @@ public final class AiRequest {
      */
     public Set<UntrustedSource> suspiciousSources() { return suspiciousSources; }
 
-    private static Set<UntrustedSource> detectSuspiciousSources(String inputText, String userPrompt) {
+    private static Set<UntrustedSource> collectSuspiciousSources(
+        ProtectionResult inputTextProtection,
+        ProtectionResult userPromptProtection
+    ) {
         EnumSet<UntrustedSource> sources = EnumSet.noneOf(UntrustedSource.class);
-        if (PromptInjectionDefense.protectUntrustedText(inputText, UntrustedSource.INPUT_TEXT)
-                .suspiciousContentDetected()) {
+        if (inputTextProtection.suspiciousContentDetected()) {
             sources.add(UntrustedSource.INPUT_TEXT);
         }
-        if (PromptInjectionDefense.protectUntrustedText(userPrompt, UntrustedSource.USER_PROMPT)
-                .suspiciousContentDetected()) {
+        if (userPromptProtection.suspiciousContentDetected()) {
             sources.add(UntrustedSource.USER_PROMPT);
         }
         return Collections.unmodifiableSet(sources);

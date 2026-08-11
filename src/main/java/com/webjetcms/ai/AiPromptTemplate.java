@@ -75,7 +75,7 @@ public final class AiPromptTemplate {
         Map<UntrustedSource, PreparedValue> preparedValues = new EnumMap<>(UntrustedSource.class);
         EnumSet<UntrustedSource> consumedSources = EnumSet.noneOf(UntrustedSource.class);
         EnumSet<UntrustedSource> suspiciousSources = EnumSet.noneOf(UntrustedSource.class);
-        StringBuffer expanded = new StringBuffer();
+        StringBuilder expanded = new StringBuilder();
 
         do {
             if (matcher.group().startsWith("[BEGIN_UNTRUSTED_")) {
