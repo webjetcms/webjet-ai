@@ -7,8 +7,24 @@ plugins {
 
 def releaseVersion = providers.gradleProperty('releaseVersion').getOrElse('0.1.0-SNAPSHOT')
 def signingKey = providers.gradleProperty('signingKey')
+def signingKeyId = providers.gradleProperty('signingKeyId')
 def signingPassword = providers.gradleProperty('signingPassword')
 def centralStagingDirectory = layout.buildDirectory.dir('central-staging')
+def githubPackagesUrl = providers.gradleProperty('githubPackagesUrl')
+    .getOrElse('https://maven.pkg.github.com/webjetcms/webjet-ai')
+def githubPackagesUsername = providers.gradleProperty('githubUsername')
+    .orElse(providers.environmentVariable('GITHUB_USERNAME'))
+def githubPackagesToken = providers.gradleProperty('githubToken')
+    .orElse(providers.environmentVariable('GITHUB_TOKEN'))
+
+String signingKeyValue = signingKey.orNull
+String signingKeyIdValue = signingKeyId.orNull
+String gnupgKeyNameValue = providers.gradleProperty('signing.gnupg.keyName').orNull
+boolean useInMemorySigningKey = signingKeyValue != null && signingKeyValue.contains('BEGIN PGP PRIVATE KEY BLOCK')
+String localGpgKeyName = signingKeyIdValue ?: gnupgKeyNameValue ?: (useInMemorySigningKey ? null : signingKeyValue)
+boolean skipReleaseConfirmation = providers.gradleProperty('skipReleaseConfirmation')
+    .map { it.toBoolean() }
+    .getOrElse(false)
 
 group = 'com.webjetcms'
 version = releaseVersion
@@ -159,12 +175,33 @@ publishing {
             name = 'CentralStaging'
             url = centralStagingDirectory
         }
+        maven {
+            name = 'GitHubPackages'
+            url = uri(githubPackagesUrl)
+            credentials {
+                username = githubPackagesUsername.orNull
+                password = githubPackagesToken.orNull
+            }
+        }
     }
 }
 
-if (signingKey.isPresent()) {
+if (useInMemorySigningKey == false && localGpgKeyName != null) {
+    if (project.findProperty('signing.gnupg.keyName') == null) {
+        project.ext.set('signing.gnupg.keyName', localGpgKeyName)
+    }
+    if (signingPassword.isPresent() && project.findProperty('signing.gnupg.passphrase') == null) {
+        project.ext.set('signing.gnupg.passphrase', signingPassword.get())
+    }
+}
+
+if (useInMemorySigningKey || localGpgKeyName != null) {
     signing {
-        useInMemoryPgpKeys(signingKey.get(), signingPassword.orNull)
+        if (useInMemorySigningKey) {
+            useInMemoryPgpKeys(signingKeyValue, signingPassword.orNull)
+        } else {
+            useGpgCmd()
+        }
         sign publishing.publications.mavenJava
     }
 }
@@ -240,12 +277,86 @@ def validateReleaseConfiguration = tasks.register('validateReleaseConfiguration'
                 "Central publication requires a stable semantic version such as 0.1.0; received ${selectedVersion}"
             )
         }
-        if (signingKey.isPresent() == false || signingKey.get().isBlank()) {
-            throw new GradleException('The signingKey Gradle property is required for Central publication')
+        if (useInMemorySigningKey == false && localGpgKeyName == null) {
+            throw new GradleException(
+                'Central publication requires either signingKey as an ASCII-armored private key or signingKeyId/signing.gnupg.keyName for a local GPG key'
+            )
         }
-        if (signingPassword.isPresent() == false || signingPassword.get().isBlank()) {
-            throw new GradleException('The signingPassword Gradle property is required for Central publication')
+        if (useInMemorySigningKey && (signingPassword.isPresent() == false || signingPassword.get().isBlank())) {
+            throw new GradleException('The signingPassword Gradle property is required when signingKey contains an in-memory private key')
         }
+    }
+}
+
+def validateGitHubPackagesConfiguration = tasks.register('validateGitHubPackagesConfiguration') {
+    group = 'publishing'
+    description = 'Checks the version, signing setup, and GitHub Packages credentials.'
+    inputs.property('releaseVersion', releaseVersion)
+
+    doLast {
+        String selectedVersion = releaseVersion
+        if ((selectedVersion ==~ /(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-SNAPSHOT)?/) == false) {
+            throw new GradleException(
+                "GitHub Packages publication requires a semantic version such as 0.1.0 or 0.1.0-SNAPSHOT; received ${selectedVersion}"
+            )
+        }
+        if (useInMemorySigningKey == false && localGpgKeyName == null) {
+            throw new GradleException(
+                'GitHub Packages publication requires either signingKey as an ASCII-armored private key or signingKeyId/signing.gnupg.keyName for a local GPG key'
+            )
+        }
+        if (useInMemorySigningKey && (signingPassword.isPresent() == false || signingPassword.get().isBlank())) {
+            throw new GradleException('The signingPassword Gradle property is required when signingKey contains an in-memory private key')
+        }
+        if (githubPackagesUsername.isPresent() == false || githubPackagesUsername.get().isBlank()) {
+            throw new GradleException('GitHub Packages publication requires githubUsername Gradle property or GITHUB_USERNAME environment variable')
+        }
+        if (githubPackagesToken.isPresent() == false || githubPackagesToken.get().isBlank()) {
+            throw new GradleException('GitHub Packages publication requires githubToken Gradle property or GITHUB_TOKEN environment variable')
+        }
+    }
+}
+
+def waitForConfirm = tasks.register('waitForConfirm') {
+    group = 'publishing'
+    description = 'Prints the resolved releaseVersion and waits for Enter before continuing a local release.'
+    inputs.property('releaseVersion', releaseVersion)
+    onlyIf { skipReleaseConfirmation == false }
+
+    doLast {
+        String message = "Check the artifact version (${releaseVersion}). Press Enter to continue or Ctrl+C to abort..."
+        def console = System.console()
+        if (console != null) {
+            console.readLine('%s', message)
+            return
+        }
+
+        File terminalDevice = new File('/dev/tty')
+        if (terminalDevice.exists() && terminalDevice.canRead()) {
+            try {
+                terminalDevice.withReader('UTF-8') { reader ->
+                    print(message)
+                    System.out.flush()
+                    reader.readLine()
+                }
+                return
+            } catch (IOException ignored) {
+                // Fall through to the non-interactive path when no controlling TTY is attached.
+            }
+        }
+
+        println(message)
+        println('No interactive console detected, continuing without confirmation prompt.')
+    }
+}
+
+tasks.register('printReleaseVersion') {
+    group = 'help'
+    description = 'Prints the resolved releaseVersion without additional formatting.'
+    inputs.property('releaseVersion', releaseVersion)
+
+    doLast {
+        println(releaseVersion)
     }
 }
 
@@ -253,6 +364,23 @@ def prepareCentralStaging = tasks.register('prepareCentralStaging', Delete) {
     group = 'publishing'
     description = 'Removes stale files before creating a Central deployment bundle.'
     delete centralStagingDirectory
+}
+
+validateReleaseConfiguration.configure {
+    dependsOn waitForConfirm
+}
+
+validateGitHubPackagesConfiguration.configure {
+    dependsOn waitForConfirm
+}
+
+tasks.withType(Sign).configureEach {
+    mustRunAfter validateReleaseConfiguration
+    mustRunAfter validateGitHubPackagesConfiguration
+}
+
+tasks.named('publishMavenJavaPublicationToGitHubPackagesRepository') {
+    dependsOn validateGitHubPackagesConfiguration
 }
 
 tasks.named('publishMavenJavaPublicationToCentralStagingRepository') {

@@ -16,6 +16,9 @@ uses [Semantic Versioning](https://semver.org/).
   text-copy, and model display-label conveniences.
 - Provider-specific request examples and capability guides for OpenAI, Gemini,
   and OpenRouter.
+- Local release signing with GPG keyring keys, including interactive version
+  confirmation before publication.
+- Signed stable and snapshot artifact publication to GitHub Packages.
 
 ## [0.1.0] - 2026-08-06
 

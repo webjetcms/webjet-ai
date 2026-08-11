@@ -168,6 +168,38 @@ approval, CI builds a signed Maven bundle, waits for Central publication,
 verifies anonymous resolution, and then creates the GitHub Release. Snapshot
 artifacts are not published.
 
+Local release builds accept either an ASCII-armored private key in the
+`signingKey` Gradle property or a local GPG key selection via
+`signingKeyId=0x...` or `signing.gnupg.keyName=0x...`. When a key ID is used,
+the build switches to `gpg` and reads the secret key from the local GPG
+keyring, matching traditional Maven `gpg:sign-and-deploy-file` usage. Keep
+these properties in `~/.gradle/gradle.properties` or CI secrets, for example:
+
+```properties
+releaseVersion=0.1.0
+signingKeyId=0x36F2327F
+```
+
+If you sign with an in-memory exported private key instead, also provide
+`signingPassword`. To create the Central bundle locally, run:
+
+```shell
+./gradlew centralBundle -PreleaseVersion=0.1.0 -PsigningKeyId=0x36F2327F
+```
+
+During a local interactive run, Gradle prints the resolved `releaseVersion` and
+waits for Enter before the release flow continues. In CI or other non-interactive
+environments, the confirmation step logs the version and continues automatically.
+
+GitHub Packages deployments use the same signed `mavenJava` publication and accept
+both stable and `-SNAPSHOT` semantic versions. Configure `githubUsername` and
+`githubToken` in `~/.gradle/gradle.properties` or export `GITHUB_USERNAME` and
+`GITHUB_TOKEN`, then run:
+
+```shell
+./gradlew publishMavenJavaPublicationToGitHubPackagesRepository -PreleaseVersion=0.1.0-SNAPSHOT
+```
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development rules,
 [SECURITY.md](SECURITY.md) for responsible vulnerability reporting, and
 [PROVENANCE.md](PROVENANCE.md) for the extraction history.
