@@ -42,6 +42,7 @@ import com.webjetcms.ai.AiClient;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
+import com.webjetcms.ai.provider.gemini.GeminiProvider;
 import com.webjetcms.ai.provider.openai.OpenAiProvider;
 
 try (AiClient client = AiClient.of(new OpenAiProvider())) {
@@ -54,12 +55,33 @@ try (AiClient client = AiClient.of(new OpenAiProvider())) {
         .store(false)
         .build();
 
-    AiResponse response = client.execute("openai", request, config);
+    AiResponse response = client.execute(request, config);
 }
 ```
 
-`AiClient` receives provider instances explicitly. The bundled providers use the
-identifiers `openai`, `gemini`, and `openrouter`.
+When `AiClient` contains one provider, `execute`, `stream`, and `listModels`
+select it automatically. The bundled provider identifiers `openai`, `gemini`,
+and `openrouter` are needed only when one client contains multiple providers:
+
+```java
+try (AiClient client = AiClient.of(new OpenAiProvider(), new GeminiProvider())) {
+    AiResponse response = client.execute("gemini", request, geminiConfig);
+}
+```
+
+The provider-ID overloads are also available for streaming and model discovery.
+Identifier-free calls fail clearly if the client contains zero or multiple
+providers.
+
+## Provider guides
+
+Each provider guide shows how to build `AiRequest` for text, streaming,
+multimodal input, image generation, and image editing. The capability tables also
+identify fields that a particular adapter forwards or ignores.
+
+- [OpenAI](docs/providers/openai.md)
+- [Google Gemini](docs/providers/gemini.md)
+- [OpenRouter](docs/providers/openrouter.md)
 
 ## Automatic request preparation
 

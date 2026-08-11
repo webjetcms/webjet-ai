@@ -51,6 +51,18 @@ public final class AiClient implements AutoCloseable {
     }
 
     /**
+     * Loads the model catalogue from the only registered provider.
+     *
+     * @param config provider credentials and connection settings
+     * @return models reported by the registered provider
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws AiProviderException when the provider cannot load or parse its model catalogue
+     */
+    public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
+        return listModels(soleProviderId(), config);
+    }
+
+    /**
      * Loads the model catalogue from a registered provider.
      *
      * @param providerId registered provider identifier
@@ -68,6 +80,20 @@ public final class AiClient implements AutoCloseable {
         } catch (RuntimeException exception) {
             throw unexpectedProviderFailure(providerId, exception, config);
         }
+    }
+
+    /**
+     * Executes a non-streaming request using the only registered provider.
+     * The provider receives an immutable copy with prompt defenses applied.
+     *
+     * @param request operation and inputs to execute
+     * @param config provider credentials and connection settings
+     * @return the completed provider response
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws AiProviderException when request validation, transport, or response parsing fails
+     */
+    public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
+        return execute(soleProviderId(), request, config);
     }
 
     /**
@@ -91,6 +117,25 @@ public final class AiClient implements AutoCloseable {
         } catch (RuntimeException exception) {
             throw unexpectedProviderFailure(providerId, exception, config);
         }
+    }
+
+    /**
+     * Executes a streaming request using the only registered provider.
+     * The provider receives an immutable copy with prompt defenses applied.
+     *
+     * @param request operation and inputs to execute
+     * @param config provider credentials and connection settings
+     * @param listener callback that receives each decoded text fragment
+     * @return the completed response after the stream terminates normally
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws AiProviderException when validation, transport, parsing, or the listener fails
+     */
+    public AiResponse stream(
+        AiRequest request,
+        AiProviderConfig config,
+        AiStreamListener listener
+    ) throws AiProviderException {
+        return stream(soleProviderId(), request, config, listener);
     }
 
     /**
@@ -132,6 +177,16 @@ public final class AiClient implements AutoCloseable {
 
     private static AiRequest prepareRequest(AiRequest request) {
         return request == null ? null : AiRequestPreparer.prepare(request);
+    }
+
+    private String soleProviderId() {
+        if (providers.size() != 1) {
+            throw new IllegalStateException(
+                "Provider identifier can be omitted only when exactly one AI provider is registered; "
+                    + "registered count: " + providers.size()
+            );
+        }
+        return providers.keySet().iterator().next();
     }
 
     private AiProvider provider(String providerId) {

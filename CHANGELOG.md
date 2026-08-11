@@ -9,9 +9,13 @@ uses [Semantic Versioning](https://semver.org/).
 
 - Automatic immutable request preparation in `AiClient`, with host-auditable
   detection metadata exposed by `AiRequest`.
+- Identifier-free `execute`, `stream`, and `listModels` overloads for clients
+  containing exactly one provider.
 - Safe, repeatable standard prompt expansion through `AiPromptTemplate`.
 - Filesystem-to-binary, generated-image MIME, token-usage aggregation, response
   text-copy, and model display-label conveniences.
+- Provider-specific request examples and capability guides for OpenAI, Gemini,
+  and OpenRouter.
 
 ## [0.1.0] - 2026-08-06
 
