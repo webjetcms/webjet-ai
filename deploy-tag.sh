@@ -91,6 +91,7 @@ fi
 echo "-------------------------------------"
 echo "Release version: ${release_version}"
 echo "Tag: ${tag_name}"
+echo "Tag message: ${tag_message}"
 echo "Commit: ${local_commit}"
 echo "Tagger email: ${git_user_email}"
 echo "Signing key: ${git_signing_key}"
