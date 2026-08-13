@@ -88,6 +88,7 @@ if [ -z "${git_signing_key}" ]; then
 	exit 1
 fi
 
+echo "-------------------------------------"
 echo "Release version: ${release_version}"
 echo "Tag: ${tag_name}"
 echo "Commit: ${local_commit}"
