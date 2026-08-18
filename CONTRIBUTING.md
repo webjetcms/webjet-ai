@@ -23,8 +23,8 @@ Keep the library framework-neutral:
 
 - Use a focused branch and pull request for each change.
 - Document user-visible changes under `Unreleased` in `CHANGELOG.md`.
-- Preserve the public `com.webjetcms.ai` API where possible. Call out necessary
-  incompatibilities explicitly while the project remains on `0.x` versions.
+- Preserve the public `com.webjetcms.ai` API. Call out any necessary
+  incompatibility explicitly and release it only in an appropriate major version.
 - Do not commit generated `build/` output or credentials.
 
 Releases are produced only from protected version tags by the repository's

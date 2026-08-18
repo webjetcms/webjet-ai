@@ -9,8 +9,5 @@ public enum AiOperation {
     GENERATE_IMAGE,
 
     /** Edits an input image according to a text prompt. */
-    EDIT_IMAGE,
-
-    /** Creates numerical embedding vectors from one or more text inputs. */
-    EMBEDDING
+    EDIT_IMAGE
 }

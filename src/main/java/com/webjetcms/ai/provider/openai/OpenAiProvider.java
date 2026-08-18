@@ -43,6 +43,8 @@ import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.BinaryContent;
 import com.webjetcms.ai.EmbeddingOptions;
+import com.webjetcms.ai.EmbeddingRequest;
+import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.ImageOptions;
@@ -132,12 +134,52 @@ public final class OpenAiProvider implements AiProvider {
                 case TEXT -> executeText(request, config);
                 case GENERATE_IMAGE -> generateImage(request, config);
                 case EDIT_IMAGE -> editImage(request, config);
-                case EMBEDDING -> executeEmbedding(request, config);
             };
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
             throw new AiProviderException(PROVIDER_ID, "Could not create the OpenAI request", exception)
+                .redactSecrets(config);
+        }
+    }
+
+    @Override
+    public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
+        throws AiProviderException {
+        return invokeAtBoundary(config, () -> embedInternal(request, config));
+    }
+
+    private EmbeddingResponse embedInternal(EmbeddingRequest request, AiProviderConfig config)
+        throws AiProviderException {
+        EmbeddingOptions options = requireEmbeddingRequest(request);
+        requireConfigured(config);
+
+        ObjectNode body = MAPPER.createObjectNode();
+        body.put("model", request.model());
+        if (options.dimensions() != null) {
+            body.put("dimensions", options.dimensions());
+        }
+        body.put("encoding_format", "float");
+        ArrayNode input = body.putArray("input");
+        request.inputs().forEach(input::add);
+
+        HttpResult result = executeForResult(jsonPost(endpoint(config, EMBEDDINGS_PATH), body), config);
+        try {
+            return parseEmbeddingResponse(
+                result.body(),
+                request.inputs().size(),
+                options.dimensions(),
+                result.statusCode()
+            );
+        } catch (AiProviderException exception) {
+            throw exception.redactSecrets(config);
+        } catch (IOException | RuntimeException exception) {
+            throw invalidResponse(
+                result.statusCode(),
+                "Could not parse the OpenAI embedding response",
+                result.body(),
+                exception
+            )
                 .redactSecrets(config);
         }
     }
@@ -211,26 +253,6 @@ public final class OpenAiProvider implements AiProvider {
             throw exception.redactSecrets(config);
         } catch (IOException | RuntimeException exception) {
             throw invalidResponse("Could not parse the OpenAI text response", response, exception)
-                .redactSecrets(config);
-        }
-    }
-
-    private AiResponse executeEmbedding(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        EmbeddingOptions options = requireEmbeddingRequest(request);
-        ObjectNode body = MAPPER.createObjectNode();
-        body.put("model", request.model());
-        body.put("dimensions", options.dimensions());
-        body.put("encoding_format", "float");
-        ArrayNode input = body.putArray("input");
-        request.embeddingInputs().forEach(input::add);
-
-        String response = executeForString(jsonPost(endpoint(config, EMBEDDINGS_PATH), body), config);
-        try {
-            return parseEmbeddingResponse(response, request.embeddingInputs().size(), options.dimensions());
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
-        } catch (IOException | RuntimeException exception) {
-            throw invalidResponse("Could not parse the OpenAI embedding response", response, exception)
                 .redactSecrets(config);
         }
     }
@@ -452,40 +474,96 @@ public final class OpenAiProvider implements AiProvider {
         return new AiResponse(null, media, parseUsage(root.path("usage")), responseStatus(root));
     }
 
-    private static AiResponse parseEmbeddingResponse(String response, int expectedCount, int dimensions)
+    private static EmbeddingResponse parseEmbeddingResponse(
+        String response,
+        int expectedCount,
+        Integer dimensions,
+        int statusCode
+    )
         throws IOException, AiProviderException {
         JsonNode root = MAPPER.readTree(response);
         JsonNode data = root == null ? null : root.get("data");
         if (data == null || data.isArray() == false || data.size() != expectedCount) {
-            throw invalidResponse("OpenAI returned an unexpected number of embeddings", response, null);
+            throw invalidResponse(
+                statusCode,
+                "OpenAI returned an unexpected number of embeddings",
+                response,
+                null
+            );
         }
 
         EmbeddingVector[] ordered = new EmbeddingVector[expectedCount];
+        Integer actualDimensions = dimensions;
         for (JsonNode item : data) {
             JsonNode indexNode = item.get("index");
             if (indexNode == null || indexNode.isIntegralNumber() == false || indexNode.canConvertToInt() == false) {
-                throw invalidResponse("OpenAI embedding response has no valid index", response, null);
+                throw invalidResponse(statusCode, "OpenAI embedding response has no valid index", response, null);
             }
             int index = indexNode.intValue();
             if (index < 0 || index >= expectedCount || ordered[index] != null) {
-                throw invalidResponse("OpenAI embedding response contains an invalid index", response, null);
+                throw invalidResponse(
+                    statusCode,
+                    "OpenAI embedding response contains an invalid index",
+                    response,
+                    null
+                );
             }
-            ordered[index] = parseEmbeddingVector(item.get("embedding"), dimensions, response);
+            JsonNode values = item.get("embedding");
+            actualDimensions = requireEmbeddingDimensions(values, actualDimensions, response, statusCode);
+            ordered[index] = parseEmbeddingVector(values, actualDimensions, response, statusCode);
         }
 
         for (EmbeddingVector vector : ordered) {
             if (vector == null) {
-                throw invalidResponse("OpenAI embedding response is missing an input index", response, null);
+                throw invalidResponse(
+                    statusCode,
+                    "OpenAI embedding response is missing an input index",
+                    response,
+                    null
+                );
             }
         }
-        return new AiResponse(null, List.of(), parseUsage(root.path("usage")), null, List.of(ordered));
+        return new EmbeddingResponse(List.of(ordered), parseUsage(root.path("usage")));
     }
 
-    private static EmbeddingVector parseEmbeddingVector(JsonNode values, int dimensions, String response)
+    private static int requireEmbeddingDimensions(
+        JsonNode values,
+        Integer expected,
+        String response,
+        int statusCode
+    )
+        throws AiProviderException {
+        int actual = values != null && values.isArray() ? values.size() : 0;
+        if (actual < 1) {
+            throw invalidResponse(
+                statusCode,
+                "OpenAI embedding response contains an empty vector",
+                response,
+                null
+            );
+        }
+        if (expected != null && actual != expected) {
+            throw invalidResponse(
+                statusCode,
+                "OpenAI returned " + actual + " embedding dimensions, expected " + expected,
+                response,
+                null
+            );
+        }
+        return actual;
+    }
+
+    private static EmbeddingVector parseEmbeddingVector(
+        JsonNode values,
+        int dimensions,
+        String response,
+        int statusCode
+    )
         throws AiProviderException {
         if (values == null || values.isArray() == false || values.size() != dimensions) {
             int actual = values != null && values.isArray() ? values.size() : 0;
             throw invalidResponse(
+                statusCode,
                 "OpenAI returned " + actual + " embedding dimensions, expected " + dimensions,
                 response,
                 null
@@ -495,11 +573,21 @@ public final class OpenAiProvider implements AiProvider {
         for (int index = 0; index < dimensions; index++) {
             JsonNode value = values.get(index);
             if (value.isNumber() == false) {
-                throw invalidResponse("OpenAI embedding response contains a non-numeric value", response, null);
+                throw invalidResponse(
+                    statusCode,
+                    "OpenAI embedding response contains a non-numeric value",
+                    response,
+                    null
+                );
             }
             float parsedValue = value.floatValue();
             if (Float.isFinite(parsedValue) == false) {
-                throw invalidResponse("OpenAI embedding response contains a non-finite value", response, null);
+                throw invalidResponse(
+                    statusCode,
+                    "OpenAI embedding response contains a non-finite value",
+                    response,
+                    null
+                );
             }
             vector[index] = parsedValue;
         }
@@ -525,7 +613,7 @@ public final class OpenAiProvider implements AiProvider {
     }
 
     private static void collectNumericDetails(JsonNode node, String prefix, Map<String, Long> target) {
-        node.fields().forEachRemaining(entry -> {
+        node.properties().forEach(entry -> {
             String key = prefix.isEmpty() ? entry.getKey() : prefix + "." + entry.getKey();
             JsonNode value = entry.getValue();
             if (value.isIntegralNumber()) {
@@ -537,6 +625,11 @@ public final class OpenAiProvider implements AiProvider {
     }
 
     private String executeForString(HttpRequestBase request, AiProviderConfig config) throws AiProviderException {
+        return executeForResult(request, config).body();
+    }
+
+    private HttpResult executeForResult(HttpRequestBase request, AiProviderConfig config)
+        throws AiProviderException {
         prepare(request, config, "application/json");
         try (CloseableHttpResponse response = httpClient.execute(request)) {
             int statusCode = response.getStatusLine().getStatusCode();
@@ -544,13 +637,15 @@ public final class OpenAiProvider implements AiProvider {
             if (isSuccessful(statusCode) == false) {
                 throw httpError(statusCode, body);
             }
-            return body;
+            return new HttpResult(statusCode, body);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (IOException exception) {
             throw transportFailure("OpenAI request failed", exception).redactSecrets(config);
         }
     }
+
+    private record HttpResult(int statusCode, String body) { }
 
     private static HttpPost jsonPost(URI endpoint, JsonNode body) {
         HttpPost post = new HttpPost(endpoint);
@@ -621,20 +716,23 @@ public final class OpenAiProvider implements AiProvider {
         }
     }
 
-    private static EmbeddingOptions requireEmbeddingRequest(AiRequest request) throws AiProviderException {
-        EmbeddingOptions options = request.embeddingOptions();
-        if (options == null) {
-            throw new AiProviderException(PROVIDER_ID, "OpenAI embedding options are required");
+    private static EmbeddingOptions requireEmbeddingRequest(EmbeddingRequest request)
+        throws AiProviderException {
+        if (request == null) {
+            throw new AiProviderException(PROVIDER_ID, "OpenAI embedding request is required");
         }
-        if (request.embeddingInputs().isEmpty()) {
+        if (isBlank(request.model())) {
+            throw new AiProviderException(PROVIDER_ID, "An OpenAI embedding model is required");
+        }
+        if (request.inputs().isEmpty()) {
             throw new AiProviderException(PROVIDER_ID, "At least one OpenAI embedding input is required");
         }
-        for (String input : request.embeddingInputs()) {
+        for (String input : request.inputs()) {
             if (isBlank(input)) {
                 throw new AiProviderException(PROVIDER_ID, "OpenAI embedding inputs must not be blank");
             }
         }
-        return options;
+        return request.options();
     }
 
     private static void addTextInput(ArrayNode inputs, String role, String value) {
@@ -800,6 +898,15 @@ public final class OpenAiProvider implements AiProvider {
     }
 
     private static AiProviderException invalidResponse(String message, String response, Throwable cause) {
-        return new AiProviderException(PROVIDER_ID, 200, message, response, false, cause);
+        return invalidResponse(200, message, response, cause);
+    }
+
+    private static AiProviderException invalidResponse(
+        int statusCode,
+        String message,
+        String response,
+        Throwable cause
+    ) {
+        return new AiProviderException(PROVIDER_ID, statusCode, message, response, false, cause);
     }
 }

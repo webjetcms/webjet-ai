@@ -2,7 +2,6 @@ package com.webjetcms.ai;
 
 import java.util.Collections;
 import java.util.EnumSet;
-import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 
@@ -21,8 +20,6 @@ public final class AiRequest {
     private final BinaryContent inputMedia;
     private final boolean store;
     private final ImageOptions imageOptions;
-    private final List<String> embeddingInputs;
-    private final EmbeddingOptions embeddingOptions;
     private final ProtectionResult inputTextProtection;
     private final ProtectionResult userPromptProtection;
     private final Set<UntrustedSource> suspiciousSources;
@@ -48,8 +45,6 @@ public final class AiRequest {
         inputMedia = builder.inputMedia;
         store = builder.store;
         imageOptions = builder.imageOptions;
-        embeddingInputs = builder.embeddingInputs == null ? List.of() : List.copyOf(builder.embeddingInputs);
-        embeddingOptions = builder.embeddingOptions;
         this.inputTextProtection = Objects.requireNonNull(inputTextProtection, "inputTextProtection");
         this.userPromptProtection = Objects.requireNonNull(userPromptProtection, "userPromptProtection");
         suspiciousSources = collectSuspiciousSources(inputTextProtection, userPromptProtection);
@@ -66,9 +61,7 @@ public final class AiRequest {
             .userPrompt(source.userPromptProtection.protectedText())
             .inputMedia(source.inputMedia)
             .store(source.store)
-            .imageOptions(source.imageOptions)
-            .embeddingInputs(source.embeddingInputs)
-            .embeddingOptions(source.embeddingOptions);
+            .imageOptions(source.imageOptions);
         return new AiRequest(builder, source.inputTextProtection, source.userPromptProtection);
     }
 
@@ -136,20 +129,6 @@ public final class AiRequest {
     public ImageOptions imageOptions() { return imageOptions; }
 
     /**
-     * Returns text inputs for an embedding operation.
-     *
-     * @return immutable input list, empty when no embedding input was supplied
-     */
-    public List<String> embeddingInputs() { return embeddingInputs; }
-
-    /**
-     * Returns provider-neutral embedding settings.
-     *
-     * @return embedding options, or {@code null} for non-embedding requests
-     */
-    public EmbeddingOptions embeddingOptions() { return embeddingOptions; }
-
-    /**
      * Returns untrusted fields whose content matched prompt-injection patterns or reserved markers.
      *
      * <p>The request retains the original field values. {@link AiClient} applies prompt defenses
@@ -183,8 +162,6 @@ public final class AiRequest {
         private BinaryContent inputMedia;
         private boolean store;
         private ImageOptions imageOptions;
-        private List<String> embeddingInputs;
-        private EmbeddingOptions embeddingOptions;
 
         private Builder() { }
 
@@ -251,28 +228,6 @@ public final class AiRequest {
          * @return this builder
          */
         public Builder imageOptions(ImageOptions imageOptions) { this.imageOptions = imageOptions; return this; }
-
-        /**
-         * Supplies the batch of text values to embed.
-         *
-         * @param embeddingInputs text inputs in the order expected in the response
-         * @return this builder
-         */
-        public Builder embeddingInputs(List<String> embeddingInputs) {
-            this.embeddingInputs = embeddingInputs;
-            return this;
-        }
-
-        /**
-         * Supplies the required output size and optional retrieval task.
-         *
-         * @param embeddingOptions embedding request settings
-         * @return this builder
-         */
-        public Builder embeddingOptions(EmbeddingOptions embeddingOptions) {
-            this.embeddingOptions = embeddingOptions;
-            return this;
-        }
 
         /**
          * Creates an immutable request from the accumulated values.

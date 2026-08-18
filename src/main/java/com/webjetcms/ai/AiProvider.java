@@ -8,7 +8,7 @@ import java.util.List;
  * <p>Provider implementations may own reusable transport resources. Applications
  * should therefore reuse provider instances and close them during shutdown.
  * Applications normally invoke providers through {@link AiClient}, which applies
- * prompt defenses before delegation.</p>
+ * prompt defenses to {@link AiRequest} generation operations before delegation.</p>
  */
 public interface AiProvider extends AutoCloseable {
 
@@ -37,6 +37,24 @@ public interface AiProvider extends AutoCloseable {
      * @throws AiProviderException when validation, transport, or response parsing fails
      */
     AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException;
+
+    /**
+     * Creates embedding vectors for one or more text inputs.
+     *
+     * <p>The default implementation preserves compatibility for providers that do not
+     * support embeddings.</p>
+     *
+     * <p>Embedding inputs are forwarded unchanged; prompt-defense markers are not added.</p>
+     *
+     * @param request provider-neutral embedding request
+     * @param config credentials, endpoint, and transport settings for the call
+     * @return generated embedding vectors and provider-reported usage
+     * @throws AiProviderException when embeddings are unsupported or the request fails
+     */
+    default EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
+        throws AiProviderException {
+        throw new AiProviderException(id(), "Embedding is not supported by this provider");
+    }
 
     /**
      * Executes a streaming request and reports decoded text fragments to a listener.

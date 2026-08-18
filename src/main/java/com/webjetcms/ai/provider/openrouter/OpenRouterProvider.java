@@ -39,7 +39,8 @@ import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.BinaryContent;
 import com.webjetcms.ai.EmbeddingOptions;
-import com.webjetcms.ai.EmbeddingTaskType;
+import com.webjetcms.ai.EmbeddingRequest;
+import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.ModelInfo;
@@ -135,10 +136,6 @@ public final class OpenRouterProvider implements AiProvider {
         validateRequest(request);
         validateConfig(config);
 
-        if (request.operation() == AiOperation.EMBEDDING) {
-            return executeEmbedding(request, config);
-        }
-
         HttpPost httpRequest = createChatRequest(request, config, false);
         try (CloseableHttpResponse response = httpClient.execute(httpRequest)) {
             int statusCode = response.getStatusLine().getStatusCode();
@@ -149,6 +146,46 @@ public final class OpenRouterProvider implements AiProvider {
             throw exception.redactSecrets(config);
         } catch (IOException exception) {
             throw transportFailure("OpenRouter request failed.", exception).redactSecrets(config);
+        }
+    }
+
+    @Override
+    public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
+        throws AiProviderException {
+        return invokeAtBoundary(config, () -> embedInternal(request, config));
+    }
+
+    private EmbeddingResponse embedInternal(EmbeddingRequest request, AiProviderConfig config)
+        throws AiProviderException {
+        EmbeddingOptions options = requireEmbeddingRequest(request);
+        validateConfig(config);
+
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", request.model());
+        if (options.dimensions() != null) {
+            body.put("dimensions", options.dimensions());
+        }
+        body.put("encoding_format", "float");
+        ArrayNode input = body.putArray("input");
+        request.inputs().forEach(input::add);
+
+        HttpPost httpRequest = new HttpPost(endpoint(config, EMBEDDINGS_PATH));
+        configureRequest(httpRequest, config, false);
+        httpRequest.setEntity(new StringEntity(body.toString(), ContentType.APPLICATION_JSON));
+        try (CloseableHttpResponse response = httpClient.execute(httpRequest)) {
+            int statusCode = response.getStatusLine().getStatusCode();
+            String rawResponse = readEntity(response.getEntity());
+            ensureSuccessful(statusCode, rawResponse);
+            return parseEmbeddingResponse(
+                rawResponse,
+                request.inputs().size(),
+                options.dimensions(),
+                statusCode
+            );
+        } catch (AiProviderException exception) {
+            throw exception.redactSecrets(config);
+        } catch (IOException exception) {
+            throw transportFailure("OpenRouter embedding request failed.", exception).redactSecrets(config);
         }
     }
 
@@ -213,73 +250,91 @@ public final class OpenRouterProvider implements AiProvider {
         return request;
     }
 
-    private AiResponse executeEmbedding(AiRequest request, AiProviderConfig config)
+    private EmbeddingResponse parseEmbeddingResponse(
+        String rawResponse,
+        int expectedCount,
+        Integer dimensions,
+        int statusCode
+    )
         throws AiProviderException {
-        EmbeddingOptions options = requireEmbeddingRequest(request);
-        ObjectNode body = mapper.createObjectNode();
-        body.put("model", request.model());
-        body.put("dimensions", options.dimensions());
-        body.put("encoding_format", "float");
-        ArrayNode input = body.putArray("input");
-        request.embeddingInputs().forEach(input::add);
-        if (options.taskType() != null) {
-            body.put("input_type", inputType(options.taskType()));
-        }
-
-        HttpPost httpRequest = new HttpPost(endpoint(config, EMBEDDINGS_PATH));
-        configureRequest(httpRequest, config, false);
-        httpRequest.setEntity(new StringEntity(body.toString(), ContentType.APPLICATION_JSON));
-        try (CloseableHttpResponse response = httpClient.execute(httpRequest)) {
-            int statusCode = response.getStatusLine().getStatusCode();
-            String rawResponse = readEntity(response.getEntity());
-            ensureSuccessful(statusCode, rawResponse);
-            return parseEmbeddingResponse(
-                rawResponse,
-                request.embeddingInputs().size(),
-                options.dimensions()
-            );
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
-        } catch (IOException exception) {
-            throw transportFailure("OpenRouter embedding request failed.", exception).redactSecrets(config);
-        }
-    }
-
-    private AiResponse parseEmbeddingResponse(String rawResponse, int expectedCount, int dimensions)
-        throws AiProviderException {
-        JsonNode root = parseJson(rawResponse, "embedding");
+        JsonNode root = parseJson(rawResponse, "embedding", statusCode);
         throwIfPayloadError(root, rawResponse);
         JsonNode data = root.get("data");
         if (data == null || data.isArray() == false || data.size() != expectedCount) {
-            throw malformedResponse("OpenRouter returned an unexpected number of embeddings.", rawResponse);
+            throw malformedResponse(
+                statusCode,
+                "OpenRouter returned an unexpected number of embeddings.",
+                rawResponse
+            );
         }
 
         EmbeddingVector[] ordered = new EmbeddingVector[expectedCount];
+        Integer actualDimensions = dimensions;
         for (JsonNode item : data) {
             JsonNode indexNode = item.get("index");
             if (indexNode == null || indexNode.isIntegralNumber() == false || indexNode.canConvertToInt() == false) {
-                throw malformedResponse("OpenRouter embedding response has no valid index.", rawResponse);
+                throw malformedResponse(statusCode, "OpenRouter embedding response has no valid index.", rawResponse);
             }
             int index = indexNode.intValue();
             if (index < 0 || index >= expectedCount || ordered[index] != null) {
-                throw malformedResponse("OpenRouter embedding response contains an invalid index.", rawResponse);
+                throw malformedResponse(
+                    statusCode,
+                    "OpenRouter embedding response contains an invalid index.",
+                    rawResponse
+                );
             }
-            ordered[index] = parseEmbeddingVector(item.get("embedding"), dimensions, rawResponse);
+            JsonNode values = item.get("embedding");
+            actualDimensions = requireEmbeddingDimensions(values, actualDimensions, rawResponse, statusCode);
+            ordered[index] = parseEmbeddingVector(values, actualDimensions, rawResponse, statusCode);
         }
 
         for (EmbeddingVector vector : ordered) {
             if (vector == null) {
-                throw malformedResponse("OpenRouter embedding response is missing an input index.", rawResponse);
+                throw malformedResponse(
+                    statusCode,
+                    "OpenRouter embedding response is missing an input index.",
+                    rawResponse
+                );
             }
         }
-        return new AiResponse(null, List.of(), parseUsage(root.get("usage")), null, List.of(ordered));
+        return new EmbeddingResponse(List.of(ordered), parseUsage(root.get("usage")));
     }
 
-    private EmbeddingVector parseEmbeddingVector(JsonNode values, int dimensions, String rawResponse)
+    private int requireEmbeddingDimensions(
+        JsonNode values,
+        Integer expected,
+        String rawResponse,
+        int statusCode
+    ) throws AiProviderException {
+        int actual = values != null && values.isArray() ? values.size() : 0;
+        if (actual < 1) {
+            throw malformedResponse(
+                statusCode,
+                "OpenRouter embedding response contains an empty vector.",
+                rawResponse
+            );
+        }
+        if (expected != null && actual != expected) {
+            throw malformedResponse(
+                statusCode,
+                "OpenRouter returned " + actual + " embedding dimensions, expected " + expected + ".",
+                rawResponse
+            );
+        }
+        return actual;
+    }
+
+    private EmbeddingVector parseEmbeddingVector(
+        JsonNode values,
+        int dimensions,
+        String rawResponse,
+        int statusCode
+    )
         throws AiProviderException {
         if (values == null || values.isArray() == false || values.size() != dimensions) {
             int actual = values != null && values.isArray() ? values.size() : 0;
             throw malformedResponse(
+                statusCode,
                 "OpenRouter returned " + actual + " embedding dimensions, expected " + dimensions + ".",
                 rawResponse
             );
@@ -288,22 +343,23 @@ public final class OpenRouterProvider implements AiProvider {
         for (int index = 0; index < dimensions; index++) {
             JsonNode value = values.get(index);
             if (value.isNumber() == false) {
-                throw malformedResponse("OpenRouter embedding response contains a non-numeric value.", rawResponse);
+                throw malformedResponse(
+                    statusCode,
+                    "OpenRouter embedding response contains a non-numeric value.",
+                    rawResponse
+                );
             }
             float parsedValue = value.floatValue();
             if (Float.isFinite(parsedValue) == false) {
-                throw malformedResponse("OpenRouter embedding response contains a non-finite value.", rawResponse);
+                throw malformedResponse(
+                    statusCode,
+                    "OpenRouter embedding response contains a non-finite value.",
+                    rawResponse
+                );
             }
             vector[index] = parsedValue;
         }
         return new EmbeddingVector(vector);
-    }
-
-    private static String inputType(EmbeddingTaskType taskType) {
-        return switch (taskType) {
-            case RETRIEVAL_DOCUMENT -> "search_document";
-            case RETRIEVAL_QUERY -> "search_query";
-        };
     }
 
     ObjectNode buildChatBody(AiRequest request, boolean stream) throws AiProviderException {
@@ -505,20 +561,22 @@ public final class OpenRouterProvider implements AiProvider {
         }
     }
 
-    private EmbeddingOptions requireEmbeddingRequest(AiRequest request) throws AiProviderException {
-        EmbeddingOptions options = request.embeddingOptions();
-        if (options == null) {
-            throw new AiProviderException(PROVIDER_ID, "OpenRouter embedding options are required.");
+    private EmbeddingOptions requireEmbeddingRequest(EmbeddingRequest request) throws AiProviderException {
+        if (request == null) {
+            throw new AiProviderException(PROVIDER_ID, "OpenRouter embedding request is required.");
         }
-        if (request.embeddingInputs().isEmpty()) {
+        if (isBlank(request.model())) {
+            throw new AiProviderException(PROVIDER_ID, "OpenRouter embedding model is required.");
+        }
+        if (request.inputs().isEmpty()) {
             throw new AiProviderException(PROVIDER_ID, "At least one OpenRouter embedding input is required.");
         }
-        for (String input : request.embeddingInputs()) {
+        for (String input : request.inputs()) {
             if (isBlank(input)) {
                 throw new AiProviderException(PROVIDER_ID, "OpenRouter embedding inputs must not be blank.");
             }
         }
-        return options;
+        return request.options();
     }
 
     private URI endpoint(AiProviderConfig config, String path) throws AiProviderException {
@@ -533,15 +591,24 @@ public final class OpenRouterProvider implements AiProvider {
     }
 
     private JsonNode parseJson(String rawResponse, String responseName) throws AiProviderException {
+        return parseJson(rawResponse, responseName, -1);
+    }
+
+    private JsonNode parseJson(String rawResponse, String responseName, int statusCode)
+        throws AiProviderException {
         if (isBlank(rawResponse)) {
-            throw malformedResponse("OpenRouter returned an empty " + responseName + " response.", rawResponse);
+            throw malformedResponse(
+                statusCode,
+                "OpenRouter returned an empty " + responseName + " response.",
+                rawResponse
+            );
         }
         try {
             return mapper.readTree(rawResponse);
         } catch (JsonProcessingException exception) {
             throw new AiProviderException(
                 PROVIDER_ID,
-                -1,
+                statusCode,
                 "OpenRouter returned invalid JSON for the " + responseName + " response.",
                 rawResponse,
                 false,
@@ -577,11 +644,31 @@ public final class OpenRouterProvider implements AiProvider {
     }
 
     private void throwIfPayloadError(JsonNode root, String rawResponse) throws AiProviderException {
-        if (root.hasNonNull("error")) throw errorResponse(-1, rawResponse);
+        if (root.hasNonNull("error")) {
+            throw errorResponse(errorStatus(root.path("error").get("code")), rawResponse);
+        }
+    }
+
+    private static int errorStatus(JsonNode code) {
+        if (code != null && code.isIntegralNumber() && code.canConvertToInt()) {
+            return code.intValue();
+        }
+        if (code != null && code.isTextual()) {
+            try {
+                return Integer.parseInt(code.textValue());
+            } catch (NumberFormatException ignored) {
+                return -1;
+            }
+        }
+        return -1;
     }
 
     private AiProviderException malformedResponse(String message, String rawResponse) {
-        return new AiProviderException(PROVIDER_ID, -1, message, rawResponse, false);
+        return malformedResponse(-1, message, rawResponse);
+    }
+
+    private AiProviderException malformedResponse(int statusCode, String message, String rawResponse) {
+        return new AiProviderException(PROVIDER_ID, statusCode, message, rawResponse, false);
     }
 
     private AiProviderException transportFailure(String message, IOException cause) {
@@ -660,7 +747,7 @@ public final class OpenRouterProvider implements AiProvider {
     }
 
     private static void collectNumericDetails(JsonNode node, String prefix, Map<String, Long> details) {
-        node.fields().forEachRemaining(entry -> {
+        node.properties().forEach(entry -> {
             String key = prefix.isEmpty() ? entry.getKey() : prefix + "." + entry.getKey();
             JsonNode value = entry.getValue();
             if (value.isIntegralNumber()) {

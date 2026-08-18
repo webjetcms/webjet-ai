@@ -3,24 +3,20 @@ package com.webjetcms.ai;
 /**
  * Provider-neutral embedding options.
  *
- * @param dimensions required number of values in every returned embedding vector
- * @param taskType optional retrieval role for providers that support task-specific embeddings
+ * @param dimensions requested number of values in every returned vector, or {@code null}
+ *     to use the provider default
  */
-public record EmbeddingOptions(int dimensions, EmbeddingTaskType taskType) {
+public record EmbeddingOptions(Integer dimensions) {
 
-    /** Validates that the requested vector size is positive. */
+    /** Validates an explicitly requested vector size. */
     public EmbeddingOptions {
-        if (dimensions < 1) {
+        if (dimensions != null && dimensions < 1) {
             throw new IllegalArgumentException("Embedding dimensions must be greater than zero");
         }
     }
 
-    /**
-     * Creates options without a provider-specific retrieval task.
-     *
-     * @param dimensions required number of values in every returned embedding vector
-     */
-    public EmbeddingOptions(int dimensions) {
-        this(dimensions, null);
+    /** Creates options that use the provider's default vector size. */
+    public EmbeddingOptions() {
+        this(null);
     }
 }

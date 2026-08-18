@@ -41,7 +41,7 @@ class AiClientTest {
     }
 
     @Test
-    void delegatesPreparedCopiesToARegisteredProvider() throws Exception {
+    void delegatesPreparedCopiesAndImmutableEmbeddingRequestsToARegisteredProvider() throws Exception {
         StubProvider provider = new StubProvider("stub");
         AiProviderConfig config = AiProviderConfig.builder("secret").build();
         BinaryContent media = new BinaryContent(new byte[] { 1, 2, 3 }, "image/png", "input.png");
@@ -56,10 +56,16 @@ class AiClientTest {
             .store(true)
             .imageOptions(imageOptions)
             .build();
+        EmbeddingRequest embeddingRequest = new EmbeddingRequest(
+            "embedding-model",
+            List.of("first", "second"),
+            new EmbeddingOptions(3)
+        );
 
         try (AiClient client = AiClient.of(provider)) {
             assertEquals("answer", client.execute(request, config).text());
             assertEquals("answer", client.stream(request, config, delta -> { }).text());
+            assertEquals(2, client.embed(embeddingRequest, config).embeddings().size());
             assertEquals("model", client.listModels(config).get(0).id());
         }
 
@@ -80,7 +86,19 @@ class AiClientTest {
         assertSame(media, provider.executeRequest.inputMedia());
         assertSame(imageOptions, provider.executeRequest.imageOptions());
         assertTrue(provider.executeRequest.store());
+        assertSame(embeddingRequest, provider.embeddingRequest);
+        assertSame(config, provider.embeddingConfig);
         assertEquals(1, provider.closeCount);
+
+        try (AiClient client = AiClient.of(new UnsupportedEmbeddingProvider())) {
+            AiProviderException exception = assertThrows(
+                AiProviderException.class,
+                () -> client.embed(embeddingRequest, config)
+            );
+
+            assertEquals("unsupported", exception.providerId());
+            assertTrue(exception.getMessage().contains("not supported"));
+        }
     }
 
     @Test
@@ -91,6 +109,7 @@ class AiClientTest {
             AiClient.of(new StubProvider("same"), new StubProvider("same"))
         );
         AiProviderConfig config = AiProviderConfig.builder("key").build();
+        EmbeddingRequest embeddingRequest = new EmbeddingRequest("model", List.of("input"));
         try (AiClient client = AiClient.of()) {
             IllegalStateException exception = assertThrows(
                 IllegalStateException.class,
@@ -113,6 +132,9 @@ class AiClientTest {
         try (AiClient client = AiClient.of(new StubProvider("known"))) {
             assertThrows(IllegalArgumentException.class, () ->
                 client.execute("missing", AiRequest.builder().build(), config)
+            );
+            assertThrows(IllegalArgumentException.class, () ->
+                client.embed("missing", embeddingRequest, config)
             );
         } catch (Exception exception) {
             throw new AssertionError(exception);
@@ -141,6 +163,7 @@ class AiClientTest {
             .trustedHeader("X-Client-Secret", headerValue)
             .build();
         AiRequest request = AiRequest.builder().model("model").build();
+        EmbeddingRequest embeddingRequest = new EmbeddingRequest("model", List.of("input"));
 
         try (AiClient client = AiClient.of(new ThrowingProvider(apiKey, headerValue))) {
             assertRedacted(assertThrows(
@@ -154,6 +177,10 @@ class AiClientTest {
             assertRedacted(assertThrows(
                 AiProviderException.class,
                 () -> client.stream("throwing", request, config, delta -> { })
+            ), apiKey, headerValue);
+            assertRedacted(assertThrows(
+                AiProviderException.class,
+                () -> client.embed("throwing", embeddingRequest, config)
             ), apiKey, headerValue);
         }
     }
@@ -257,6 +284,8 @@ class AiClientTest {
         private int closeCount;
         private AiRequest executeRequest;
         private AiRequest streamRequest;
+        private EmbeddingRequest embeddingRequest;
+        private AiProviderConfig embeddingConfig;
 
         private StubProvider(String id) { this.id = id; }
         @Override public String id() { return id; }
@@ -266,6 +295,14 @@ class AiClientTest {
         @Override public AiResponse execute(AiRequest request, AiProviderConfig config) {
             executeRequest = request;
             return AiResponse.text("answer");
+        }
+        @Override public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config) {
+            embeddingRequest = request;
+            embeddingConfig = config;
+            return new EmbeddingResponse(List.of(
+                new EmbeddingVector(new float[] {1.0f, 2.0f, 3.0f}),
+                new EmbeddingVector(new float[] {4.0f, 5.0f, 6.0f})
+            ));
         }
         @Override public AiResponse stream(
             AiRequest request,
@@ -292,6 +329,10 @@ class AiClientTest {
             throw failure();
         }
         @Override public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
+            throw failure();
+        }
+        @Override public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
+            throws AiProviderException {
             throw failure();
         }
         @Override public AiResponse stream(
@@ -347,6 +388,21 @@ class AiClientTest {
 
         private IllegalStateException failure() {
             return new IllegalStateException("runtime=" + apiKey + "; header=" + headerValue);
+        }
+    }
+
+    private static final class UnsupportedEmbeddingProvider implements AiProvider {
+        @Override public String id() { return "unsupported"; }
+        @Override public List<ModelInfo> listModels(AiProviderConfig config) { return List.of(); }
+        @Override public AiResponse execute(AiRequest request, AiProviderConfig config) {
+            return AiResponse.text(null);
+        }
+        @Override public AiResponse stream(
+            AiRequest request,
+            AiProviderConfig config,
+            AiStreamListener listener
+        ) {
+            return AiResponse.text(null);
         }
     }
 }

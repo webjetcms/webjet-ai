@@ -40,6 +40,8 @@ import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.BinaryContent;
 import com.webjetcms.ai.EmbeddingOptions;
+import com.webjetcms.ai.EmbeddingRequest;
+import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
@@ -158,10 +160,6 @@ public final class GeminiProvider implements AiProvider {
         requireConfigured(config);
         validateRequest(request);
 
-        if (request.operation() == AiOperation.EMBEDDING) {
-            return executeEmbedding(request, config);
-        }
-
         HttpPost post = new HttpPost(operationUri(config, request.model(), "generateContent", false));
         configure(post, config, true);
         post.setEntity(new StringEntity(buildRequestBody(request).toString(), JSON_UTF_8));
@@ -207,9 +205,6 @@ public final class GeminiProvider implements AiProvider {
     ) throws AiProviderException {
         requireConfigured(config);
         validateRequest(request);
-        if (request.operation() == AiOperation.EMBEDDING) {
-            throw new AiProviderException(PROVIDER_ID, "Gemini embeddings do not support streaming.");
-        }
         if (listener == null) {
             throw new AiProviderException(PROVIDER_ID, "Gemini stream listener is required.");
         }
@@ -252,20 +247,27 @@ public final class GeminiProvider implements AiProvider {
         }
     }
 
-    private AiResponse executeEmbedding(AiRequest request, AiProviderConfig config)
+    @Override
+    public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
         throws AiProviderException {
+        return invokeAtBoundary(config, () -> embedInternal(request, config));
+    }
+
+    private EmbeddingResponse embedInternal(EmbeddingRequest request, AiProviderConfig config)
+        throws AiProviderException {
+        requireConfigured(config);
         EmbeddingOptions options = requireEmbeddingRequest(request);
+        Integer dimensions = options.dimensions();
         ObjectNode body = MAPPER.createObjectNode();
         ArrayNode requests = body.putArray("requests");
         String modelResource = "models/" + normalizeModelId(request.model());
-        for (String input : request.embeddingInputs()) {
+        for (String input : request.inputs()) {
             ObjectNode item = requests.addObject();
             item.put("model", modelResource);
             item.putObject("content").putArray("parts").addObject().put("text", input);
-            ObjectNode embeddingConfig = item.putObject("embedContentConfig");
-            embeddingConfig.put("outputDimensionality", options.dimensions());
-            if (options.taskType() != null) {
-                embeddingConfig.put("taskType", options.taskType().name());
+            if (dimensions != null) {
+                item.putObject("embedContentConfig")
+                    .put("outputDimensionality", dimensions);
             }
         }
 
@@ -285,7 +287,13 @@ public final class GeminiProvider implements AiProvider {
                 throw responseFailure(statusCode, payload, "Gemini embedding request failed.");
             }
             try {
-                return parseEmbeddingResponse(request, payload, options.dimensions(), statusCode);
+                return parseEmbeddingResponse(
+                    request.model(),
+                    request.inputs().size(),
+                    payload,
+                    dimensions,
+                    statusCode
+                );
             } catch (IOException exception) {
                 throw invalidResponse(
                     statusCode,
@@ -301,15 +309,15 @@ public final class GeminiProvider implements AiProvider {
         }
     }
 
-    private static AiResponse parseEmbeddingResponse(
-        AiRequest request,
+    private static EmbeddingResponse parseEmbeddingResponse(
+        String model,
+        int expectedCount,
         String payload,
-        int dimensions,
+        Integer requestedDimensions,
         int statusCode
     ) throws IOException, AiProviderException {
         JsonNode root = MAPPER.readTree(payload);
         JsonNode embeddings = root == null ? null : root.get("embeddings");
-        int expectedCount = request.embeddingInputs().size();
         if (embeddings == null || embeddings.isArray() == false || embeddings.size() != expectedCount) {
             throw invalidResponse(
                 statusCode,
@@ -320,11 +328,21 @@ public final class GeminiProvider implements AiProvider {
         }
 
         List<EmbeddingVector> vectors = new ArrayList<>(expectedCount);
-        boolean normalize = isReducedGeminiEmbedding001(request.model(), dimensions);
+        int dimensions = requestedDimensions == null ? -1 : requestedDimensions;
         for (JsonNode embedding : embeddings) {
             JsonNode values = embedding.get("values");
-            if (values == null || values.isArray() == false || values.size() < dimensions) {
-                int actual = values != null && values.isArray() ? values.size() : 0;
+            int actual = values != null && values.isArray() ? values.size() : 0;
+            if (actual < 1) {
+                throw invalidResponse(
+                    statusCode,
+                    "Gemini returned an empty embedding vector.",
+                    payload,
+                    null
+                );
+            }
+            if (dimensions < 0) {
+                dimensions = actual;
+            } else if (actual != dimensions) {
                 throw invalidResponse(
                     statusCode,
                     "Gemini returned " + actual + " embedding dimensions, expected " + dimensions + ".",
@@ -354,29 +372,46 @@ public final class GeminiProvider implements AiProvider {
                 }
                 vector[index] = parsedValue;
             }
-            if (normalize) {
-                normalize(vector);
+            if (isReducedGeminiEmbedding001(model, dimensions)) {
+                normalize(vector, statusCode, payload);
             }
             vectors.add(new EmbeddingVector(vector));
         }
 
         long inputTokens = root.path("usageMetadata").path("promptTokenCount").asLong(0);
         TokenUsage usage = new TokenUsage(inputTokens, 0, inputTokens, null);
-        return new AiResponse(null, List.of(), usage, null, vectors);
+        return new EmbeddingResponse(vectors, usage);
     }
 
     private static boolean isReducedGeminiEmbedding001(String model, int dimensions) {
         return dimensions < 3072 && "gemini-embedding-001".equals(normalizeModelId(model));
     }
 
-    private static void normalize(float[] vector) {
+    private static void normalize(float[] vector, int statusCode, String payload)
+        throws AiProviderException {
         double sumOfSquares = 0;
         for (float value : vector) {
-            sumOfSquares += value * value;
+            double doubleValue = value;
+            sumOfSquares += doubleValue * doubleValue;
         }
-        if (sumOfSquares == 0) return;
+        if (sumOfSquares <= 0 || Double.isFinite(sumOfSquares) == false) {
+            throw invalidResponse(
+                statusCode,
+                "Gemini embedding response contains a vector that cannot be normalized.",
+                payload,
+                null
+            );
+        }
 
         double norm = Math.sqrt(sumOfSquares);
+        if (norm <= 0 || Double.isFinite(norm) == false) {
+            throw invalidResponse(
+                statusCode,
+                "Gemini embedding response contains a vector that cannot be normalized.",
+                payload,
+                null
+            );
+        }
         for (int index = 0; index < vector.length; index++) {
             vector[index] = (float) (vector[index] / norm);
         }
@@ -531,21 +566,23 @@ public final class GeminiProvider implements AiProvider {
         }
     }
 
-    private static EmbeddingOptions requireEmbeddingRequest(AiRequest request)
+    private static EmbeddingOptions requireEmbeddingRequest(EmbeddingRequest request)
         throws AiProviderException {
-        EmbeddingOptions options = request.embeddingOptions();
-        if (options == null) {
-            throw new AiProviderException(PROVIDER_ID, "Gemini embedding options are required.");
+        if (request == null) {
+            throw new AiProviderException(PROVIDER_ID, "Gemini embedding request is required.");
         }
-        if (request.embeddingInputs().isEmpty()) {
+        if (isNotBlank(normalizeModelId(request.model())) == false) {
+            throw new AiProviderException(PROVIDER_ID, "Gemini embedding model is required.");
+        }
+        if (request.inputs().isEmpty()) {
             throw new AiProviderException(PROVIDER_ID, "At least one Gemini embedding input is required.");
         }
-        for (String input : request.embeddingInputs()) {
+        for (String input : request.inputs()) {
             if (isNotBlank(input) == false) {
                 throw new AiProviderException(PROVIDER_ID, "Gemini embedding inputs must not be blank.");
             }
         }
-        return options;
+        return request.options();
     }
 
     private static void requireConfigured(AiProviderConfig config) throws AiProviderException {

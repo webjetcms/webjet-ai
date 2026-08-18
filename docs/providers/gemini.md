@@ -1,8 +1,9 @@
 # Google Gemini provider
 
-`GeminiProvider` implements text, multimodal text, image generation, and image
-editing through the Google Gemini REST API. Its provider identifier is `gemini`
-when it is selected from a client containing multiple providers.
+`GeminiProvider` implements text embeddings, text and multimodal generation,
+image generation, and image editing through the Google Gemini REST API. Its
+provider identifier is `gemini` when it is selected from a client containing
+multiple providers.
 
 This guide describes the WebJET AI adapter. The selected Gemini model must
 support the requested input and output modalities. `listModels` does not filter
@@ -14,12 +15,13 @@ models by operation or capability.
 
 ## Capabilities
 
-| Task | `AiOperation` | `execute` | `stream` | Important requirements |
+| Task | Request | Non-streaming call | `stream` | Important requirements |
 | --- | --- | --- | --- | --- |
-| Text generation or transformation | `TEXT` | Yes | Yes | A non-blank model |
-| Analyze text and media | `TEXT` | Yes | Yes | A model that accepts the supplied media |
-| Generate images | `GENERATE_IMAGE` | Yes | Adapter allows it | A model that produces image output |
-| Edit an image | `EDIT_IMAGE` | Yes | Adapter allows it | A model that edits images and non-empty `inputMedia` |
+| Text generation or transformation | `AiRequest` with `TEXT` | `execute` | Yes | A non-blank model |
+| Analyze text and media | `AiRequest` with `TEXT` | `execute` | Yes | A model that accepts the supplied media |
+| Generate images | `AiRequest` with `GENERATE_IMAGE` | `execute` | Adapter allows it | A model that produces image output |
+| Edit an image | `AiRequest` with `EDIT_IMAGE` | `execute` | Adapter allows it | A model that edits images and non-empty `inputMedia` |
+| Create text embeddings | `EmbeddingRequest` | `embed` | No | A non-blank embedding model and at least one non-blank input |
 
 Image-operation streaming uses Gemini's streaming endpoint, but actual support is
 model-dependent. The stream listener receives only text fragments; generated
@@ -40,6 +42,9 @@ import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.BinaryContent;
+import com.webjetcms.ai.EmbeddingOptions;
+import com.webjetcms.ai.EmbeddingRequest;
+import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.provider.gemini.GeminiProvider;
@@ -70,8 +75,9 @@ the `x-goog-api-key` header.
 Model identifiers can be passed as either `model-name` or `models/model-name`;
 the adapter removes the optional `models/` prefix.
 
-Pass `AiRequest` directly to `AiClient`. Request preparation and prompt
-protection are automatic.
+Pass `AiRequest` directly to `AiClient` for generation operations. Request
+preparation and prompt protection are automatic. Embeddings use the dedicated
+`EmbeddingRequest` API shown below.
 
 ## Text request
 
@@ -129,6 +135,56 @@ A successful stream must end with Gemini's `STOP` finish reason.
 The adapter does not restrict streaming to `TEXT`, but image generation/editing
 over the streaming endpoint still depends on the selected model.
 
+## Text embeddings
+
+Embeddings use the dedicated `EmbeddingRequest` and `embed` API rather than an
+`AiOperation` value. Inputs are sent together through Gemini's
+`batchEmbedContents` endpoint. `EmbeddingResponse.embeddings()` follows the
+original input order, which Gemini preserves in its batch response.
+
+```java
+EmbeddingRequest request = EmbeddingRequest.builder()
+    .model("gemini-embedding-2")
+    .inputs(List.of("First text to index", "Second text to index"))
+    .options(new EmbeddingOptions(768))
+    .build();
+
+EmbeddingResponse response = client.embed(request, config);
+float[] firstVector = response.embeddings().get(0).values();
+long inputTokens = response.usage().inputTokens();
+```
+
+Embedding inputs are sent unchanged. `AiClient` does not apply prompt-injection
+protection to `EmbeddingRequest` because protection markers would become part of
+the embedded content and change the resulting vectors. Apply host-specific
+privacy or content policy before calling `embed`.
+
+The model and every input must be non-blank. `EmbeddingOptions` accepts an
+optional positive dimension count. Omit `.options(...)` from the builder to let
+Gemini choose the vector width:
+
+```java
+EmbeddingRequest request = EmbeddingRequest.builder()
+    .model("gemini-embedding-2")
+    .inputs(List.of("Use the model's default vector size"))
+    .build();
+```
+
+When dimensions are explicit, every returned vector must have exactly that
+width. When they are omitted, the adapter infers a positive width from the first
+vector and requires all remaining vectors to match. Empty, inconsistent,
+non-numeric, or non-finite vectors fail with `AiProviderException`. The adapter
+only requires a positive dimension; the selected Gemini model determines its
+supported range.
+
+Gemini returns reduced `gemini-embedding-001` vectors without unit-length
+normalization, so the adapter normalizes results below 3072 dimensions.
+`gemini-embedding-2` already normalizes reduced vectors and is returned
+unchanged. The provider-neutral API does not expose Gemini task-type or title
+parameters. For `gemini-embedding-2`, include any task instruction required by
+the model directly in each input; the adapter sends it unchanged. Embedding
+requests are non-streaming.
+
 ## Generate images
 
 Use a model that supports image output. `inputText` and `userPrompt` are both
@@ -175,6 +231,9 @@ GeneratedMedia editedImage = response.media().get(0);
 
 ## `AiRequest` fields
 
+This table applies to generation requests. Embeddings use `EmbeddingRequest`
+with the separate `model`, `inputs`, and `options` components.
+
 | Field | `TEXT` | `GENERATE_IMAGE` | `EDIT_IMAGE` |
 | --- | --- | --- | --- |
 | `operation` | Use `TEXT` or omit it | Required value | Required value |
@@ -200,7 +259,7 @@ List<ModelInfo> models = client.listModels(config);
 
 The provider follows Gemini catalogue pagination, removes the `models/` prefix,
 and sorts results by model identifier. The result does not describe whether a
-model supports text, image input, image output, or editing.
+model supports embeddings, text, image input, image output, or editing.
 
 Gemini may return text and media in the same response:
 

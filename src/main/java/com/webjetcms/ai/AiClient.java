@@ -120,6 +120,49 @@ public final class AiClient implements AutoCloseable {
     }
 
     /**
+     * Creates embeddings using the only registered provider.
+     * Embedding inputs are forwarded unchanged because prompt-defense markers would
+     * alter the resulting vectors.
+     *
+     * @param request model, inputs, and provider-neutral embedding options
+     * @param config provider credentials and connection settings
+     * @return generated embedding vectors and provider-reported usage
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws AiProviderException when request validation, transport, or response parsing fails
+     */
+    public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
+        throws AiProviderException {
+        return embed(soleProviderId(), request, config);
+    }
+
+    /**
+     * Creates embeddings using a registered provider.
+     * Embedding inputs are forwarded unchanged because prompt-defense markers would
+     * alter the resulting vectors.
+     *
+     * @param providerId registered provider identifier
+     * @param request model, inputs, and provider-neutral embedding options
+     * @param config provider credentials and connection settings
+     * @return generated embedding vectors and provider-reported usage
+     * @throws IllegalArgumentException if no provider is registered under {@code providerId}
+     * @throws AiProviderException when request validation, transport, or response parsing fails
+     */
+    public EmbeddingResponse embed(
+        String providerId,
+        EmbeddingRequest request,
+        AiProviderConfig config
+    ) throws AiProviderException {
+        AiProvider selectedProvider = provider(providerId);
+        try {
+            return selectedProvider.embed(request, config);
+        } catch (AiProviderException exception) {
+            throw exception.redactSecrets(config);
+        } catch (RuntimeException exception) {
+            throw unexpectedProviderFailure(providerId, exception, config);
+        }
+    }
+
+    /**
      * Executes a streaming request using the only registered provider.
      * The provider receives an immutable copy with prompt defenses applied.
      *

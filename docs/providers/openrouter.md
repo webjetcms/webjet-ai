@@ -1,12 +1,14 @@
 # OpenRouter provider
 
-`OpenRouterProvider` implements text, multimodal text, image generation, and
-image editing through OpenRouter's chat-completions API. Its provider identifier
+`OpenRouterProvider` implements text, multimodal text, image generation, image
+editing, and text embeddings through OpenRouter's APIs. Its provider identifier
 is `openrouter` when it is selected from a client containing multiple providers.
 
 OpenRouter exposes many models with different modalities. The adapter validates
 the basic request shape, but the caller must choose a model that supports the
 requested text, image-input, image-output, or image-editing capability.
+Embedding callers must likewise choose a model exposed by OpenRouter's embedding
+endpoint.
 
 > In the current library version, OpenRouter ignores `store` and every
 > `ImageOptions` value. Image count, size, and quality cannot be controlled through
@@ -14,12 +16,13 @@ requested text, image-input, image-output, or image-editing capability.
 
 ## Capabilities
 
-| Task | `AiOperation` | `execute` | `stream` | Important requirements |
+| Task | Request | Non-streaming call | `stream` | Important requirements |
 | --- | --- | --- | --- | --- |
-| Text generation or transformation | `TEXT` | Yes | Yes | A non-blank model |
-| Analyze text and an image | `TEXT` | Yes | Yes | A model that accepts image input |
-| Generate images | `GENERATE_IMAGE` | Yes | No | A model that produces image output |
-| Edit an image | `EDIT_IMAGE` | Yes | No | A model that edits images and non-empty `inputMedia` |
+| Text generation or transformation | `AiRequest` with `TEXT` | `execute` | Yes | A non-blank model |
+| Analyze text and an image | `AiRequest` with `TEXT` | `execute` | Yes | A model that accepts image input |
+| Generate images | `AiRequest` with `GENERATE_IMAGE` | `execute` | No | A model that produces image output |
+| Edit an image | `AiRequest` with `EDIT_IMAGE` | `execute` | No | A model that edits images and non-empty `inputMedia` |
+| Create text embeddings | `EmbeddingRequest` | `embed` | No | A non-blank embedding model and at least one non-blank input |
 
 ## Configuration and client
 
@@ -36,6 +39,10 @@ import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.BinaryContent;
+import com.webjetcms.ai.EmbeddingOptions;
+import com.webjetcms.ai.EmbeddingRequest;
+import com.webjetcms.ai.EmbeddingResponse;
+import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.provider.openrouter.OpenRouterProvider;
@@ -66,8 +73,9 @@ sent as a Bearer token. Trusted metadata headers are forwarded, but
 `Authorization`, `Accept`, and POST `Content-Type` are controlled by the adapter.
 The two metadata headers shown above are optional and are not library requirements.
 
-Pass `AiRequest` directly to `AiClient`. Request preparation and prompt
-protection are automatic.
+Pass `AiRequest` directly to `AiClient` for generation operations. Request
+preparation and prompt protection are automatic. Embeddings use the dedicated
+`EmbeddingRequest` API shown below.
 
 ## Text request
 
@@ -126,6 +134,36 @@ The listener must not be null. OpenRouter must terminate the stream with an SSE
 `[DONE]` event and a nonblank `stop` finish reason. Image generation and editing
 cannot be streamed through this adapter.
 
+## Text embeddings
+
+Embeddings use `AiClient.embed(...)`, not an `AiOperation` or `AiResponse`.
+
+```java
+EmbeddingRequest embeddingRequest = EmbeddingRequest.builder()
+    .model("your-openrouter-embedding-model")
+    .inputs(List.of("First text", "Second text"))
+    .options(new EmbeddingOptions(768))
+    .build();
+
+EmbeddingResponse embeddingResponse = client.embed(embeddingRequest, config);
+List<EmbeddingVector> vectors = embeddingResponse.embeddings();
+long inputTokens = embeddingResponse.usage().inputTokens();
+```
+
+Embedding inputs are sent unchanged. `AiClient` does not apply prompt-injection
+protection to `EmbeddingRequest` because protection markers would become part of
+the embedded content and change the resulting vectors. Apply host-specific
+privacy or content policy before calling `embed`.
+
+Omit `.options(...)` from the builder to let the selected model choose its output
+width. When a dimension is supplied, the adapter forwards it; otherwise, the
+field is omitted. `EmbeddingResponse.embeddings()` follows the original input
+order; the adapter restores that order from the provider's response indices. It
+requests float encoding and requires all returned vectors to have the requested
+or inferred nonzero width. The selected model determines whether a requested
+dimension is supported. Provider-specific task or input-type options are not
+added. Embeddings are not streamed.
+
 ## Generate images
 
 Select a model that supports image output. The adapter requests both `image` and
@@ -169,6 +207,9 @@ GeneratedMedia editedImage = response.media().get(0);
 
 ## `AiRequest` fields
 
+This table applies to generation requests. Embeddings use `EmbeddingRequest`
+with the separate `model`, `inputs`, and `options` components.
+
 | Field | `TEXT` | `GENERATE_IMAGE` | `EDIT_IMAGE` |
 | --- | --- | --- | --- |
 | `operation` | Use `TEXT` or omit it | Required value | Required value |
@@ -205,7 +246,9 @@ Response behavior:
 - entries marked as text or without an image URL are skipped; a present malformed,
   non-Base64, or non-image data URL fails the response;
 - every accepted returned image entry is decoded into `GeneratedMedia`;
-- a nonblank finish reason other than `stop` causes `AiProviderException`.
+- a nonblank finish reason other than `stop` causes `AiProviderException`;
+- embedding responses expose input-ordered vectors and token accounting through
+  `EmbeddingResponse`.
 
 Saving returned media is optional:
 

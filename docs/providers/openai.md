@@ -1,8 +1,8 @@
 # OpenAI provider
 
-`OpenAiProvider` implements text, multimodal text, image generation, and image
-editing through OpenAI's REST APIs. Its provider identifier is `openai` when it
-is selected from a client containing multiple providers.
+`OpenAiProvider` implements text, multimodal text, image generation, image
+editing, and text embeddings through OpenAI's REST APIs. Its provider identifier
+is `openai` when it is selected from a client containing multiple providers.
 
 This guide describes what the WebJET AI adapter sends and validates. Model
 capabilities are controlled by OpenAI and can differ between model identifiers.
@@ -11,12 +11,13 @@ option each model supports.
 
 ## Capabilities
 
-| Task | `AiOperation` | `execute` | `stream` | Important requirements |
+| Task | Request | Non-streaming call | `stream` | Important requirements |
 | --- | --- | --- | --- | --- |
-| Text generation or transformation | `TEXT` | Yes | Yes | A non-blank model |
-| Analyze text and an image | `TEXT` | Yes | Yes | A model that accepts image input |
-| Generate images | `GENERATE_IMAGE` | Yes | No | An image-generation model; callers should supply a meaningful prompt |
-| Edit an image | `EDIT_IMAGE` | Yes | No | A non-empty `inputMedia`; `dall-e-2` is rejected by this adapter |
+| Text generation or transformation | `AiRequest` with `TEXT` | `execute` | Yes | A non-blank model |
+| Analyze text and an image | `AiRequest` with `TEXT` | `execute` | Yes | A model that accepts image input |
+| Generate images | `AiRequest` with `GENERATE_IMAGE` | `execute` | No | An image-generation model; callers should supply a meaningful prompt |
+| Edit an image | `AiRequest` with `EDIT_IMAGE` | `execute` | No | A non-empty `inputMedia`; `dall-e-2` is rejected by this adapter |
+| Create text embeddings | `EmbeddingRequest` | `embed` | No | A non-blank embedding model and at least one non-blank input |
 
 ## Configuration and client
 
@@ -33,6 +34,10 @@ import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.BinaryContent;
+import com.webjetcms.ai.EmbeddingOptions;
+import com.webjetcms.ai.EmbeddingRequest;
+import com.webjetcms.ai.EmbeddingResponse;
+import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
@@ -61,8 +66,10 @@ HTTPS endpoint with `AiProviderConfig.Builder.baseUri(...)`. Trusted headers,
 connection timeout, and response timeout are also configurable. The API key is
 sent as a Bearer token.
 
-Pass `AiRequest` directly to `AiClient`. Request preparation and prompt
-protection are automatic; applications do not call a separate preparer.
+Pass `AiRequest` directly to `AiClient` for generation operations. Request
+preparation and prompt protection are automatic; applications do not call a
+separate preparer. Embeddings use the dedicated `EmbeddingRequest` API shown
+below.
 
 ## Text request
 
@@ -128,6 +135,36 @@ AiResponse completed = client.stream(
 Calling `stream` with `GENERATE_IMAGE` or `EDIT_IMAGE` fails with
 `AiProviderException`.
 
+## Text embeddings
+
+Embeddings use `AiClient.embed(...)`, not an `AiOperation` or `AiResponse`.
+`EmbeddingResponse.embeddings()` follows the original input order.
+
+```java
+EmbeddingRequest embeddingRequest = EmbeddingRequest.builder()
+    .model("text-embedding-3-small")
+    .inputs(List.of("First text", "Second text"))
+    .options(new EmbeddingOptions(768))
+    .build();
+
+EmbeddingResponse embeddingResponse = client.embed(embeddingRequest, config);
+List<EmbeddingVector> vectors = embeddingResponse.embeddings();
+long inputTokens = embeddingResponse.usage().inputTokens();
+```
+
+Embedding inputs are sent unchanged. `AiClient` does not apply prompt-injection
+protection to `EmbeddingRequest` because protection markers would become part of
+the embedded content and change the resulting vectors. Apply host-specific
+privacy or content policy before calling `embed`.
+
+The output dimension is optional. Omit `.options(...)` from the builder to use
+the model's default width. OpenAI supports the `dimensions` request field only
+for `text-embedding-3` and later models, so it must be omitted for
+`text-embedding-ada-002` and compatible fixed-width endpoints. The adapter
+requests float encoding, validates that every returned vector has the expected
+or inferred nonzero width, and restores input order from the provider's response
+indices. Embeddings are not streamed.
+
 ## Generate images
 
 For generation, `inputText` and `userPrompt` both contribute to the image prompt.
@@ -175,6 +212,9 @@ This adapter does not expose an image mask option.
 
 ## `AiRequest` fields
 
+This table applies to generation requests. Embeddings use `EmbeddingRequest`
+with the separate `model`, `inputs`, and `options` components.
+
 | Field | `TEXT` | `GENERATE_IMAGE` | `EDIT_IMAGE` |
 | --- | --- | --- | --- |
 | `operation` | Use `TEXT` or omit it | Required value | Required value |
@@ -208,7 +248,7 @@ List<ModelInfo> models = client.listModels(config);
 ```
 
 The returned list is sorted by creation time, newest first. It is not filtered by
-text, vision, generation, or editing capability.
+embedding, text, vision, generation, or editing capability.
 
 - Text responses use `response.text()` and expose token accounting through
   `response.usage()`.
@@ -221,6 +261,8 @@ text, vision, generation, or editing capability.
   Base64 data without that explicit request option.
 - `GeneratedMedia.data()` returns a defensive byte-array copy. Saving it to an
   output file is optional.
+- Embedding responses expose ordered vectors through `embeddingResponse.embeddings()`
+  and token accounting through `embeddingResponse.usage()`.
 
 ```java
 GeneratedMedia image = response.media().get(0);

@@ -2,9 +2,9 @@
 
 WebJET AI is a framework-neutral Java library for communicating with OpenAI,
 Google Gemini, and OpenRouter. It provides provider-neutral request and response
-types, streaming support, image operations, model discovery, and prompt-security
-utilities without requiring Spring, a servlet container, a database, or WebJET
-CMS.
+types, streaming support, image operations, text embeddings, model discovery,
+and prompt-security utilities without requiring Spring, a servlet container, a
+database, or WebJET CMS.
 
 ## Requirements
 
@@ -21,7 +21,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.webjetcms:webjet-ai:0.1.0'
+    implementation 'com.webjetcms:webjet-ai:1.0.0'
 }
 ```
 
@@ -31,17 +31,23 @@ Maven:
 <dependency>
     <groupId>com.webjetcms</groupId>
     <artifactId>webjet-ai</artifactId>
-    <version>0.1.0</version>
+    <version>1.0.0</version>
 </dependency>
 ```
 
 ## Minimal usage
 
 ```java
+import java.util.List;
+
 import com.webjetcms.ai.AiClient;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
+import com.webjetcms.ai.EmbeddingOptions;
+import com.webjetcms.ai.EmbeddingRequest;
+import com.webjetcms.ai.EmbeddingResponse;
+import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.provider.gemini.GeminiProvider;
 import com.webjetcms.ai.provider.openai.OpenAiProvider;
 
@@ -59,7 +65,7 @@ try (AiClient client = AiClient.of(new OpenAiProvider())) {
 }
 ```
 
-When `AiClient` contains one provider, `execute`, `stream`, and `listModels`
+When `AiClient` contains one provider, `execute`, `stream`, `embed`, and `listModels`
 select it automatically. The bundled provider identifiers `openai`, `gemini`,
 and `openrouter` are needed only when one client contains multiple providers:
 
@@ -69,15 +75,40 @@ try (AiClient client = AiClient.of(new OpenAiProvider(), new GeminiProvider())) 
 }
 ```
 
-The provider-ID overloads are also available for streaming and model discovery.
-Identifier-free calls fail clearly if the client contains zero or multiple
-providers.
+The provider-ID overloads are also available for embedding, streaming, and model
+discovery. Identifier-free calls fail clearly if the client contains zero or
+multiple providers.
+
+Embeddings use a dedicated request and response API, so the existing
+`AiOperation` and `AiResponse` contracts remain unchanged:
+
+```java
+EmbeddingResponse embeddingResponse = client.embed(
+    EmbeddingRequest.builder()
+        .model("your-embedding-model")
+        .inputs(List.of("First text", "Second text"))
+        .options(new EmbeddingOptions(768))
+        .build(),
+    config
+);
+List<EmbeddingVector> vectors = embeddingResponse.embeddings();
+```
+
+Omit `.options(...)` from the builder to keep the provider model's default
+vector width.
+
+Embedding inputs are sent unchanged. `AiClient` does not apply
+`PromptInjectionDefense` to `EmbeddingRequest` because adding protection markers
+would make those markers part of the embedded content and change the resulting
+vectors. Apply any host-specific privacy or content policy before calling
+`embed`. `EmbeddingRequest.toString()` reports only the model, input count, and
+options, never the input text.
 
 ## Provider guides
 
-Each provider guide shows how to build `AiRequest` for text, streaming,
-multimodal input, image generation, and image editing. The capability tables also
-identify fields that a particular adapter forwards or ignores.
+Each provider guide shows how to build requests for text, streaming, multimodal
+input, image generation, image editing, and text embeddings. The capability
+tables also identify fields that a particular adapter forwards or ignores.
 
 - [OpenAI](docs/providers/openai.md)
 - [Google Gemini](docs/providers/gemini.md)
@@ -176,7 +207,7 @@ keyring, matching traditional Maven `gpg:sign-and-deploy-file` usage. Keep
 these properties in `~/.gradle/gradle.properties` or CI secrets, for example:
 
 ```properties
-releaseVersion=0.1.0
+releaseVersion=1.1.0
 signingKeyId=0x36F2327F
 ```
 
@@ -184,7 +215,7 @@ If you sign with an in-memory exported private key instead, also provide
 `signingPassword`. To create the Central bundle locally, run:
 
 ```shell
-./gradlew centralBundle -PreleaseVersion=0.1.0 -PsigningKeyId=0x36F2327F
+./gradlew centralBundle -PreleaseVersion=1.1.0 -PsigningKeyId=0x36F2327F
 ```
 
 During a local interactive run, Gradle prints the resolved `releaseVersion` and
@@ -197,7 +228,7 @@ both stable and `-SNAPSHOT` semantic versions. Configure `githubUsername` and
 `GITHUB_TOKEN`, then run:
 
 ```shell
-./gradlew publishMavenJavaPublicationToGitHubPackagesRepository -PreleaseVersion=0.1.0-SNAPSHOT
+./gradlew publishMavenJavaPublicationToGitHubPackagesRepository -PreleaseVersion=1.1.0-SNAPSHOT
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development rules,
