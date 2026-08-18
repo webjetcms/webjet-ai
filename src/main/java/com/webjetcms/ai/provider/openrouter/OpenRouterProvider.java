@@ -38,6 +38,9 @@ import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.BinaryContent;
+import com.webjetcms.ai.EmbeddingOptions;
+import com.webjetcms.ai.EmbeddingTaskType;
+import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
@@ -53,6 +56,7 @@ public final class OpenRouterProvider implements AiProvider {
     private static final URI DEFAULT_BASE_URI = URI.create("https://openrouter.ai/api/v1/");
     private static final String MODELS_PATH = "models?output_modalities=all";
     private static final String CHAT_COMPLETIONS_PATH = "chat/completions";
+    private static final String EMBEDDINGS_PATH = "embeddings";
     private static final int MAX_CONNECTIONS = 100;
     private static final int MAX_CONNECTIONS_PER_ROUTE = 20;
 
@@ -131,6 +135,10 @@ public final class OpenRouterProvider implements AiProvider {
         validateRequest(request);
         validateConfig(config);
 
+        if (request.operation() == AiOperation.EMBEDDING) {
+            return executeEmbedding(request, config);
+        }
+
         HttpPost httpRequest = createChatRequest(request, config, false);
         try (CloseableHttpResponse response = httpClient.execute(httpRequest)) {
             int statusCode = response.getStatusLine().getStatusCode();
@@ -160,7 +168,7 @@ public final class OpenRouterProvider implements AiProvider {
         if (request.operation() != AiOperation.TEXT) {
             throw new AiProviderException(
                 PROVIDER_ID,
-                "OpenRouter image generation and editing do not support streaming in this library provider."
+                "OpenRouter streaming is supported only for text requests."
             );
         }
         if (listener == null) {
@@ -203,6 +211,99 @@ public final class OpenRouterProvider implements AiProvider {
         configureRequest(request, config, stream);
         request.setEntity(new StringEntity(body.toString(), ContentType.APPLICATION_JSON));
         return request;
+    }
+
+    private AiResponse executeEmbedding(AiRequest request, AiProviderConfig config)
+        throws AiProviderException {
+        EmbeddingOptions options = requireEmbeddingRequest(request);
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", request.model());
+        body.put("dimensions", options.dimensions());
+        body.put("encoding_format", "float");
+        ArrayNode input = body.putArray("input");
+        request.embeddingInputs().forEach(input::add);
+        if (options.taskType() != null) {
+            body.put("input_type", inputType(options.taskType()));
+        }
+
+        HttpPost httpRequest = new HttpPost(endpoint(config, EMBEDDINGS_PATH));
+        configureRequest(httpRequest, config, false);
+        httpRequest.setEntity(new StringEntity(body.toString(), ContentType.APPLICATION_JSON));
+        try (CloseableHttpResponse response = httpClient.execute(httpRequest)) {
+            int statusCode = response.getStatusLine().getStatusCode();
+            String rawResponse = readEntity(response.getEntity());
+            ensureSuccessful(statusCode, rawResponse);
+            return parseEmbeddingResponse(
+                rawResponse,
+                request.embeddingInputs().size(),
+                options.dimensions()
+            );
+        } catch (AiProviderException exception) {
+            throw exception.redactSecrets(config);
+        } catch (IOException exception) {
+            throw transportFailure("OpenRouter embedding request failed.", exception).redactSecrets(config);
+        }
+    }
+
+    private AiResponse parseEmbeddingResponse(String rawResponse, int expectedCount, int dimensions)
+        throws AiProviderException {
+        JsonNode root = parseJson(rawResponse, "embedding");
+        throwIfPayloadError(root, rawResponse);
+        JsonNode data = root.get("data");
+        if (data == null || data.isArray() == false || data.size() != expectedCount) {
+            throw malformedResponse("OpenRouter returned an unexpected number of embeddings.", rawResponse);
+        }
+
+        EmbeddingVector[] ordered = new EmbeddingVector[expectedCount];
+        for (JsonNode item : data) {
+            JsonNode indexNode = item.get("index");
+            if (indexNode == null || indexNode.isIntegralNumber() == false || indexNode.canConvertToInt() == false) {
+                throw malformedResponse("OpenRouter embedding response has no valid index.", rawResponse);
+            }
+            int index = indexNode.intValue();
+            if (index < 0 || index >= expectedCount || ordered[index] != null) {
+                throw malformedResponse("OpenRouter embedding response contains an invalid index.", rawResponse);
+            }
+            ordered[index] = parseEmbeddingVector(item.get("embedding"), dimensions, rawResponse);
+        }
+
+        for (EmbeddingVector vector : ordered) {
+            if (vector == null) {
+                throw malformedResponse("OpenRouter embedding response is missing an input index.", rawResponse);
+            }
+        }
+        return new AiResponse(null, List.of(), parseUsage(root.get("usage")), null, List.of(ordered));
+    }
+
+    private EmbeddingVector parseEmbeddingVector(JsonNode values, int dimensions, String rawResponse)
+        throws AiProviderException {
+        if (values == null || values.isArray() == false || values.size() != dimensions) {
+            int actual = values != null && values.isArray() ? values.size() : 0;
+            throw malformedResponse(
+                "OpenRouter returned " + actual + " embedding dimensions, expected " + dimensions + ".",
+                rawResponse
+            );
+        }
+        float[] vector = new float[dimensions];
+        for (int index = 0; index < dimensions; index++) {
+            JsonNode value = values.get(index);
+            if (value.isNumber() == false) {
+                throw malformedResponse("OpenRouter embedding response contains a non-numeric value.", rawResponse);
+            }
+            float parsedValue = value.floatValue();
+            if (Float.isFinite(parsedValue) == false) {
+                throw malformedResponse("OpenRouter embedding response contains a non-finite value.", rawResponse);
+            }
+            vector[index] = parsedValue;
+        }
+        return new EmbeddingVector(vector);
+    }
+
+    private static String inputType(EmbeddingTaskType taskType) {
+        return switch (taskType) {
+            case RETRIEVAL_DOCUMENT -> "search_document";
+            case RETRIEVAL_QUERY -> "search_query";
+        };
     }
 
     ObjectNode buildChatBody(AiRequest request, boolean stream) throws AiProviderException {
@@ -402,6 +503,22 @@ public final class OpenRouterProvider implements AiProvider {
         if (request.operation() == AiOperation.EDIT_IMAGE && request.inputMedia() == null) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter image editing requires input media.");
         }
+    }
+
+    private EmbeddingOptions requireEmbeddingRequest(AiRequest request) throws AiProviderException {
+        EmbeddingOptions options = request.embeddingOptions();
+        if (options == null) {
+            throw new AiProviderException(PROVIDER_ID, "OpenRouter embedding options are required.");
+        }
+        if (request.embeddingInputs().isEmpty()) {
+            throw new AiProviderException(PROVIDER_ID, "At least one OpenRouter embedding input is required.");
+        }
+        for (String input : request.embeddingInputs()) {
+            if (isBlank(input)) {
+                throw new AiProviderException(PROVIDER_ID, "OpenRouter embedding inputs must not be blank.");
+            }
+        }
+        return options;
     }
 
     private URI endpoint(AiProviderConfig config, String path) throws AiProviderException {

@@ -9,12 +9,14 @@ import java.util.List;
  * @param media generated binary media; {@code null} is normalized to an empty immutable list
  * @param usage provider-reported token usage; {@code null} is normalized to {@link TokenUsage#EMPTY}
  * @param finishReason provider-specific completion reason, possibly {@code null}
+ * @param embeddings generated embedding vectors; {@code null} is normalized to an empty immutable list
  */
 public record AiResponse(
     String text,
     List<GeneratedMedia> media,
     TokenUsage usage,
-    String finishReason
+    String finishReason,
+    List<EmbeddingVector> embeddings
 ) {
 
     /**
@@ -24,10 +26,29 @@ public record AiResponse(
      * @param media generated binary media, possibly {@code null}
      * @param usage provider-reported token usage, possibly {@code null}
      * @param finishReason provider-specific completion reason, possibly {@code null}
+     * @param embeddings generated embedding vectors, possibly {@code null}
      */
     public AiResponse {
         media = media == null ? List.of() : List.copyOf(media);
         usage = usage == null ? TokenUsage.EMPTY : usage;
+        embeddings = embeddings == null ? List.of() : List.copyOf(embeddings);
+    }
+
+    /**
+     * Creates a text or media response using the API available before embedding support.
+     *
+     * @param text generated or accumulated text, possibly {@code null}
+     * @param media generated binary media, possibly {@code null}
+     * @param usage provider-reported token usage, possibly {@code null}
+     * @param finishReason provider-specific completion reason, possibly {@code null}
+     */
+    public AiResponse(
+        String text,
+        List<GeneratedMedia> media,
+        TokenUsage usage,
+        String finishReason
+    ) {
+        this(text, media, usage, finishReason, List.of());
     }
 
     /**
@@ -47,6 +68,6 @@ public record AiResponse(
      * @return response copy containing the replacement text
      */
     public AiResponse withText(String replacementText) {
-        return new AiResponse(replacementText, media, usage, finishReason);
+        return new AiResponse(replacementText, media, usage, finishReason, embeddings);
     }
 }

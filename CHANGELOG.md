@@ -3,6 +3,15 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-08-18
+
+### Added
+
+- Provider-neutral embedding requests and responses through
+  `AiOperation.EMBEDDING`.
+- Batch embedding support for OpenAI, Gemini, and OpenRouter with explicit
+  output dimensions and retrieval task types.
+
 ## [1.0.0] - 2026-08-13
 
 ### Added
@@ -35,5 +44,7 @@ uses [Semantic Versioning](https://semver.org/).
 - Prompt-injection defense utilities.
 - Java 17 build, tests, API documentation, and Maven Central publication.
 
-[Unreleased]: https://github.com/webjetcms/webjet-ai/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/webjetcms/webjet-ai/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/webjetcms/webjet-ai/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/webjetcms/webjet-ai/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/webjetcms/webjet-ai/releases/tag/v0.1.0
