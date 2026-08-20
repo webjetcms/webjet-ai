@@ -120,9 +120,11 @@ class GeminiProviderEmbeddingTest {
         assertEquals(2, requests.size());
         assertEquals("models/gemini-embedding-test", requests.get(0).path("model").asText());
         assertEquals("first", requests.get(0).path("content").path("parts").get(0).path("text").asText());
-        assertEquals(3, requests.get(0).path("embedContentConfig").path("outputDimensionality").asInt());
+        assertEquals(3, requests.get(0).path("outputDimensionality").asInt());
+        assertFalse(requests.get(0).has("embedContentConfig"));
         assertEquals("second", requests.get(1).path("content").path("parts").get(0).path("text").asText());
-        assertEquals(3, requests.get(1).path("embedContentConfig").path("outputDimensionality").asInt());
+        assertEquals(3, requests.get(1).path("outputDimensionality").asInt());
+        assertFalse(requests.get(1).has("embedContentConfig"));
         assertFalse(body.toString().contains("taskType"));
 
         assertEquals(2, response.embeddings().size());
@@ -158,8 +160,8 @@ class GeminiProviderEmbeddingTest {
         }
 
         JsonNode defaultRequests = MAPPER.readTree(defaultsRequestBody.get()).path("requests");
-        assertFalse(defaultRequests.get(0).has("embedContentConfig"));
-        assertFalse(defaultRequests.get(1).has("embedContentConfig"));
+        assertFalse(defaultRequests.get(0).has("outputDimensionality"));
+        assertFalse(defaultRequests.get(1).has("outputDimensionality"));
         assertEquals(4, defaultsResponse.embeddings().get(0).dimensions());
         assertEquals(4, defaultsResponse.embeddings().get(1).dimensions());
     }

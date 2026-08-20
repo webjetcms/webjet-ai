@@ -266,8 +266,7 @@ public final class GeminiProvider implements AiProvider {
             item.put("model", modelResource);
             item.putObject("content").putArray("parts").addObject().put("text", input);
             if (dimensions != null) {
-                item.putObject("embedContentConfig")
-                    .put("outputDimensionality", dimensions);
+                item.put("outputDimensionality", dimensions);
             }
         }
 
