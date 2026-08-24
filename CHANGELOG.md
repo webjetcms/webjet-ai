@@ -16,6 +16,14 @@ uses [Semantic Versioning](https://semver.org/).
   standalone custom-provider implementation guide.
 - Dynamic model catalogues continue to come from the selected provider through
   `listModels(...)`; `AiClient` does not hardcode model identifiers.
+  
+## [1.1.1]
+
+### Fixed
+
+- Gemini batch embedding requests now set `outputDimensionality` directly on
+  each request item when an explicit dimension is configured
+  ([2781476](https://github.com/webjetcms/webjet-ai/commit/2781476aef800e51f7ab15ee69d5300b853b82c9)).
 
 ## [1.1.0]
 
@@ -59,6 +67,8 @@ uses [Semantic Versioning](https://semver.org/).
 - Prompt-injection defense utilities.
 - Java 17 build, tests, API documentation, and Maven Central publication.
 
-[Unreleased]: https://github.com/webjetcms/webjet-ai/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/webjetcms/webjet-ai/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/webjetcms/webjet-ai/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/webjetcms/webjet-ai/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/webjetcms/webjet-ai/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/webjetcms/webjet-ai/releases/tag/v0.1.0

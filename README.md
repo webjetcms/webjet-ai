@@ -21,7 +21,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.webjetcms:webjet-ai:1.0.0'
+    implementation 'com.webjetcms:webjet-ai:1.1.1'
 }
 ```
 
@@ -31,7 +31,7 @@ Maven:
 <dependency>
     <groupId>com.webjetcms</groupId>
     <artifactId>webjet-ai</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.1</version>
 </dependency>
 ```
 
@@ -290,7 +290,7 @@ keyring, matching traditional Maven `gpg:sign-and-deploy-file` usage. Keep
 these properties in `~/.gradle/gradle.properties` or CI secrets, for example:
 
 ```properties
-releaseVersion=1.1.0
+releaseVersion=1.1.1
 signingKeyId=0x36F2327F
 ```
 
@@ -298,7 +298,7 @@ If you sign with an in-memory exported private key instead, also provide
 `signingPassword`. To create the Central bundle locally, run:
 
 ```shell
-./gradlew centralBundle -PreleaseVersion=1.1.0 -PsigningKeyId=0x36F2327F
+./gradlew centralBundle -PreleaseVersion=1.1.1 -PsigningKeyId=0x36F2327F
 ```
 
 During a local interactive run, Gradle prints the resolved `releaseVersion` and
@@ -311,7 +311,7 @@ both stable and `-SNAPSHOT` semantic versions. Configure `githubUsername` and
 `GITHUB_TOKEN`, then run:
 
 ```shell
-./gradlew publishMavenJavaPublicationToGitHubPackagesRepository -PreleaseVersion=1.1.0-SNAPSHOT
+./gradlew publishMavenJavaPublicationToGitHubPackagesRepository -PreleaseVersion=1.1.1-SNAPSHOT
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development rules,
