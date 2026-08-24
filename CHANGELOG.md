@@ -3,6 +3,20 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Built-in discovery through `AiClient.discover()` and explicit, client-local custom
+  providers through `AiClient.discover(AiProvider...)`, without class-path scanning or
+  a mutable global registry. Supplied custom providers transfer ownership only after
+  successful client creation.
+- Immutable, sorted provider IDs through `AiClient.providers()`, public built-in
+  `String` constants and `builtIns()` catalogue through `AiProviders`, and a
+  standalone custom-provider implementation guide.
+- Dynamic model catalogues continue to come from the selected provider through
+  `listModels(...)`; `AiClient` does not hardcode model identifiers.
+
 ## [1.1.0]
 
 ### Added

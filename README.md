@@ -35,6 +35,9 @@ Maven:
 </dependency>
 ```
 
+The provider-discovery API below targets the current development branch and is
+scheduled for the next release; it is not part of the `1.0.0` artifact.
+
 ## Minimal usage
 
 ```java
@@ -44,46 +47,125 @@ import com.webjetcms.ai.AiClient;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
-import com.webjetcms.ai.EmbeddingOptions;
-import com.webjetcms.ai.EmbeddingRequest;
-import com.webjetcms.ai.EmbeddingResponse;
-import com.webjetcms.ai.EmbeddingVector;
-import com.webjetcms.ai.provider.gemini.GeminiProvider;
-import com.webjetcms.ai.provider.openai.OpenAiProvider;
+import com.webjetcms.ai.ModelInfo;
 
-try (AiClient client = AiClient.of(new OpenAiProvider())) {
-    AiProviderConfig config = AiProviderConfig.builder(secretStore.get("openai.apiKey"))
+try (AiClient client = AiClient.discover()) {
+    List<String> providers = client.providers();
+    providers.forEach(System.out::println);
+
+    // Let host policy or the user choose a provider with configured credentials.
+    String provider = selectConfiguredProvider(providers);
+    if (client.hasProvider(provider) == false) {
+        throw new IllegalArgumentException("Unknown provider: " + provider);
+    }
+    AiProviderConfig config = AiProviderConfig.builder(
+        secretStore.get(provider + ".apiKey")
+    )
         .build();
+    List<ModelInfo> models = client.listModels(provider, config);
+
+    // Choose a text-generation model using provider capability information.
+    String modelId = selectTextGenerationModel(provider, models);
+    if (models.stream().noneMatch(model -> modelId.equals(model.id()))) {
+        throw new IllegalArgumentException(
+            "Model is not in the provider catalogue: " + modelId
+        );
+    }
+
     AiRequest request = AiRequest.builder()
-        .model("gpt-5-mini")
+        .model(modelId)
         .instructions("Summarize the supplied text.")
         .inputText(text)
         .store(false)
         .build();
 
-    AiResponse response = client.execute(request, config);
+    AiResponse response = client.execute(provider, request, config);
 }
 ```
 
-When `AiClient` contains one provider, `execute`, `stream`, `embed`, and `listModels`
-select it automatically. The bundled provider identifiers `openai`, `gemini`,
-and `openrouter` are needed only when one client contains multiple providers:
+`AiClient.discover()` creates a client with every provider bundled with WebJET AI.
+`client.providers()` returns an immutable `List<String>` sorted by provider ID; it does
+not need credentials or make model-catalogue requests. Pass the selected ID to
+`listModels`, `execute`, `stream`, or `embed`. The client keeps no hardcoded model list:
+`listModels` delegates to the selected provider using the supplied configuration.
+The example's `selectConfiguredProvider(...)` and `selectTextGenerationModel(...)`
+calls represent host UI or policy. A catalogue entry does not describe model
+capabilities, so use provider capability metadata or documentation rather than list
+position when selecting a model for an operation.
+
+Built-in IDs are also available as the public `String` constants
+`AiProviders.OPENAI`, `AiProviders.GEMINI`, and `AiProviders.OPENROUTER`.
+`AiProviders.builtIns()` returns the complete immutable, sorted built-in ID list without
+creating a client or provider transport. In contrast, `client.providers()` describes
+that client and therefore also includes custom providers supplied to `discover(...)`.
+A provider added in a newer WebJET AI version appears automatically after the dependency
+is updated. Credentials are required only when the application calls that provider.
 
 ```java
-try (AiClient client = AiClient.of(new OpenAiProvider(), new GeminiProvider())) {
-    AiResponse response = client.execute("gemini", request, geminiConfig);
+import java.util.List;
+
+import com.webjetcms.ai.AiProviders;
+
+List<String> bundledProviders = AiProviders.builtIns();
+String openAi = AiProviders.OPENAI;
+```
+
+Add an application-owned provider directly during discovery:
+
+```java
+MyProvider custom = new MyProvider(sharedHttpClient, applicationMetrics);
+try (AiClient client = AiClient.discover(
+    custom
+)) {
+    // Bundled provider IDs plus MyProvider.PROVIDER_ID are available here.
 }
 ```
 
-The provider-ID overloads are also available for embedding, streaming, and model
-discovery. Identifier-free calls fail clearly if the client contains zero or
+The `AiProvider...` parameter lets Java verify that every custom implementation
+implements `AiProvider`. Its exact `provider.id()` value appears in
+`client.providers()` and selects its operations. Registration is local to that client:
+there is no global mutable catalogue or class-path scan. Provider IDs are matched exactly
+and case-sensitively and are never trimmed or normalized; duplicate IDs fail discovery.
+Pass a fresh custom provider instance to each client. After successful discovery the client
+owns and closes all its providers.
+If discovery fails, the library closes bundled instances it created, while the caller
+retains ownership of supplied custom instances and must close them. Keep each custom
+instance in a variable, as above, so failure handling can still access it.
+
+See [Implementing and using a custom AI provider](docs/custom-providers.md)
+for a complete implementation, configuration, lifecycle, and usage guide.
+
+Use `AiClient.of(...)` when a host wants only explicitly supplied providers and not
+the bundled set:
+
+```java
+MyProvider customOnly = new MyProvider();
+try (AiClient client = AiClient.of(customOnly)) {
+    // Only MyProvider is registered.
+}
+```
+
+As with `discover(...)`, ownership of the supplied provider transfers to the client only
+when `of(...)` returns successfully. If validation fails, the caller retains ownership.
+
+When `AiClient` contains one provider, `execute`, `stream`, `embed`, and `listModels`
+select it automatically. Use their provider-ID overloads when the client contains
+multiple providers. Identifier-free calls fail clearly if the client contains zero or
 multiple providers.
 
 Embeddings use a dedicated request and response API, so the existing
 `AiOperation` and `AiResponse` contracts remain unchanged:
 
 ```java
+import java.util.List;
+
+import com.webjetcms.ai.EmbeddingOptions;
+import com.webjetcms.ai.EmbeddingRequest;
+import com.webjetcms.ai.EmbeddingResponse;
+import com.webjetcms.ai.EmbeddingVector;
+
 EmbeddingResponse embeddingResponse = client.embed(
+    provider,
     EmbeddingRequest.builder()
         .model("your-embedding-model")
         .inputs(List.of("First text", "Second text"))
@@ -113,6 +195,7 @@ tables also identify fields that a particular adapter forwards or ignores.
 - [OpenAI](docs/providers/openai.md)
 - [Google Gemini](docs/providers/gemini.md)
 - [OpenRouter](docs/providers/openrouter.md)
+- [Custom providers](docs/custom-providers.md)
 
 ## Automatic request preparation
 

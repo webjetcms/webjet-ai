@@ -3,17 +3,24 @@ package com.webjetcms.ai;
 import java.util.List;
 
 /**
- * Service-provider interface implemented by each supported AI backend.
+ * Provider contract implemented by each supported AI backend.
  *
- * <p>Provider implementations may own reusable transport resources. Applications
- * should therefore reuse provider instances and close them during shutdown.
- * Applications normally invoke providers through {@link AiClient}, which applies
- * prompt defenses to {@link AiRequest} generation operations before delegation.</p>
+ * <p>Provider implementations may own reusable transport resources. A provider instance
+ * should therefore be reused for calls made by its owning {@link AiClient}. Applications
+ * normally invoke providers through the client, which applies prompt defenses to
+ * {@link AiRequest} generation operations before delegation.</p>
+ *
+ * <p>Application-owned implementations can use constructor injection and be added to the
+ * bundled providers through {@link AiClient#discover(AiProvider...)}, or used alone through
+ * {@link AiClient#of(AiProvider...)}. Ownership transfers to a successfully created client,
+ * which closes its providers. If client creation fails, supplied instances remain owned by
+ * the caller.</p>
  */
 public interface AiProvider extends AutoCloseable {
 
     /**
      * Returns the stable identifier used to register and select this provider.
+     * The value is matched exactly and case-sensitively and is not normalized.
      *
      * @return a non-blank provider identifier
      */
@@ -69,7 +76,9 @@ public interface AiProvider extends AutoCloseable {
         throws AiProviderException;
 
     /**
-     * Releases transport resources owned by this provider.
+     * Releases resources owned by this provider when its client is closed.
+     * Implementations must not close injected application-owned resources unless ownership
+     * of those resources was explicitly transferred to the provider.
      *
      * @throws Exception when an owned resource cannot be closed
      */
