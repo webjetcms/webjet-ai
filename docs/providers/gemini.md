@@ -170,6 +170,10 @@ EmbeddingRequest request = EmbeddingRequest.builder()
     .build();
 ```
 
+Starting with WebJET AI 1.1.1, an explicit dimension is sent as
+`outputDimensionality` directly on every Gemini batch request item, matching the
+Gemini API payload.
+
 When dimensions are explicit, every returned vector must have exactly that
 width. When they are omitted, the adapter infers a positive width from the first
 vector and requires all remaining vectors to match. Empty, inconsistent,
