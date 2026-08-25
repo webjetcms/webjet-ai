@@ -9,6 +9,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import com.webjetcms.ai.image.ImageOptionDefinition;
+
 /**
  * Owns a fixed set of AI provider instances and selects them by exact identifier.
  *

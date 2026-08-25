@@ -46,7 +46,7 @@ import com.webjetcms.ai.EmbeddingOptions;
 import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.GeneratedMedia;
-import com.webjetcms.ai.ImageOptions;
+import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.provider.gemini.GeminiProvider;
 

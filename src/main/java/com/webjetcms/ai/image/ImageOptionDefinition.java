@@ -1,4 +1,4 @@
-package com.webjetcms.ai;
+package com.webjetcms.ai.image;
 
 import java.util.List;
 import java.util.Objects;

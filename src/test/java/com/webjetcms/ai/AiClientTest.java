@@ -15,6 +15,7 @@ import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
+import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 
 class AiClientTest {

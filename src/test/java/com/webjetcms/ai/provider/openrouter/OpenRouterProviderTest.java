@@ -47,8 +47,8 @@ import com.webjetcms.ai.BinaryContent;
 import com.webjetcms.ai.EmbeddingOptions;
 import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
-import com.webjetcms.ai.ImageOptionDefinition;
-import com.webjetcms.ai.ImageOptions;
+import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.image.ImageOptions;
 
 class OpenRouterProviderTest {
 

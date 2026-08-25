@@ -18,7 +18,8 @@ uses [Semantic Versioning](https://semver.org/).
   `listModels(...)`; `AiClient` does not hardcode model identifiers.
 - Immutable, model- and operation-specific image option metadata through
   `AiClient.imageOptions(...)`, plus provider-specific scalar controls in the
-  source-compatible `ImageOptions` builder.
+  `com.webjetcms.ai.image.ImageOptions` builder. Image option values and metadata
+  now live together in the dedicated `com.webjetcms.ai.image` package.
 - Local validation and serialization of supported OpenAI, Gemini, and OpenRouter
   rendering controls, including cross-field format rules, GPT Image 2 custom
   dimension limits, and portable-option compatibility for uncatalogued

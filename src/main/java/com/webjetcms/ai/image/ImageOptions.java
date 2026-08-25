@@ -1,4 +1,4 @@
-package com.webjetcms.ai;
+package com.webjetcms.ai.image;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;

@@ -212,7 +212,7 @@ capabilities:
 ```java
 import java.util.Map;
 
-import com.webjetcms.ai.ImageOptionDefinition;
+import com.webjetcms.ai.image.ImageOptionDefinition;
 
 @Override
 public Map<String, ImageOptionDefinition> imageOptions(

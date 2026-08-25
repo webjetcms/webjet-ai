@@ -36,8 +36,8 @@ import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.BinaryContent;
-import com.webjetcms.ai.ImageOptionDefinition;
-import com.webjetcms.ai.ImageOptions;
+import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.security.PromptInjectionDefense;
 
 class GeminiResponseParserTest {

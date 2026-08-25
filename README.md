@@ -104,8 +104,8 @@ import java.util.Map;
 
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviders;
-import com.webjetcms.ai.ImageOptionDefinition;
-import com.webjetcms.ai.ImageOptions;
+import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.image.ImageOptions;
 
 String imageProvider = AiProviders.OPENAI;
 String imageModel = "gpt-image-2";

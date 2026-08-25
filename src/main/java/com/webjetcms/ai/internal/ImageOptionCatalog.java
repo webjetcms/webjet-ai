@@ -4,7 +4,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-import com.webjetcms.ai.ImageOptionDefinition;
+import com.webjetcms.ai.image.ImageOptionDefinition;
 
 /** Shared definitions and helpers for deterministic immutable image option catalogues. */
 public final class ImageOptionCatalog {

@@ -11,6 +11,8 @@ import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 
+import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.internal.ImageOptionValidator;
 
 class ImageOptionsTest {

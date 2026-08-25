@@ -1,4 +1,4 @@
-package com.webjetcms.ai;
+package com.webjetcms.ai.image;
 
 /** Describes the value shape accepted by one image rendering option. */
 public enum ImageOptionValueType {

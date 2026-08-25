@@ -4,8 +4,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-import com.webjetcms.ai.ImageOptionDefinition;
-import com.webjetcms.ai.ImageOptions;
+import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.internal.ImageOptionCatalog;
 
 /** OpenRouter image-model option metadata. */

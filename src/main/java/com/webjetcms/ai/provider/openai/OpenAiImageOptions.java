@@ -7,8 +7,8 @@ import java.util.Map;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
-import com.webjetcms.ai.ImageOptionDefinition;
-import com.webjetcms.ai.ImageOptions;
+import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.internal.ImageOptionCatalog;
 import com.webjetcms.ai.internal.ImageOptionValidator;
 

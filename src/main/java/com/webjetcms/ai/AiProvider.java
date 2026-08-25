@@ -3,6 +3,8 @@ package com.webjetcms.ai;
 import java.util.List;
 import java.util.Map;
 
+import com.webjetcms.ai.image.ImageOptionDefinition;
+
 /**
  * Provider contract implemented by each supported AI backend.
  *

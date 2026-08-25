@@ -5,6 +5,7 @@ import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Set;
 
+import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.security.PromptInjectionDefense;
 import com.webjetcms.ai.security.PromptInjectionDefense.ProtectionResult;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
