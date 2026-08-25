@@ -3,7 +3,7 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.0]
 
 ### Added
 
@@ -20,15 +20,11 @@ uses [Semantic Versioning](https://semver.org/).
   `AiClient.imageOptions(...)`, plus provider-specific scalar controls in the
   `com.webjetcms.ai.image.ImageOptions` builder. Image option values and metadata
   now live together in the dedicated `com.webjetcms.ai.image` package.
-- Local validation and serialization of supported OpenAI, Gemini, and OpenRouter
-  rendering controls, including cross-field format rules, GPT Image 2 custom
-  dimension limits, and portable-option compatibility for uncatalogued
-  OpenAI-compatible model IDs. Image operations consistently require meaningful
-  prompt text rather than treating injected security rules as task instructions.
-- Dedicated OpenRouter Images API generation/editing, MIME-aware Base64 response
-  parsing with preserved response status, single-reference generation/editing,
-  and PNG, JPEG, or WebP generated-media handling.
-  
+- Validation for image requests, including provider-specific option combinations,
+  custom GPT Image 2 dimensions, and required non-blank prompts.
+- Image generation and editing through OpenRouter, with support for one reference
+  image and PNG, JPEG, and WebP responses.
+
 ## [1.1.1]
 
 ### Fixed
@@ -79,7 +75,8 @@ uses [Semantic Versioning](https://semver.org/).
 - Prompt-injection defense utilities.
 - Java 17 build, tests, API documentation, and Maven Central publication.
 
-[Unreleased]: https://github.com/webjetcms/webjet-ai/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/webjetcms/webjet-ai/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/webjetcms/webjet-ai/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/webjetcms/webjet-ai/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/webjetcms/webjet-ai/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/webjetcms/webjet-ai/compare/v0.1.0...v1.0.0
