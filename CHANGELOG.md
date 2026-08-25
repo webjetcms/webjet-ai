@@ -16,6 +16,17 @@ uses [Semantic Versioning](https://semver.org/).
   standalone custom-provider implementation guide.
 - Dynamic model catalogues continue to come from the selected provider through
   `listModels(...)`; `AiClient` does not hardcode model identifiers.
+- Immutable, model- and operation-specific image option metadata through
+  `AiClient.imageOptions(...)`, plus provider-specific scalar controls in the
+  source-compatible `ImageOptions` builder.
+- Local validation and serialization of supported OpenAI, Gemini, and OpenRouter
+  rendering controls, including cross-field format rules, GPT Image 2 custom
+  dimension limits, and portable-option compatibility for uncatalogued
+  OpenAI-compatible model IDs. Image operations consistently require meaningful
+  prompt text rather than treating injected security rules as task instructions.
+- Dedicated OpenRouter Images API generation/editing, MIME-aware Base64 response
+  parsing with preserved response status, single-reference generation/editing,
+  and PNG, JPEG, or WebP generated-media handling.
   
 ## [1.1.1]
 

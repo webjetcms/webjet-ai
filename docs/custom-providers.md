@@ -203,6 +203,40 @@ to the selected provider with the supplied configuration.
 A model catalogue does not by itself prove that a model supports streaming, images,
 or embeddings.
 
+### Publish image option metadata
+
+`AiProvider.imageOptions(model, operation)` has a source-compatible default that
+returns an empty map. Override it when a custom provider can publish static image
+capabilities:
+
+```java
+import java.util.Map;
+
+import com.webjetcms.ai.ImageOptionDefinition;
+
+@Override
+public Map<String, ImageOptionDefinition> imageOptions(
+    String model,
+    AiOperation operation
+) {
+    if ("example-image-1".equals(model)
+        && operation == AiOperation.GENERATE_IMAGE) {
+        return Map.of(
+            "quality",
+            ImageOptionDefinition.choices("standard", "high")
+        );
+    }
+    return Map.of();
+}
+```
+
+The method must not require credentials or network I/O. Return an immutable or
+caller-safe, deterministically ordered map whose keys use `count`, `size`, or
+`quality` for portable controls and provider wire names for other controls.
+Definitions can describe ordered choices, inclusive integer ranges, booleans,
+or patterned strings. `AiClient` defensively copies the result. A blank model or
+non-image operation is rejected before delegation.
+
 ## 4. Execute and stream requests
 
 Select both the provider and a model returned by that provider:

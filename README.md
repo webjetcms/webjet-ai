@@ -93,6 +93,51 @@ calls represent host UI or policy. A catalogue entry does not describe model
 capabilities, so use provider capability metadata or documentation rather than list
 position when selecting a model for an operation.
 
+## Image capability lookup
+
+Image rendering controls are model- and operation-specific. Query them before
+building a form or request; the lookup uses a release-time static catalogue and
+therefore needs neither credentials nor network access:
+
+```java
+import java.util.Map;
+
+import com.webjetcms.ai.AiOperation;
+import com.webjetcms.ai.AiProviders;
+import com.webjetcms.ai.ImageOptionDefinition;
+import com.webjetcms.ai.ImageOptions;
+
+String imageProvider = AiProviders.OPENAI;
+String imageModel = "gpt-image-2";
+Map<String, ImageOptionDefinition> supported = client.imageOptions(
+    imageProvider,
+    imageModel,
+    AiOperation.GENERATE_IMAGE
+);
+
+ImageOptions options = ImageOptions.builder()
+    .count(1)
+    .size("1024x1024")
+    .quality("high")
+    .providerOption("background", "transparent")
+    .providerOption("output_format", "webp")
+    .build();
+```
+
+The returned map is immutable and deterministically ordered. Each definition is
+a choice list, inclusive integer range, boolean, or patterned string, allowing a
+host to render suitable controls. The portable keys are `count`, `size`, and
+`quality`; other keys retain the provider's documented wire name. The existing
+`new ImageOptions(count, size, quality)` constructor remains available.
+
+Only `GENERATE_IMAGE` and `EDIT_IMAGE` may be queried. An empty map means that
+the model is not in this release's static image catalogue. Such model IDs remain
+usable without explicit options. For compatibility with custom OpenAI-compatible
+endpoints, uncatalogued OpenAI model IDs also retain pass-through support for the
+portable `count`, `size`, and `quality` fields; provider-specific options still
+require catalogue metadata. Options advertised by a catalogue are validated
+locally before transport.
+
 Built-in IDs are also available as the public `String` constants
 `AiProviders.OPENAI`, `AiProviders.GEMINI`, and `AiProviders.OPENROUTER`.
 `AiProviders.builtIns()` returns the complete immutable, sorted built-in ID list without

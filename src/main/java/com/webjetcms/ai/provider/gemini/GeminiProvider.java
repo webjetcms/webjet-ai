@@ -11,6 +11,7 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
@@ -43,8 +44,11 @@ import com.webjetcms.ai.EmbeddingOptions;
 import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.EmbeddingVector;
+import com.webjetcms.ai.ImageOptionDefinition;
+import com.webjetcms.ai.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
+import com.webjetcms.ai.internal.ImageOptionValidator;
 import com.webjetcms.ai.security.PromptInjectionDefense;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 
@@ -90,6 +94,12 @@ public final class GeminiProvider implements AiProvider {
     @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
         return invokeAtBoundary(config, () -> listModelsInternal(config));
+    }
+
+    @Override
+    public Map<String, ImageOptionDefinition> imageOptions(String model, AiOperation operation) {
+        AiProvider.super.imageOptions(model, operation);
+        return GeminiImageOptions.definitions(normalizeModelId(model), operation);
     }
 
     private List<ModelInfo> listModelsInternal(AiProviderConfig config) throws AiProviderException {
@@ -433,7 +443,7 @@ public final class GeminiProvider implements AiProvider {
         }
         addProtectedTextPart(parts, request.userPrompt(), UntrustedSource.USER_PROMPT);
         addMediaPart(parts, request.inputMedia());
-        if (parts.isEmpty()) {
+        if (parts.isEmpty() && request.operation() == AiOperation.TEXT) {
             addTextPart(parts, "Apply the task instructions to the provided data.");
         }
 
@@ -446,7 +456,20 @@ public final class GeminiProvider implements AiProvider {
         }
 
         String modality = request.operation() == AiOperation.TEXT ? "TEXT" : "IMAGE";
-        root.putObject("generationConfig").putArray("responseModalities").add(modality);
+        ObjectNode generationConfig = root.putObject("generationConfig");
+        generationConfig.putArray("responseModalities").add(modality);
+        if (request.operation() != AiOperation.TEXT) {
+            Map<String, Object> imageOptions = ImageOptionValidator.suppliedValues(
+                request.imageOptions()
+            );
+            if (imageOptions.isEmpty() == false) {
+                ObjectNode imageConfig = generationConfig.putObject("imageConfig");
+                imageOptions.forEach((key, value) -> imageConfig.put(
+                    ImageOptions.SIZE.equals(key) ? "imageSize" : key,
+                    String.valueOf(value)
+                ));
+            }
+        }
         return root;
     }
 
@@ -563,6 +586,36 @@ public final class GeminiProvider implements AiProvider {
             && (request.inputMedia() == null || request.inputMedia().data().length == 0)) {
             throw new AiProviderException(PROVIDER_ID, "Gemini image editing requires input media.");
         }
+        if ((request.operation() == AiOperation.GENERATE_IMAGE
+            || request.operation() == AiOperation.EDIT_IMAGE)
+            && hasMeaningfulImagePrompt(request) == false) {
+            throw new AiProviderException(PROVIDER_ID, "Gemini image prompt is required.");
+        }
+        if (request.operation() != AiOperation.TEXT) {
+            ImageOptionValidator.validate(
+                PROVIDER_ID,
+                normalizeModelId(request.model()),
+                request.operation(),
+                request.imageOptions(),
+                GeminiImageOptions.definitions(
+                    normalizeModelId(request.model()),
+                    request.operation()
+                )
+            );
+        }
+    }
+
+    private static boolean hasMeaningfulImagePrompt(AiRequest request) {
+        return PromptInjectionDefense.hasTaskInstructions(request.instructions())
+            || PromptInjectionDefense.hasUntrustedText(
+                request.userPrompt(),
+                UntrustedSource.USER_PROMPT
+            )
+            || (request.operation() == AiOperation.GENERATE_IMAGE
+                && PromptInjectionDefense.hasUntrustedText(
+                    request.inputText(),
+                    UntrustedSource.INPUT_TEXT
+                ));
     }
 
     private static EmbeddingOptions requireEmbeddingRequest(EmbeddingRequest request)

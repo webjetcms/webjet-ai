@@ -43,12 +43,15 @@ import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
+import com.webjetcms.ai.ImageOptionDefinition;
+import com.webjetcms.ai.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
+import com.webjetcms.ai.internal.ImageOptionValidator;
 import com.webjetcms.ai.security.PromptInjectionDefense;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 
-/** Framework-neutral client for the OpenRouter chat-completions API. */
+/** Framework-neutral client for OpenRouter text, embedding, and image APIs. */
 public final class OpenRouterProvider implements AiProvider {
 
     /** Stable provider identifier used by {@code AiClient}. */
@@ -57,7 +60,9 @@ public final class OpenRouterProvider implements AiProvider {
     private static final URI DEFAULT_BASE_URI = URI.create("https://openrouter.ai/api/v1/");
     private static final String MODELS_PATH = "models?output_modalities=all";
     private static final String CHAT_COMPLETIONS_PATH = "chat/completions";
+    private static final String IMAGES_PATH = "images";
     private static final String EMBEDDINGS_PATH = "embeddings";
+    static final String IMAGE_MODELS_CATALOGUE_VERSION = OpenRouterImageOptions.CATALOGUE_VERSION;
     private static final int MAX_CONNECTIONS = 100;
     private static final int MAX_CONNECTIONS_PER_ROUTE = 20;
 
@@ -89,6 +94,12 @@ public final class OpenRouterProvider implements AiProvider {
     @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
         return invokeAtBoundary(config, () -> listModelsInternal(config));
+    }
+
+    @Override
+    public Map<String, ImageOptionDefinition> imageOptions(String model, AiOperation operation) {
+        AiProvider.super.imageOptions(model, operation);
+        return OpenRouterImageOptions.definitions(model);
     }
 
     private List<ModelInfo> listModelsInternal(AiProviderConfig config) throws AiProviderException {
@@ -136,6 +147,10 @@ public final class OpenRouterProvider implements AiProvider {
         validateRequest(request);
         validateConfig(config);
 
+        if (request.operation() != AiOperation.TEXT) {
+            return executeImageInternal(request, config);
+        }
+
         HttpPost httpRequest = createChatRequest(request, config, false);
         try (CloseableHttpResponse response = httpClient.execute(httpRequest)) {
             int statusCode = response.getStatusLine().getStatusCode();
@@ -146,6 +161,29 @@ public final class OpenRouterProvider implements AiProvider {
             throw exception.redactSecrets(config);
         } catch (IOException exception) {
             throw transportFailure("OpenRouter request failed.", exception).redactSecrets(config);
+        }
+    }
+
+    private AiResponse executeImageInternal(AiRequest request, AiProviderConfig config)
+        throws AiProviderException {
+        ObjectNode body = buildImageBody(request);
+        HttpPost httpRequest = new HttpPost(endpoint(config, IMAGES_PATH));
+        configureRequest(httpRequest, config, false);
+        httpRequest.setEntity(new StringEntity(body.toString(), ContentType.APPLICATION_JSON));
+        try (CloseableHttpResponse response = httpClient.execute(httpRequest)) {
+            int statusCode = response.getStatusLine().getStatusCode();
+            String rawResponse = readEntity(response.getEntity());
+            ensureSuccessful(statusCode, rawResponse);
+            return parseImageResponse(
+                rawResponse,
+                textOrNull(body.get("output_format")),
+                request.model(),
+                statusCode
+            );
+        } catch (AiProviderException exception) {
+            throw exception.redactSecrets(config);
+        } catch (IOException exception) {
+            throw transportFailure("OpenRouter image request failed.", exception).redactSecrets(config);
         }
     }
 
@@ -250,6 +288,32 @@ public final class OpenRouterProvider implements AiProvider {
         return request;
     }
 
+    ObjectNode buildImageBody(AiRequest request) throws AiProviderException {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", request.model());
+        if (hasMeaningfulImagePrompt(request) == false) {
+            throw new AiProviderException(PROVIDER_ID, "OpenRouter image prompt is required.");
+        }
+        body.put("prompt", imagePrompt(request));
+
+        Map<String, Object> options = ImageOptionValidator.validate(
+            PROVIDER_ID,
+            request.model(),
+            request.operation(),
+            request.imageOptions(),
+            OpenRouterImageOptions.definitions(request.model())
+        );
+        for (Map.Entry<String, Object> option : options.entrySet()) {
+            String wireName = ImageOptions.COUNT.equals(option.getKey()) ? "n" : option.getKey();
+            putScalar(body, wireName, option.getValue());
+        }
+
+        if (request.inputMedia() != null) {
+            addInputReference(body, request.inputMedia());
+        }
+        return body;
+    }
+
     private EmbeddingResponse parseEmbeddingResponse(
         String rawResponse,
         int expectedCount,
@@ -298,6 +362,85 @@ public final class OpenRouterProvider implements AiProvider {
             }
         }
         return new EmbeddingResponse(List.of(ordered), parseUsage(root.get("usage")));
+    }
+
+    AiResponse parseImageResponse(
+        String rawResponse,
+        String requestedFormat,
+        String model,
+        int statusCode
+    )
+        throws AiProviderException {
+        JsonNode root = parseJson(rawResponse, "image", statusCode);
+        throwIfPayloadError(root, rawResponse, statusCode);
+        JsonNode data = root.get("data");
+        if (data == null || data.isArray() == false) {
+            throw malformedResponse(
+                statusCode,
+                "OpenRouter image response does not contain a data array.",
+                rawResponse
+            );
+        }
+
+        List<GeneratedMedia> media = new ArrayList<>();
+        for (JsonNode image : data) {
+            if (image.isObject() == false) {
+                throw malformedResponse(
+                    statusCode,
+                    "OpenRouter image response contains a non-object data entry.",
+                    rawResponse
+                );
+            }
+            JsonNode encodedNode = image.get("b64_json");
+            if (encodedNode != null && encodedNode.isNull() == false && encodedNode.isTextual() == false) {
+                throw malformedResponse(
+                    statusCode,
+                    "OpenRouter image response contains non-text Base64 data.",
+                    rawResponse
+                );
+            }
+            String encoded = textOrNull(encodedNode);
+            if (isBlank(encoded)) continue;
+            JsonNode mediaTypeNode = image.get("media_type");
+            if (mediaTypeNode != null && mediaTypeNode.isNull() == false && mediaTypeNode.isTextual() == false) {
+                throw malformedResponse(
+                    statusCode,
+                    "OpenRouter image response contains a non-text media type.",
+                    rawResponse
+                );
+            }
+            String mediaType = textOrNull(mediaTypeNode);
+            if (isBlank(mediaType)) {
+                mediaType = mediaTypeForFormat(requestedFormat, model);
+            }
+            if (isSupportedGeneratedMediaType(mediaType) == false) {
+                throw malformedResponse(
+                    statusCode,
+                    "OpenRouter generated media has an unsupported image media type.",
+                    rawResponse
+                );
+            }
+            try {
+                media.add(new GeneratedMedia(Base64.getDecoder().decode(encoded), mediaType));
+            } catch (IllegalArgumentException exception) {
+                throw new AiProviderException(
+                    PROVIDER_ID,
+                    statusCode,
+                    "OpenRouter generated image contains invalid Base64 data.",
+                    rawResponse,
+                    false,
+                    exception
+                );
+            }
+        }
+        if (media.isEmpty()) {
+            throw malformedResponse(
+                statusCode,
+                "OpenRouter image response does not contain image data.",
+                rawResponse
+            );
+        }
+        return new AiResponse(null, media, parseUsage(root.get("usage")), null);
     }
 
     private int requireEmbeddingDimensions(
@@ -371,6 +514,65 @@ public final class OpenRouterProvider implements AiProvider {
         }
         if (stream) body.put("stream", true);
         return body;
+    }
+
+    private static String imagePrompt(AiRequest request) {
+        StringBuilder prompt = new StringBuilder();
+        appendPrompt(prompt, PromptInjectionDefense.getSecurityInstructions(request.instructions()));
+        appendPrompt(prompt, PromptInjectionDefense.getTaskInstructions(request.instructions()));
+        if (request.operation() == AiOperation.GENERATE_IMAGE) {
+            appendPrompt(
+                prompt,
+                PromptInjectionDefense.protectUntrustedText(
+                    request.inputText(),
+                    UntrustedSource.INPUT_TEXT
+                ).protectedText()
+            );
+        }
+        appendPrompt(
+            prompt,
+            PromptInjectionDefense.protectUntrustedText(
+                request.userPrompt(),
+                UntrustedSource.USER_PROMPT
+            ).protectedText()
+        );
+        return prompt.toString();
+    }
+
+    private static boolean hasMeaningfulImagePrompt(AiRequest request) {
+        if (PromptInjectionDefense.hasTaskInstructions(request.instructions())) return true;
+        if (request.operation() == AiOperation.GENERATE_IMAGE
+            && PromptInjectionDefense.hasUntrustedText(
+                request.inputText(),
+                UntrustedSource.INPUT_TEXT
+            )) {
+            return true;
+        }
+        return PromptInjectionDefense.hasUntrustedText(
+            request.userPrompt(),
+            UntrustedSource.USER_PROMPT
+        );
+    }
+
+    private static void appendPrompt(StringBuilder prompt, String value) {
+        if (isBlank(value)) return;
+        if (prompt.length() > 0) prompt.append("\n\n");
+        prompt.append(value);
+    }
+
+    private void addInputReference(ObjectNode body, BinaryContent media) throws AiProviderException {
+        byte[] data = media.data();
+        if (data.length == 0) {
+            throw new AiProviderException(PROVIDER_ID, "OpenRouter input media must not be empty.");
+        }
+
+        ArrayNode references = body.putArray("input_references");
+        ObjectNode reference = references.addObject();
+        reference.put("type", "image_url");
+        reference.putObject("image_url").put(
+            "url",
+            "data:" + media.mediaType() + ";base64," + Base64.getEncoder().encodeToString(data)
+        );
     }
 
     private ArrayNode buildMessages(AiRequest request) throws AiProviderException {
@@ -510,8 +712,11 @@ public final class OpenRouterProvider implements AiProvider {
         }
 
         String mediaType = metadataParts[0];
-        if (mediaType.startsWith("image/") == false) {
-            throw malformedResponse("OpenRouter generated media is not an image.", rawResponse);
+        if (isSupportedGeneratedMediaType(mediaType) == false) {
+            throw malformedResponse(
+                "OpenRouter generated media has an unsupported image media type.",
+                rawResponse
+            );
         }
 
         try {
@@ -526,6 +731,43 @@ public final class OpenRouterProvider implements AiProvider {
                 exception
             );
         }
+    }
+
+    private static void putScalar(ObjectNode target, String key, Object value) {
+        if (value instanceof Integer integer) target.put(key, integer);
+        else if (value instanceof Long number) target.put(key, number);
+        else if (value instanceof Boolean bool) target.put(key, bool);
+        else target.put(key, String.valueOf(value));
+    }
+
+    private static String mediaTypeForFormat(String requestedFormat, String model) {
+        String format = requestedFormat;
+        if (isBlank(format)) {
+            if (OpenRouterImageOptions.isRecraftVectorModel(model)) {
+                return "application/octet-stream";
+            }
+            format = OpenRouterImageOptions.singleOutputFormat(model);
+        }
+        if (isBlank(format)) return "image/png";
+        return switch (format.toLowerCase(java.util.Locale.ROOT)) {
+            case "png" -> "image/png";
+            case "jpeg", "jpg" -> "image/jpeg";
+            case "webp" -> "image/webp";
+            default -> "application/octet-stream";
+        };
+    }
+
+    private static boolean isSupportedGeneratedMediaType(String mediaType) {
+        if (isBlank(mediaType)) return false;
+        String normalized = mediaType.trim().toLowerCase(java.util.Locale.ROOT);
+        int parameterSeparator = normalized.indexOf(';');
+        if (parameterSeparator >= 0) {
+            normalized = normalized.substring(0, parameterSeparator).trim();
+        }
+        return switch (normalized) {
+            case "image/png", "image/jpeg", "image/jpg", "image/webp" -> true;
+            default -> false;
+        };
     }
 
     private void configureRequest(HttpRequestBase request, AiProviderConfig config, boolean stream) {
@@ -558,6 +800,14 @@ public final class OpenRouterProvider implements AiProvider {
         }
         if (request.operation() == AiOperation.EDIT_IMAGE && request.inputMedia() == null) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter image editing requires input media.");
+        }
+        if (request.operation() != AiOperation.TEXT
+            && request.inputMedia() != null
+            && request.inputMedia().data().length == 0) {
+            throw new AiProviderException(PROVIDER_ID, "OpenRouter input media must not be empty.");
+        }
+        if (request.operation() != AiOperation.TEXT && hasMeaningfulImagePrompt(request) == false) {
+            throw new AiProviderException(PROVIDER_ID, "OpenRouter image prompt is required.");
         }
     }
 
@@ -644,8 +894,14 @@ public final class OpenRouterProvider implements AiProvider {
     }
 
     private void throwIfPayloadError(JsonNode root, String rawResponse) throws AiProviderException {
+        throwIfPayloadError(root, rawResponse, -1);
+    }
+
+    private void throwIfPayloadError(JsonNode root, String rawResponse, int fallbackStatus)
+        throws AiProviderException {
         if (root.hasNonNull("error")) {
-            throw errorResponse(errorStatus(root.path("error").get("code")), rawResponse);
+            int statusCode = errorStatus(root.path("error").get("code"));
+            throw errorResponse(statusCode < 0 ? fallbackStatus : statusCode, rawResponse);
         }
     }
 

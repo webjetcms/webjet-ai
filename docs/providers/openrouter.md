@@ -10,9 +10,9 @@ requested text, image-input, image-output, or image-editing capability.
 Embedding callers must likewise choose a model exposed by OpenRouter's embedding
 endpoint.
 
-> In the current library version, OpenRouter ignores `store` and every
-> `ImageOptions` value. Image count, size, and quality cannot be controlled through
-> `AiRequest` for this provider.
+OpenRouter ignores `store`. Image rendering controls are backed by a versioned
+static snapshot of OpenRouter's Image Models catalogue dated 2026-08-25 and are
+available through `AiClient.imageOptions(...)` without credentials or network access.
 
 ## Capabilities
 
@@ -44,6 +44,7 @@ import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
+import com.webjetcms.ai.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.provider.openrouter.OpenRouterProvider;
 
@@ -166,31 +167,45 @@ added. Embeddings are not streamed.
 
 ## Generate images
 
-Select a model that supports image output. The adapter requests both `image` and
-`text` modalities. `instructions`, `inputText`, and `userPrompt` are sent;
-optional `inputMedia` can also be included when supported by the model.
+Select a model in the static image catalogue. Image generation uses OpenRouter's
+dedicated `/images` endpoint; text and embeddings retain their existing endpoints.
+`instructions`, `inputText`, and `userPrompt` contribute to the protected prompt.
+At least one of those fields must contain meaningful prompt text. Optional,
+non-empty `inputMedia` is sent as one `input_references` data URL when the selected
+model supports reference-guided generation.
 
 ```java
 AiRequest request = AiRequest.builder()
     .operation(AiOperation.GENERATE_IMAGE)
-    .model("your-openrouter-image-output-model")
+    .model("openai/gpt-image-2")
     .instructions("Create an illustration from the supplied description.")
     .inputText("A red bicycle beside a lake at sunrise.")
     .userPrompt("Use a clean editorial style without text.")
+    .imageOptions(ImageOptions.builder()
+        .count(1)
+        .quality("high")
+        .providerOption("aspect_ratio", "16:9")
+        .build())
     .build();
 
 AiResponse response = client.execute(request, config);
 List<GeneratedMedia> images = response.media();
 ```
 
-Do not set `ImageOptions`: `count`, `size`, and `quality` are not serialized by
-the OpenRouter adapter. The response may still contain multiple images, and all
-valid returned images are exposed through `response.media()`.
+The static snapshot converts OpenRouter's `n` field to portable `count` and
+exposes each model's supported scalar controls, which can include `resolution`,
+`aspect_ratio`, `quality`, `output_format`, `background`,
+`output_compression`, and `seed`. Query the selected model first; unsupported
+keys and values fail before transport.
+
+Vector-only Recraft model IDs are not included in the image-option snapshot;
+this adapter accepts PNG, JPEG, and WebP image responses, not SVG output.
 
 ## Edit an image
 
 Editing requires non-empty `inputMedia`. Put the edit command in `instructions`
-and/or `userPrompt`. `inputText` is ignored for `EDIT_IMAGE`.
+and/or `userPrompt`; at least one must contain meaningful text. `inputText` is
+ignored for `EDIT_IMAGE`.
 
 ```java
 AiRequest request = AiRequest.builder()
@@ -204,6 +219,11 @@ AiRequest request = AiRequest.builder()
 AiResponse response = client.execute(request, config);
 GeneratedMedia editedImage = response.media().get(0);
 ```
+
+For both generation and editing, the one supplied `inputMedia` value is encoded
+as one `input_references` data URL. Editing requires it; generation permits it.
+When present it must contain bytes. Masks, multiple references, routing objects,
+passthrough objects, and partial-image streaming are not exposed by this adapter.
 
 ## `AiRequest` fields
 
@@ -219,11 +239,10 @@ with the separate `model`, `inputs`, and `options` components.
 | `userPrompt` | Protected and sent | Protected and sent | Protected and sent |
 | `inputMedia` | Optional multimodal input | Optional reference input | Required and must contain bytes |
 | `store` | Ignored | Ignored | Ignored |
-| `imageOptions` | Ignored | Ignored | Ignored |
+| `imageOptions` | Ignored | Validated and sent to `/images` | Validated and sent to `/images` |
 
-For image operations, prompt-security rules remain in the system message and the
-trusted task instructions are included in user content. The request asks for both
-image and text output modalities.
+For image operations, prompt-security rules, trusted task instructions, and
+protected untrusted prompts are combined into the dedicated Images API prompt.
 
 ## Models and responses
 
@@ -231,22 +250,21 @@ image and text output modalities.
 List<ModelInfo> models = client.listModels(config);
 ```
 
-The catalogue request asks OpenRouter for all output modalities and sorts models
-by creation time, newest first. The adapter does not retain capability metadata,
-so each returned `ModelInfo` contains only the identifier/display label and
-optional creation time. The caller must select an appropriate model.
+The dynamic model catalogue asks OpenRouter for all output modalities and sorts
+models by creation time, newest first. Separately, `client.imageOptions(...)`
+uses the library's release-time scalar capability snapshot. An image model added
+after that snapshot returns an empty option map until WebJET AI is updated, but
+can still be called without explicit image options.
 
 Response behavior:
 
 - text comes from the first choice's message content;
 - token accounting is available through `response.usage()`;
 - `TEXT` responses always expose an empty `response.media()` list;
-- image operations require at least one valid Base64 `data:image/*` entry in the
-  response's `message.images` array;
-- entries marked as text or without an image URL are skipped; a present malformed,
-  non-Base64, or non-image data URL fails the response;
-- every accepted returned image entry is decoded into `GeneratedMedia`;
-- a nonblank finish reason other than `stop` causes `AiProviderException`;
+- image operations decode `data[].b64_json` and honor each declared `media_type`;
+- PNG, JPEG, and WebP responses become `GeneratedMedia`;
+- missing image data, malformed Base64, SVG, or another unsupported media type
+  fails parsing;
 - embedding responses expose input-ordered vectors and token accounting through
   `EmbeddingResponse`.
 

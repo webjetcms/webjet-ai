@@ -1,6 +1,7 @@
 package com.webjetcms.ai;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Provider contract implemented by each supported AI backend.
@@ -34,6 +35,31 @@ public interface AiProvider extends AutoCloseable {
      * @throws AiProviderException when validation, transport, or response parsing fails
      */
     List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException;
+
+    /**
+     * Returns the static image rendering options supported by a model and operation.
+     *
+     * <p>The default preserves compatibility for custom providers that do not publish
+     * image capability metadata. Implementations should return an immutable or caller-safe,
+     * deterministically ordered map. Reading this metadata must not require credentials or
+     * make a network request.</p>
+     *
+     * @param model provider-specific model identifier
+     * @param operation image generation or image editing operation
+     * @return supported option definitions keyed by portable or provider wire name
+     */
+    default Map<String, ImageOptionDefinition> imageOptions(
+        String model,
+        AiOperation operation
+    ) {
+        if (model == null || model.isBlank()) {
+            throw new IllegalArgumentException("Image model must not be blank");
+        }
+        if (operation != AiOperation.GENERATE_IMAGE && operation != AiOperation.EDIT_IMAGE) {
+            throw new IllegalArgumentException("Image options require an image operation");
+        }
+        return Map.of();
+    }
 
     /**
      * Executes a non-streaming request.

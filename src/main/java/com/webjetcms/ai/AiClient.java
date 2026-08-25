@@ -1,6 +1,7 @@
 package com.webjetcms.ai;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -235,6 +236,63 @@ public final class AiClient implements AutoCloseable {
         } catch (RuntimeException exception) {
             throw unexpectedProviderFailure(providerId, exception, config);
         }
+    }
+
+    /**
+     * Returns static image option metadata from the only registered provider.
+     * This call does not require credentials or perform network I/O.
+     *
+     * @param model provider-specific model identifier
+     * @param operation image generation or image editing operation
+     * @return immutable, deterministically ordered option definitions
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws IllegalArgumentException if the model or operation is invalid
+     */
+    public Map<String, ImageOptionDefinition> imageOptions(
+        String model,
+        AiOperation operation
+    ) {
+        return imageOptions(soleProviderId(), model, operation);
+    }
+
+    /**
+     * Returns static image option metadata from a registered provider.
+     * This call does not require credentials or perform network I/O.
+     *
+     * @param providerId registered provider identifier
+     * @param model provider-specific model identifier
+     * @param operation image generation or image editing operation
+     * @return immutable, deterministically ordered option definitions
+     * @throws IllegalArgumentException if the provider, model, or operation is invalid
+     */
+    public Map<String, ImageOptionDefinition> imageOptions(
+        String providerId,
+        String model,
+        AiOperation operation
+    ) {
+        if (model == null || model.isBlank()) {
+            throw new IllegalArgumentException("Image model must not be blank");
+        }
+        if (operation != AiOperation.GENERATE_IMAGE && operation != AiOperation.EDIT_IMAGE) {
+            throw new IllegalArgumentException("Image options require an image operation");
+        }
+
+        Map<String, ImageOptionDefinition> definitions = provider(providerId)
+            .imageOptions(model, operation);
+        if (definitions == null || definitions.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, ImageOptionDefinition> copy = new LinkedHashMap<>();
+        definitions.forEach((key, definition) -> {
+            if (key == null || key.isBlank()) {
+                throw new IllegalStateException("AI provider returned a blank image option key");
+            }
+            copy.put(key, Objects.requireNonNull(
+                definition,
+                "AI provider image option definition"
+            ));
+        });
+        return Collections.unmodifiableMap(copy);
     }
 
     /**

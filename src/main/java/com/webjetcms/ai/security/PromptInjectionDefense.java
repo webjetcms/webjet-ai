@@ -156,6 +156,38 @@ public final class PromptInjectionDefense {
     }
 
     /**
+     * Indicates whether raw or hardened instructions contain meaningful trusted task content.
+     * Security rules and an empty task envelope do not count as task instructions.
+     *
+     * @param instructions raw or hardened trusted instructions
+     * @return {@code true} when non-blank task content remains after normalization
+     */
+    public static boolean hasTaskInstructions(String instructions) {
+        String safeInstructions = stripUnsafeCharacters(instructions);
+        if (isBlank(safeInstructions)) return false;
+
+        String markedTask = extractMarkedContent(safeInstructions, TASK_BEGIN, TASK_END);
+        String taskCandidate = markedTask == null ? safeInstructions : markedTask;
+        return hasContentOutsideSecurityBlocks(taskCandidate);
+    }
+
+    /**
+     * Indicates whether raw or protected untrusted text contains meaningful content.
+     *
+     * @param value raw or protected untrusted text
+     * @param source expected untrusted source boundary
+     * @return {@code true} when non-blank content remains after normalization
+     */
+    public static boolean hasUntrustedText(String value, UntrustedSource source) {
+        String safeValue = stripUnsafeCharacters(value);
+        if (isBlank(safeValue)) return false;
+        Objects.requireNonNull(source, "source");
+
+        String protectedContent = extractProtectedUntrustedContent(safeValue, source);
+        return protectedContent == null || isNotBlank(stripUnsafeCharacters(protectedContent));
+    }
+
+    /**
      * Idempotently protects untrusted text.
      *
      * @param value untrusted text
@@ -255,6 +287,34 @@ public final class PromptInjectionDefense {
         return new ProtectionResult(value, reconstructed.suspiciousContentDetected());
     }
 
+    private static String extractProtectedUntrustedContent(
+        String value,
+        UntrustedSource source
+    ) {
+        String trimmedValue = value.trim();
+        String begin = getUntrustedBeginMarker(source);
+        String end = getUntrustedEndMarker(source);
+        if (trimmedValue.startsWith(begin) == false || trimmedValue.endsWith(end) == false) {
+            return null;
+        }
+
+        int payloadStart = begin.length();
+        int payloadEnd = trimmedValue.length() - end.length();
+        if (payloadEnd <= payloadStart + 1) return null;
+
+        String envelopePayload = trimmedValue.substring(payloadStart, payloadEnd);
+        if (envelopePayload.startsWith("\n") == false
+            || envelopePayload.endsWith("\n") == false) {
+            return null;
+        }
+
+        String content = envelopePayload.substring(1, envelopePayload.length() - 1);
+        String notePrefix = SECURITY_NOTE + '\n';
+        return content.startsWith(notePrefix)
+            ? content.substring(notePrefix.length())
+            : content;
+    }
+
     /**
      * Checks text and bounded decoded variants for prompt-injection patterns.
      *
@@ -307,6 +367,37 @@ public final class PromptInjectionDefense {
         if (endIndex < 0) return null;
 
         return value.substring(beginIndex, endIndex + end.length());
+    }
+
+    private static String extractMarkedContent(String value, String begin, String end) {
+        if (isBlank(value)) return null;
+
+        int beginIndex = value.indexOf(begin);
+        if (beginIndex < 0) return null;
+
+        int contentStart = beginIndex + begin.length();
+        int endIndex = value.indexOf(end, contentStart);
+        if (endIndex < 0) return null;
+
+        return value.substring(contentStart, endIndex);
+    }
+
+    private static boolean hasContentOutsideSecurityBlocks(String value) {
+        String remaining = value;
+        while (isNotBlank(remaining)) {
+            int beginIndex = remaining.indexOf(SECURITY_BEGIN);
+            if (beginIndex < 0) return true;
+
+            int endIndex = remaining.indexOf(
+                SECURITY_END,
+                beginIndex + SECURITY_BEGIN.length()
+            );
+            if (endIndex < 0) return true;
+
+            remaining = remaining.substring(0, beginIndex)
+                + remaining.substring(endIndex + SECURITY_END.length());
+        }
+        return false;
     }
 
     private static boolean containsPromptInjection(String value, int depth) {
