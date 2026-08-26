@@ -60,6 +60,13 @@ final class OpenAiImageOptions {
 
     private OpenAiImageOptions() { }
 
+    /**
+     * Returns the image options supported by an OpenAI model and operation.
+     *
+     * @param model OpenAI model identifier, possibly {@code null}
+     * @param operation requested provider operation, possibly {@code null}
+     * @return immutable supported-option definitions, or an empty map when unsupported
+     */
     static Map<String, ImageOptionDefinition> definitions(
         String model,
         AiOperation operation
@@ -83,6 +90,16 @@ final class OpenAiImageOptions {
         return Map.of();
     }
 
+    /**
+     * Validates explicitly supplied image options for an OpenAI request.
+     * Compatible endpoints using unknown model identifiers retain portable options while
+     * rejecting unsupported provider-specific options.
+     *
+     * @param providerId stable provider identifier used in validation failures
+     * @param request request containing the model, operation, and image options
+     * @return immutable validated option values in wire order
+     * @throws AiProviderException when an option or GPT Image 2 size is invalid
+     */
     static Map<String, Object> validate(String providerId, AiRequest request)
         throws AiProviderException {
         Map<String, ImageOptionDefinition> definitions = definitions(

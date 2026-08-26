@@ -51,7 +51,13 @@ public final class AiRequest {
         suspiciousSources = collectSuspiciousSources(inputTextProtection, userPromptProtection);
     }
 
-    /** Creates a provider-facing copy that reuses the source's immutable protection results. */
+    /**
+     * Creates a provider-facing copy that reuses the source's immutable protection results.
+     *
+     * @param source original request containing protected untrusted fields
+     * @param preparedInstructions hardened instructions to send to the provider
+     * @return request copy ready for provider delegation
+     */
     static AiRequest preparedCopy(AiRequest source, String preparedInstructions) {
         Objects.requireNonNull(source, "source");
         Builder builder = new Builder()

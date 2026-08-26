@@ -107,6 +107,12 @@ final class OpenRouterImageOptions {
 
     private OpenRouterImageOptions() { }
 
+    /**
+     * Returns the image options supported by an OpenRouter model.
+     *
+     * @param model OpenRouter model identifier, possibly {@code null}
+     * @return immutable supported-option definitions, or an empty map when unsupported
+     */
     static Map<String, ImageOptionDefinition> definitions(String model) {
         if (model == null || model.isBlank()) return Map.of();
 
@@ -196,6 +202,12 @@ final class OpenRouterImageOptions {
         return isFlux2Model(model) ? FLUX_2 : Map.of();
     }
 
+    /**
+     * Indicates whether an OpenRouter model produces vector output through Recraft.
+     *
+     * @param model non-null OpenRouter model identifier
+     * @return {@code true} for a recognized Recraft vector model
+     */
     static boolean isRecraftVectorModel(String model) {
         return switch (model) {
             case "recraft/recraft-v4.1-pro-vector",
@@ -206,6 +218,12 @@ final class OpenRouterImageOptions {
         };
     }
 
+    /**
+     * Returns the only advertised output format when a model fixes that option.
+     *
+     * @param model OpenRouter model identifier, possibly {@code null}
+     * @return the single output format, or {@code null} when none is fixed
+     */
     static String singleOutputFormat(String model) {
         ImageOptionDefinition definition = definitions(model).get("output_format");
         return definition != null && definition.allowedValues().size() == 1

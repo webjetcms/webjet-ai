@@ -52,10 +52,21 @@ public final class AiProviders {
         return BUILT_INS;
     }
 
+    /**
+     * Returns the internal provider factories used by {@link AiClient#discover()}.
+     *
+     * @return immutable entries sorted by provider identifier
+     */
     static List<Entry> entries() {
         return BUILT_IN_ENTRIES;
     }
 
+    /**
+     * Associates a bundled provider identifier with a factory for fresh provider instances.
+     *
+     * @param id exact bundled provider identifier
+     * @param factory factory that creates a new provider instance
+     */
     static record Entry(
         String id,
         Supplier<? extends AiProvider> factory

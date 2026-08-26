@@ -32,6 +32,13 @@ final class GeminiImageOptions {
 
     private GeminiImageOptions() { }
 
+    /**
+     * Returns the image options supported by a normalized Gemini model and operation.
+     *
+     * @param normalizedModel normalized, non-null Gemini model identifier
+     * @param operation requested provider operation
+     * @return immutable supported-option definitions, or an empty map when unsupported
+     */
     static Map<String, ImageOptionDefinition> definitions(
         String normalizedModel,
         AiOperation operation

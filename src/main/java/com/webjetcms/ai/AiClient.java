@@ -102,6 +102,15 @@ public final class AiClient implements AutoCloseable {
         return createDiscoveredClient(AiProviders.entries(), customProviders);
     }
 
+    /**
+     * Creates a discovered client from the supplied built-in factories and custom providers.
+     * This package-private seam allows discovery lifecycle and failure handling to be tested
+     * without replacing the production provider catalogue.
+     *
+     * @param builtInEntries provider identifiers and factories to treat as bundled entries
+     * @param customProviders caller-owned providers to add after the bundled entries
+     * @return a client that owns every successfully registered provider
+     */
     static AiClient createDiscoveredClient(
         List<AiProviders.Entry> builtInEntries,
         AiProvider... customProviders
