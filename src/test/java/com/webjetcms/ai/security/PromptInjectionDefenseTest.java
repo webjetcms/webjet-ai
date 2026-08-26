@@ -116,6 +116,47 @@ class PromptInjectionDefenseTest {
     }
 
     @Test
+    void detectsMeaningfulContentAcrossRawHardenedAndProtectedForms() {
+        String controlCharactersOnly = "\u0000\u200B\u2060";
+        String rawTask = "Summarize the supplied report.";
+        String hardenedTask = PromptInjectionDefense.hardenSystemInstructions(rawTask);
+        String emptyHardened = PromptInjectionDefense.hardenSystemInstructions(
+            controlCharactersOnly
+        );
+        String securityOnly = PromptInjectionDefense.getSecurityInstructions(null);
+
+        for (String value : new String[] {
+            rawTask, hardenedTask, securityOnly + "\n\nCreate a concise summary."
+        }) {
+            assertTrue(PromptInjectionDefense.hasTaskInstructions(value), value);
+        }
+        for (String value : new String[] {
+            null, "", " \t\n", controlCharactersOnly, emptyHardened,
+            PromptInjectionDefense.hardenSystemInstructions(emptyHardened), securityOnly,
+            PromptInjectionDefense.hardenSystemInstructions(securityOnly)
+        }) {
+            assertFalse(PromptInjectionDefense.hasTaskInstructions(value), String.valueOf(value));
+        }
+        assertEquals(hardenedTask, PromptInjectionDefense.hardenSystemInstructions(hardenedTask));
+        assertEquals(emptyHardened, PromptInjectionDefense.hardenSystemInstructions(emptyHardened));
+
+        for (UntrustedSource source : UntrustedSource.values()) {
+            String raw = "Meaningful source content";
+            String protectedText = PromptInjectionDefense.protectUntrustedText(raw, source)
+                .protectedText();
+            String protectedEmpty = PromptInjectionDefense.protectUntrustedText(
+                controlCharactersOnly,
+                source
+            ).protectedText();
+
+            assertTrue(PromptInjectionDefense.hasUntrustedText(raw, source), source.name());
+            assertTrue(PromptInjectionDefense.hasUntrustedText(protectedText, source), source.name());
+            assertFalse(PromptInjectionDefense.hasUntrustedText(controlCharactersOnly, source), source.name());
+            assertFalse(PromptInjectionDefense.hasUntrustedText(protectedEmpty, source), source.name());
+        }
+    }
+
+    @Test
     void rejectsMissingUntrustedSource() {
         assertThrows(NullPointerException.class, () ->
             PromptInjectionDefense.protectUntrustedText("text", null)

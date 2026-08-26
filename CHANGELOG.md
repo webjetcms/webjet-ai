@@ -3,6 +3,28 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
+## [1.2.0]
+
+### Added
+
+- Built-in discovery through `AiClient.discover()` and explicit, client-local custom
+  providers through `AiClient.discover(AiProvider...)`, without class-path scanning or
+  a mutable global registry. Supplied custom providers transfer ownership only after
+  successful client creation.
+- Immutable, sorted provider IDs through `AiClient.providers()`, public built-in
+  `String` constants and `builtIns()` catalogue through `AiProviders`, and a
+  standalone custom-provider implementation guide.
+- Dynamic model catalogues continue to come from the selected provider through
+  `listModels(...)`; `AiClient` does not hardcode model identifiers.
+- Immutable, model- and operation-specific image option metadata through
+  `AiClient.imageOptions(...)`, plus provider-specific scalar controls in the
+  `com.webjetcms.ai.image.ImageOptions` builder. Image option values and metadata
+  now live together in the dedicated `com.webjetcms.ai.image` package.
+- Validation for image requests, including provider-specific option combinations,
+  custom GPT Image 2 dimensions, and required non-blank prompts.
+- Image generation and editing through OpenRouter, with support for one reference
+  image and PNG, JPEG, and WebP responses.
+
 ## [1.1.1]
 
 ### Fixed
@@ -53,7 +75,6 @@ uses [Semantic Versioning](https://semver.org/).
 - Prompt-injection defense utilities.
 - Java 17 build, tests, API documentation, and Maven Central publication.
 
-[Unreleased]: https://github.com/webjetcms/webjet-ai/compare/v1.1.1...HEAD
 [1.1.1]: https://github.com/webjetcms/webjet-ai/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/webjetcms/webjet-ai/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/webjetcms/webjet-ai/compare/v0.1.0...v1.0.0

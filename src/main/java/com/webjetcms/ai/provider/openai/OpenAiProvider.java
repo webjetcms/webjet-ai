@@ -47,7 +47,8 @@ import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
-import com.webjetcms.ai.ImageOptions;
+import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
 import com.webjetcms.ai.security.PromptInjectionDefense;
@@ -102,6 +103,12 @@ public final class OpenAiProvider implements AiProvider {
     @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
         return invokeAtBoundary(config, () -> listModelsInternal(config));
+    }
+
+    @Override
+    public Map<String, ImageOptionDefinition> imageOptions(String model, AiOperation operation) {
+        AiProvider.super.imageOptions(model, operation);
+        return OpenAiImageOptions.definitions(model, operation);
     }
 
     private List<ModelInfo> listModelsInternal(AiProviderConfig config) throws AiProviderException {
@@ -258,31 +265,29 @@ public final class OpenAiProvider implements AiProvider {
     }
 
     private AiResponse generateImage(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        String prompt = imagePrompt(request);
-        if (prompt.isBlank()) {
+        if (hasMeaningfulImagePrompt(request) == false) {
             throw new AiProviderException(PROVIDER_ID, "An image prompt is required");
         }
+        String prompt = imagePrompt(request);
 
-        ImageOptions options = options(request);
+        Map<String, Object> imageOptions = OpenAiImageOptions.validate(PROVIDER_ID, request);
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", request.model());
         body.put("prompt", prompt);
-        body.put("n", imageCount(options));
-        putIfNotBlank(body, "quality", options.quality());
-        body.put("size", defaultIfBlank(options.size(), "1024x1024"));
+        addJsonImageOptions(body, imageOptions);
         if ("dall-e-2".equals(request.model()) || "dall-e-3".equals(request.model())) {
             body.put("response_format", "b64_json");
         }
 
         HttpPost post = jsonPost(endpoint(config, IMAGE_GENERATIONS_PATH), body);
         prepare(post, config, "application/json");
-        return executeImage(post, config);
+        return executeImage(post, config, (String) imageOptions.get("output_format"));
     }
 
     private AiResponse editImage(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        if ("dall-e-2".equals(request.model())) {
+        if ("dall-e-3".equals(request.model())) {
             throw new AiProviderException(PROVIDER_ID,
-                "Image editing with dall-e-2 is not supported by this provider adapter");
+                "Image editing with " + request.model() + " is not supported by this provider adapter");
         }
 
         BinaryContent input = request.inputMedia();
@@ -290,27 +295,47 @@ public final class OpenAiProvider implements AiProvider {
             throw new AiProviderException(PROVIDER_ID, "An input image is required for image editing");
         }
 
-        String prompt = imagePrompt(request);
-        if (prompt.isBlank()) {
+        if (hasMeaningfulImagePrompt(request) == false) {
             throw new AiProviderException(PROVIDER_ID, "An image edit prompt is required");
         }
+        String prompt = imagePrompt(request);
 
+        Map<String, Object> imageOptions = OpenAiImageOptions.validate(PROVIDER_ID, request);
         HttpPost post = new HttpPost(endpoint(config, IMAGE_EDITS_PATH));
-        post.setEntity(buildImageEditEntity(request, input, prompt));
+        post.setEntity(buildImageEditEntity(request, input, prompt, imageOptions));
         prepare(post, config, "application/json");
-        return executeImage(post, config);
+        return executeImage(post, config, (String) imageOptions.get("output_format"));
     }
 
-    static HttpEntity buildImageEditEntity(AiRequest request, BinaryContent input, String prompt) {
-        ImageOptions options = options(request);
+    static HttpEntity buildImageEditEntity(
+        AiRequest request,
+        BinaryContent input,
+        String prompt
+    ) throws AiProviderException {
+        return buildImageEditEntity(
+            request,
+            input,
+            prompt,
+            OpenAiImageOptions.validate(PROVIDER_ID, request)
+        );
+    }
+
+    private static HttpEntity buildImageEditEntity(
+        AiRequest request,
+        BinaryContent input,
+        String prompt,
+        Map<String, Object> imageOptions
+    ) {
         MultipartEntityBuilder multipart = MultipartEntityBuilder.create()
             .setMode(HttpMultipartMode.BROWSER_COMPATIBLE)
             .addTextBody("model", request.model(), TEXT_UTF_8)
-            .addTextBody("prompt", prompt, TEXT_UTF_8)
-            .addTextBody("n", Integer.toString(imageCount(options)), TEXT_UTF_8)
-            .addTextBody("size", defaultIfBlank(options.size(), "1024x1024"), TEXT_UTF_8);
-        if (isBlank(options.quality()) == false) {
-            multipart.addTextBody("quality", options.quality(), TEXT_UTF_8);
+            .addTextBody("prompt", prompt, TEXT_UTF_8);
+        if ("dall-e-2".equals(request.model())) {
+            multipart.addTextBody("response_format", "b64_json", TEXT_UTF_8);
+        }
+        for (Map.Entry<String, Object> option : imageOptions.entrySet()) {
+            String wireName = ImageOptions.COUNT.equals(option.getKey()) ? "n" : option.getKey();
+            multipart.addTextBody(wireName, String.valueOf(option.getValue()), TEXT_UTF_8);
         }
         multipart.addBinaryBody(
             "image",
@@ -345,10 +370,14 @@ public final class OpenAiProvider implements AiProvider {
         return result.isBlank() || ".".equals(result) || "..".equals(result) ? "image" : result;
     }
 
-    private AiResponse executeImage(HttpPost post, AiProviderConfig config) throws AiProviderException {
+    private AiResponse executeImage(
+        HttpPost post,
+        AiProviderConfig config,
+        String requestedFormat
+    ) throws AiProviderException {
         String response = executeForString(post, config);
         try {
-            return parseImageResponse(response);
+            return parseImageResponse(response, requestedFormat);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (IOException | RuntimeException exception) {
@@ -446,6 +475,11 @@ public final class OpenAiProvider implements AiProvider {
     }
 
     static AiResponse parseImageResponse(String response) throws IOException, AiProviderException {
+        return parseImageResponse(response, null);
+    }
+
+    static AiResponse parseImageResponse(String response, String requestedFormat)
+        throws IOException, AiProviderException {
         JsonNode root = MAPPER.readTree(response);
         ensureSuccessfulResponse(root, response);
         JsonNode data = root.path("data");
@@ -453,7 +487,10 @@ public final class OpenAiProvider implements AiProvider {
             throw invalidResponse("OpenAI image response does not contain a data array", response, null);
         }
 
-        String defaultFormat = defaultIfBlank(textOrNull(root.get("output_format")), "png");
+        String defaultFormat = defaultIfBlank(
+            textOrNull(root.get("output_format")),
+            defaultIfBlank(requestedFormat, "png")
+        );
         List<GeneratedMedia> media = new ArrayList<>();
         for (JsonNode image : data) {
             String encoded = textOrNull(image.get("b64_json"));
@@ -744,12 +781,15 @@ public final class OpenAiProvider implements AiProvider {
         input.put("content", value);
     }
 
-    private static ImageOptions options(AiRequest request) {
-        return request.imageOptions() == null ? new ImageOptions(null, null, null) : request.imageOptions();
-    }
-
-    private static int imageCount(ImageOptions options) {
-        return options.count() == null || options.count() < 1 ? 1 : options.count();
+    private static void addJsonImageOptions(ObjectNode body, Map<String, Object> options) {
+        for (Map.Entry<String, Object> option : options.entrySet()) {
+            String wireName = ImageOptions.COUNT.equals(option.getKey()) ? "n" : option.getKey();
+            Object value = option.getValue();
+            if (value instanceof Integer integer) body.put(wireName, integer);
+            else if (value instanceof Long number) body.put(wireName, number);
+            else if (value instanceof Boolean bool) body.put(wireName, bool);
+            else body.put(wireName, String.valueOf(value));
+        }
     }
 
     static String imagePrompt(AiRequest request) {
@@ -761,6 +801,19 @@ public final class OpenAiProvider implements AiProvider {
         }
         appendProtectedPrompt(prompt, request.userPrompt(), UntrustedSource.USER_PROMPT);
         return prompt.toString();
+    }
+
+    private static boolean hasMeaningfulImagePrompt(AiRequest request) {
+        return PromptInjectionDefense.hasTaskInstructions(request.instructions())
+            || PromptInjectionDefense.hasUntrustedText(
+                request.userPrompt(),
+                UntrustedSource.USER_PROMPT
+            )
+            || (request.operation() == AiOperation.GENERATE_IMAGE
+                && PromptInjectionDefense.hasUntrustedText(
+                    request.inputText(),
+                    UntrustedSource.INPUT_TEXT
+                ));
     }
 
     private static void addProtectedInput(ArrayNode inputs, String value, UntrustedSource source) {
@@ -790,12 +843,6 @@ public final class OpenAiProvider implements AiProvider {
             target.append("\n\n");
         }
         target.append(value);
-    }
-
-    private static void putIfNotBlank(ObjectNode target, String name, String value) {
-        if (isBlank(value) == false) {
-            target.put(name, value);
-        }
     }
 
     private static String defaultIfBlank(String value, String defaultValue) {

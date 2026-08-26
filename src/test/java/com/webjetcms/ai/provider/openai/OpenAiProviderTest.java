@@ -14,7 +14,9 @@ import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
@@ -40,6 +42,7 @@ import org.apache.http.util.EntityUtils;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.webjetcms.ai.AiClient;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -49,6 +52,9 @@ import com.webjetcms.ai.BinaryContent;
 import com.webjetcms.ai.EmbeddingOptions;
 import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
+import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.image.ImageOptionValueType;
+import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.security.PromptInjectionDefense;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
@@ -56,6 +62,118 @@ import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 class OpenAiProviderTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void exposesModelAndOperationSpecificImageOptions() throws Exception {
+        try (OpenAiProvider provider = new OpenAiProvider()) {
+            Map<String, ImageOptionDefinition> edit = provider.imageOptions(
+                "gpt-image-2",
+                AiOperation.EDIT_IMAGE
+            );
+            assertEquals(ImageOptionValueType.PATTERN, edit.get("size").valueType());
+            assertFalse(edit.containsKey("input_fidelity"));
+            assertEquals(
+                List.of("count", "size"),
+                List.copyOf(provider.imageOptions("dall-e-2", AiOperation.EDIT_IMAGE).keySet())
+            );
+            assertEquals(Map.of(), provider.imageOptions("dall-e-3", AiOperation.EDIT_IMAGE));
+            assertThrows(UnsupportedOperationException.class, edit::clear);
+        }
+    }
+
+    @Test
+    void sendsValidatedGenerationOptions() throws Exception {
+        String encoded = Base64.getEncoder().encodeToString(new byte[] {1, 2, 3});
+        RecordingHttpClient transport = new RecordingHttpClient(
+            200,
+            "{\"data\":[{\"b64_json\":\"" + encoded + "\"}]}"
+        );
+        AiRequest request = AiRequest.builder()
+            .operation(AiOperation.GENERATE_IMAGE)
+            .model("gpt-image-1.5")
+            .inputText("A mountain at sunrise")
+            .imageOptions(ImageOptions.builder()
+                .count(2)
+                .providerOption("output_format", "webp")
+                .providerOption("output_compression", 80)
+                .build())
+            .build();
+
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            AiResponse response = provider.execute(request, embeddingConfig("key", "trusted"));
+            assertEquals("image/webp", response.media().get(0).mediaType());
+        }
+
+        JsonNode body = MAPPER.readTree(transport.requestBody);
+        assertEquals("https://example.test/custom/v1/images/generations", transport.uri);
+        assertEquals(2, body.path("n").asInt());
+        assertEquals("webp", body.path("output_format").asText());
+        assertEquals(80, body.path("output_compression").asInt());
+    }
+
+    @Test
+    void forwardsPortableGenerationOptionsForUncataloguedCompatibleModel() throws Exception {
+        String encoded = Base64.getEncoder().encodeToString(new byte[] {1, 2, 3});
+        RecordingHttpClient transport = new RecordingHttpClient(
+            200,
+            "{\"data\":[{\"b64_json\":\"" + encoded + "\"}]}"
+        );
+        AiRequest request = AiRequest.builder()
+            .operation(AiOperation.GENERATE_IMAGE)
+            .model("compatible-image-model")
+            .inputText("A mountain at sunrise")
+            .imageOptions(new ImageOptions(3, "640x480", "vendor-quality"))
+            .build();
+
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            provider.execute(request, embeddingConfig("key", "trusted"));
+        }
+
+        JsonNode body = MAPPER.readTree(transport.requestBody);
+        assertEquals("compatible-image-model", body.path("model").asText());
+        assertEquals(3, body.path("n").asInt());
+        assertEquals("640x480", body.path("size").asText());
+        assertEquals("vendor-quality", body.path("quality").asText());
+    }
+
+    @Test
+    void rejectsProviderSpecificOptionsForUncataloguedModels() throws Exception {
+        RecordingHttpClient transport = new RecordingHttpClient(200, "{}");
+        AiRequest request = AiRequest.builder()
+            .operation(AiOperation.GENERATE_IMAGE)
+            .model("compatible-image-model")
+            .inputText("A mountain at sunrise")
+            .imageOptions(ImageOptions.builder()
+                .providerOption("model", "overridden-model")
+                .build())
+            .build();
+
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            assertThrows(
+                AiProviderException.class,
+                () -> provider.execute(request, embeddingConfig("key", "trusted"))
+            );
+        }
+
+        assertEquals(0, transport.calls);
+    }
+
+    @Test
+    void rejectsInvalidImageDimensionsBeforeTransport() throws Exception {
+        RecordingHttpClient transport = new RecordingHttpClient(200, "{}");
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            assertThrows(AiProviderException.class, () -> provider.execute(
+                AiRequest.builder()
+                    .operation(AiOperation.GENERATE_IMAGE)
+                    .model("gpt-image-2")
+                    .inputText("Generate an image")
+                    .imageOptions(new ImageOptions(1, "1025x1024", "high"))
+                    .build(),
+                embeddingConfig("key", "trusted")
+            ));
+        }
+        assertEquals(0, transport.calls);
+    }
 
     @Test
     void embedsOrderedBatchAndBuildsAuthenticatedRequest() throws Exception {
@@ -300,6 +418,71 @@ class OpenAiProviderTest {
     }
 
     @Test
+    void validatesMeaningfulImagePromptsDirectlyAndAfterClientPreparation() throws Exception {
+        RecordingHttpClient transport = new RecordingHttpClient(
+            200, "{\"data\":[{\"b64_json\":\"AQID\"}]}"
+        );
+        AiProviderConfig config = embeddingConfig("key", "trusted");
+        String controlCharactersOnly = "\u0000\u200B\u2060";
+        AiRequest[] invalidRequests = {
+            AiRequest.builder()
+                .operation(AiOperation.GENERATE_IMAGE)
+                .model("gpt-image-1")
+                .instructions(PromptInjectionDefense.getSecurityInstructions(null))
+                .inputText(controlCharactersOnly)
+                .build(),
+            AiRequest.builder()
+                .operation(AiOperation.EDIT_IMAGE)
+                .model("gpt-image-1")
+                .inputText("/ignored/source.png")
+                .userPrompt(controlCharactersOnly)
+                .inputMedia(new BinaryContent(new byte[] {1, 2, 3}, "image/png", "source.png"))
+                .build()
+        };
+
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            assertImagePromptsRejected(invalidRequests, request -> provider.execute(request, config));
+        }
+        assertEquals(0, transport.calls);
+        try (AiClient client = AiClient.of(new OpenAiProvider(transport))) {
+            assertImagePromptsRejected(invalidRequests, request -> client.execute(request, config));
+            client.execute(
+                AiRequest.builder()
+                    .operation(AiOperation.GENERATE_IMAGE)
+                    .model("gpt-image-1")
+                    .instructions("Create a line drawing of a lighthouse")
+                    .build(),
+                config
+            );
+        }
+
+        assertEquals(1, transport.calls);
+        assertTrue(MAPPER.readTree(transport.requestBody).path("prompt").asText()
+            .contains("Create a line drawing of a lighthouse"));
+    }
+
+    private static void assertImagePromptsRejected(
+        AiRequest[] requests,
+        RequestExecutor executor
+    ) {
+        for (AiRequest request : requests) {
+            String expectedMessage = request.operation() == AiOperation.GENERATE_IMAGE
+                ? "An image prompt is required"
+                : "An image edit prompt is required";
+            AiProviderException exception = assertThrows(
+                AiProviderException.class,
+                () -> executor.execute(request)
+            );
+            assertEquals(expectedMessage, exception.getMessage());
+        }
+    }
+
+    @FunctionalInterface
+    private interface RequestExecutor {
+        void execute(AiRequest request) throws AiProviderException;
+    }
+
+    @Test
     void encodesMultipartImageEditTextAsUtf8() throws Exception {
         BinaryContent input = new BinaryContent(new byte[] {1, 2, 3}, "image/png", "source.png");
         AiRequest request = AiRequest.builder()
@@ -315,6 +498,52 @@ class OpenAiProviderTest {
         String multipartBody = bytes.toString(StandardCharsets.UTF_8);
 
         assertTrue(multipartBody.contains(prompt));
+    }
+
+    @Test
+    void serializesDallE2EditOptionsAndRequestsBase64() throws Exception {
+        BinaryContent input = new BinaryContent(new byte[] {1, 2, 3}, "image/png", "source.png");
+        AiRequest request = AiRequest.builder()
+            .operation(AiOperation.EDIT_IMAGE)
+            .model("dall-e-2")
+            .inputMedia(input)
+            .imageOptions(new ImageOptions(2, "512x512", null))
+            .build();
+
+        HttpEntity entity = OpenAiProvider.buildImageEditEntity(request, input, "Edit the image");
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        entity.writeTo(bytes);
+        String multipartBody = bytes.toString(StandardCharsets.UTF_8);
+
+        assertTrue(multipartBody.contains("name=\"n\""));
+        assertTrue(multipartBody.contains("\r\n\r\n2\r\n"));
+        assertTrue(multipartBody.contains("name=\"size\""));
+        assertTrue(multipartBody.contains("512x512"));
+        assertTrue(multipartBody.contains("name=\"response_format\""));
+        assertTrue(multipartBody.contains("b64_json"));
+    }
+
+    @Test
+    void forwardsPortableEditOptionsForUncataloguedCompatibleModel() throws Exception {
+        BinaryContent input = new BinaryContent(new byte[] {1, 2, 3}, "image/png", "source.png");
+        AiRequest request = AiRequest.builder()
+            .operation(AiOperation.EDIT_IMAGE)
+            .model("compatible-image-edit-model")
+            .inputMedia(input)
+            .imageOptions(new ImageOptions(4, "800x600", "vendor-quality"))
+            .build();
+
+        HttpEntity entity = OpenAiProvider.buildImageEditEntity(request, input, "Edit the image");
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        entity.writeTo(bytes);
+        String multipartBody = bytes.toString(StandardCharsets.UTF_8);
+
+        assertTrue(multipartBody.contains("name=\"n\""));
+        assertTrue(multipartBody.contains("\r\n\r\n4\r\n"));
+        assertTrue(multipartBody.contains("name=\"size\""));
+        assertTrue(multipartBody.contains("800x600"));
+        assertTrue(multipartBody.contains("name=\"quality\""));
+        assertTrue(multipartBody.contains("vendor-quality"));
     }
 
     @Test

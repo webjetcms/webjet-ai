@@ -1,12 +1,24 @@
 package com.webjetcms.ai;
 
-import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
-/** Entry point for selecting and invoking registered AI providers. */
+import com.webjetcms.ai.image.ImageOptionDefinition;
+
+/**
+ * Owns a fixed set of AI provider instances and selects them by exact identifier.
+ *
+ * <p>{@link #discover()} includes every bundled provider, while {@link #of(AiProvider...)}
+ * includes only explicitly supplied instances. Registration is local to the client; no
+ * global mutable registration or class-path scanning is used. A successfully created client
+ * owns all its providers and must be closed.</p>
+ */
 public final class AiClient implements AutoCloseable {
 
     private final Map<String, AiProvider> providers;
@@ -16,7 +28,11 @@ public final class AiClient implements AutoCloseable {
     }
 
     /**
-     * Creates a client backed by the supplied provider instances.
+     * Creates a client containing only the supplied provider instances.
+     *
+     * <p>If this method returns successfully, the client owns and closes the providers.
+     * If validation fails, ownership remains with the caller. Identifiers are compared
+     * exactly and case-sensitively; they are not normalized.</p>
      *
      * @param providers providers to register; every provider must have a unique, non-blank identifier
      * @return a client that owns and delegates to the registered providers
@@ -24,26 +40,175 @@ public final class AiClient implements AutoCloseable {
      * @throws IllegalArgumentException if an identifier is blank or registered more than once
      */
     public static AiClient of(AiProvider... providers) {
+        return new AiClient(registeredProviders(providers));
+    }
+
+    private static Map<String, AiProvider> registeredProviders(
+        AiProvider[] providers
+    ) {
         Objects.requireNonNull(providers, "providers");
-        Map<String, AiProvider> byId = new LinkedHashMap<>();
-        Arrays.stream(providers).forEach(provider -> {
+        Map<String, AiProvider> registered = new LinkedHashMap<>();
+        for (AiProvider provider : providers) {
             Objects.requireNonNull(provider, "provider");
-            String providerId = Objects.requireNonNull(provider.id(), "provider.id");
-            if (providerId.isBlank()) {
-                throw new IllegalArgumentException("AI provider id must not be blank");
-            }
-            AiProvider previous = byId.putIfAbsent(providerId, provider);
-            if (previous != null) {
-                throw new IllegalArgumentException("Duplicate AI provider id: " + providerId);
-            }
-        });
-        return new AiClient(byId);
+            String providerId = validateProviderId(provider.id());
+            register(registered, providerId, provider);
+        }
+        return registered;
+    }
+
+    private static String validateProviderId(String providerId) {
+        Objects.requireNonNull(providerId, "provider.id");
+        if (providerId.isBlank()) {
+            throw new IllegalArgumentException("AI provider id must not be blank");
+        }
+        return providerId;
     }
 
     /**
-     * Checks whether a provider identifier is registered.
+     * Creates a client containing every provider bundled with WebJET AI.
      *
-     * @param providerId identifier to look up
+     * <p>Each invocation creates fresh provider instances. If construction or registration
+     * fails, every instance already created by the library is closed; close failures are
+     * suppressed on the primary failure.</p>
+     *
+     * @return a client that owns and delegates to all built-in providers
+     * @throws IllegalStateException if a built-in factory violates its registered identifier
+     */
+    public static AiClient discover() {
+        return discover(new AiProvider[0]);
+    }
+
+    /**
+     * Creates a client containing every bundled provider and the supplied custom
+     * provider instances.
+     *
+     * <p>Custom identifiers are compared exactly and case-sensitively with each other and
+     * with bundled identifiers. Custom identifier validation completes before any bundled
+     * provider is created.</p>
+     *
+     * <p>On success, the client owns and closes all providers. If creation fails, every
+     * bundled instance already created by the library is closed, while ownership of all
+     * supplied custom instances remains with the caller.</p>
+     *
+     * @param customProviders custom provider instances to add to the bundled providers
+     * @return a client that owns and delegates to all bundled and custom providers
+     * @throws NullPointerException if the array, a provider, or an identifier is {@code null}
+     * @throws IllegalArgumentException if an identifier is blank, duplicated, or collides
+     *     with a bundled provider identifier
+     * @throws IllegalStateException if a bundled factory returns {@code null} or a provider whose
+     *     identifier does not exactly match its registered identifier
+     */
+    public static AiClient discover(AiProvider... customProviders) {
+        return createDiscoveredClient(AiProviders.entries(), customProviders);
+    }
+
+    /**
+     * Creates a discovered client from the supplied built-in factories and custom providers.
+     * This package-private seam allows discovery lifecycle and failure handling to be tested
+     * without replacing the production provider catalogue.
+     *
+     * @param builtInEntries provider identifiers and factories to treat as bundled entries
+     * @param customProviders caller-owned providers to add after the bundled entries
+     * @return a client that owns every successfully registered provider
+     */
+    static AiClient createDiscoveredClient(
+        List<AiProviders.Entry> builtInEntries,
+        AiProvider... customProviders
+    ) {
+        List<AiProviders.Entry> entries = List.copyOf(
+            Objects.requireNonNull(builtInEntries, "builtInEntries")
+        );
+        Set<String> builtInIds = new LinkedHashSet<>();
+        for (AiProviders.Entry entry : entries) {
+            if (builtInIds.add(entry.id()) == false) {
+                throw new IllegalArgumentException(
+                    "Duplicate AI provider id: " + entry.id()
+                );
+            }
+        }
+
+        Map<String, AiProvider> custom = registeredProviders(customProviders);
+        for (String builtIn : builtInIds) {
+            if (custom.containsKey(builtIn)) {
+                throw new IllegalArgumentException(
+                    "Duplicate AI provider id: " + builtIn
+                );
+            }
+        }
+
+        Map<String, AiProvider> registered = new LinkedHashMap<>();
+        List<AiProvider> builtInProviders = new ArrayList<>();
+        try {
+            for (AiProviders.Entry entry : entries) {
+                String providerId = entry.id();
+                AiProvider provider = entry.factory().get();
+                if (provider == null) {
+                    throw new IllegalStateException(
+                        "AI provider factory returned null: " + providerId
+                    );
+                }
+                builtInProviders.add(provider);
+
+                String actualId = provider.id();
+                if (providerId.equals(actualId) == false) {
+                    throw new IllegalStateException(
+                        "AI provider factory for " + providerId
+                            + " returned provider with id: " + actualId
+                    );
+                }
+                register(registered, providerId, provider);
+            }
+
+            for (Map.Entry<String, AiProvider> customProvider : custom.entrySet()) {
+                register(registered, customProvider.getKey(), customProvider.getValue());
+            }
+            return new AiClient(registered);
+        } catch (RuntimeException | Error failure) {
+            closeAfterFailure(builtInProviders, failure);
+            throw failure;
+        }
+    }
+
+    private static void register(
+        Map<String, AiProvider> registered,
+        String providerId,
+        AiProvider provider
+    ) {
+        AiProvider previous = registered.putIfAbsent(providerId, provider);
+        if (previous != null) {
+            throw new IllegalArgumentException("Duplicate AI provider id: " + providerId);
+        }
+    }
+
+    private static void closeAfterFailure(
+        List<? extends AiProvider> providers,
+        Throwable failure
+    ) {
+        for (AiProvider provider : providers) {
+            try {
+                provider.close();
+            } catch (Throwable closeFailure) {
+                if (closeFailure != failure) {
+                    failure.addSuppressed(closeFailure);
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns all bundled and custom provider identifiers registered in this client.
+     * Reading this catalogue does not invoke a provider or load its models.
+     *
+     * @return an immutable list sorted by the identifiers' natural, case-sensitive order
+     */
+    public List<String> providers() {
+        return providers.keySet().stream().sorted().toList();
+    }
+
+    /**
+     * Checks whether an exact, case-sensitive provider identifier is registered.
+     *
+     * @param providerId exact identifier to look up; it is not normalized
      * @return {@code true} when a provider with that identifier is registered
      */
     public boolean hasProvider(String providerId) {
@@ -52,6 +217,7 @@ public final class AiClient implements AutoCloseable {
 
     /**
      * Loads the model catalogue from the only registered provider.
+     * The client delegates every call and does not maintain a hardcoded model list.
      *
      * @param config provider credentials and connection settings
      * @return models reported by the registered provider
@@ -64,6 +230,7 @@ public final class AiClient implements AutoCloseable {
 
     /**
      * Loads the model catalogue from a registered provider.
+     * The client delegates every call and does not maintain a hardcoded model list.
      *
      * @param providerId registered provider identifier
      * @param config provider credentials and connection settings
@@ -80,6 +247,63 @@ public final class AiClient implements AutoCloseable {
         } catch (RuntimeException exception) {
             throw unexpectedProviderFailure(providerId, exception, config);
         }
+    }
+
+    /**
+     * Returns static image option metadata from the only registered provider.
+     * This call does not require credentials or perform network I/O.
+     *
+     * @param model provider-specific model identifier
+     * @param operation image generation or image editing operation
+     * @return immutable, deterministically ordered option definitions
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws IllegalArgumentException if the model or operation is invalid
+     */
+    public Map<String, ImageOptionDefinition> imageOptions(
+        String model,
+        AiOperation operation
+    ) {
+        return imageOptions(soleProviderId(), model, operation);
+    }
+
+    /**
+     * Returns static image option metadata from a registered provider.
+     * This call does not require credentials or perform network I/O.
+     *
+     * @param providerId registered provider identifier
+     * @param model provider-specific model identifier
+     * @param operation image generation or image editing operation
+     * @return immutable, deterministically ordered option definitions
+     * @throws IllegalArgumentException if the provider, model, or operation is invalid
+     */
+    public Map<String, ImageOptionDefinition> imageOptions(
+        String providerId,
+        String model,
+        AiOperation operation
+    ) {
+        if (model == null || model.isBlank()) {
+            throw new IllegalArgumentException("Image model must not be blank");
+        }
+        if (operation != AiOperation.GENERATE_IMAGE && operation != AiOperation.EDIT_IMAGE) {
+            throw new IllegalArgumentException("Image options require an image operation");
+        }
+
+        Map<String, ImageOptionDefinition> definitions = provider(providerId)
+            .imageOptions(model, operation);
+        if (definitions == null || definitions.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, ImageOptionDefinition> copy = new LinkedHashMap<>();
+        definitions.forEach((key, definition) -> {
+            if (key == null || key.isBlank()) {
+                throw new IllegalStateException("AI provider returned a blank image option key");
+            }
+            copy.put(key, Objects.requireNonNull(
+                definition,
+                "AI provider image option definition"
+            ));
+        });
+        return Collections.unmodifiableMap(copy);
     }
 
     /**
@@ -247,20 +471,23 @@ public final class AiClient implements AutoCloseable {
      */
     @Override
     public void close() throws Exception {
-        Exception firstFailure = null;
+        Throwable firstFailure = null;
         for (AiProvider provider : providers.values()) {
             try {
                 provider.close();
-            } catch (Exception exception) {
+            } catch (Exception | Error failure) {
                 if (firstFailure == null) {
-                    firstFailure = exception;
-                } else {
-                    firstFailure.addSuppressed(exception);
+                    firstFailure = failure;
+                } else if (failure != firstFailure) {
+                    firstFailure.addSuppressed(failure);
                 }
             }
         }
-        if (firstFailure != null) {
-            throw firstFailure;
+        if (firstFailure instanceof Exception exception) {
+            throw exception;
+        }
+        if (firstFailure instanceof Error error) {
+            throw error;
         }
     }
 }

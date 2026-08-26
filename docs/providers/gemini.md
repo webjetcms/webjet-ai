@@ -9,9 +9,9 @@ This guide describes the WebJET AI adapter. The selected Gemini model must
 support the requested input and output modalities. `listModels` does not filter
 models by operation or capability.
 
-> In the current library version, Gemini ignores `store` and every
-> `ImageOptions` value. Image count, size, and quality cannot be controlled through
-> `AiRequest` for this provider.
+Gemini ignores `store`. Supported image resolution and aspect-ratio controls are
+published through `AiClient.imageOptions(...)`; Gemini image models do not
+advertise portable `count` or `quality` controls.
 
 ## Capabilities
 
@@ -46,6 +46,7 @@ import com.webjetcms.ai.EmbeddingOptions;
 import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.GeneratedMedia;
+import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.provider.gemini.GeminiProvider;
 
@@ -193,29 +194,42 @@ requests are non-streaming.
 
 Use a model that supports image output. `inputText` and `userPrompt` are both
 included in the request. Optional `inputMedia` can be supplied as reference input
-when the selected model supports it.
+when the selected model supports it. At least one of `instructions`, `inputText`,
+or `userPrompt` must contain meaningful text; automatically injected security
+rules do not satisfy this requirement.
 
 ```java
 AiRequest request = AiRequest.builder()
     .operation(AiOperation.GENERATE_IMAGE)
-    .model("your-gemini-image-model")
+    .model("gemini-3.1-flash-image")
     .instructions("Create an illustration from the supplied description.")
     .inputText("A red bicycle beside a lake at sunrise.")
     .userPrompt("Use a clean editorial style without text.")
+    .imageOptions(ImageOptions.builder()
+        .size("2K")
+        .providerOption("aspectRatio", "16:9")
+        .build())
     .build();
 
 AiResponse response = client.execute(request, config);
 List<GeneratedMedia> images = response.media();
 ```
 
-Do not set `ImageOptions`: Gemini requests produced by this adapter do not send
-`count`, `size`, or `quality`.
+The portable `size` value is sent as
+`generationConfig.imageConfig.imageSize`; `aspectRatio` is sent to the same
+`imageConfig` object. Gemini 2.5 Flash Image advertises aspect ratio only,
+Gemini 3 Pro Image advertises 1K/2K/4K, and Gemini 3.1 Flash Image advertises
+512/1K/2K/4K with its extended aspect-ratio set. Gemini 3.1 Flash Lite Image
+advertises 1K and the same 14-value extended aspect-ratio set. Query the exact
+alias and operation with `client.imageOptions(...)` instead of hardcoding these
+choices.
 
 ## Edit an image
 
 Editing requires non-empty `inputMedia`. Put the edit command in `instructions`
 and/or `userPrompt`. `inputText` is intentionally ignored for `EDIT_IMAGE`, so a
-CMS path or other host-side image identifier cannot leak as prompt text.
+CMS path or other host-side image identifier cannot leak as prompt text. At least
+one of `instructions` or `userPrompt` must contain meaningful text.
 
 ```java
 AiRequest request = AiRequest.builder()
@@ -247,13 +261,15 @@ with the separate `model`, `inputs`, and `options` components.
 | `userPrompt` | Protected and sent | Protected and sent | Protected and sent |
 | `inputMedia` | Optional multimodal input | Optional reference input | Required and must contain bytes |
 | `store` | Ignored | Ignored | Ignored |
-| `imageOptions` | Ignored | Ignored | Ignored |
+| `imageOptions` | Ignored | Validated `size` and `aspectRatio` | Validated `size` and `aspectRatio` |
 
 For image operations, the adapter keeps prompt-security rules in
 `systemInstruction` and moves trusted task instructions into the user-content
 parts expected by the image request.
 
-If a request has no user content, the adapter adds a neutral fallback instruction.
+If a `TEXT` request has no user content, the adapter adds a neutral fallback
+instruction. Image generation and editing requests without a meaningful prompt
+are rejected before transport.
 
 ## Models and responses
 
@@ -276,8 +292,8 @@ Gemini may return text and media in the same response:
   a terminal `STOP`.
 
 Image count is determined by the model response. Although all inline-media parts
-from the first candidate are returned, the adapter provides no request option for
-the desired number of images.
+from the first candidate are returned, Gemini does not advertise a request option
+for count or quality through this adapter.
 
 Saving returned media is optional:
 

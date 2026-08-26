@@ -16,7 +16,7 @@ option each model supports.
 | Text generation or transformation | `AiRequest` with `TEXT` | `execute` | Yes | A non-blank model |
 | Analyze text and an image | `AiRequest` with `TEXT` | `execute` | Yes | A model that accepts image input |
 | Generate images | `AiRequest` with `GENERATE_IMAGE` | `execute` | No | An image-generation model; callers should supply a meaningful prompt |
-| Edit an image | `AiRequest` with `EDIT_IMAGE` | `execute` | No | A non-empty `inputMedia`; `dall-e-2` is rejected by this adapter |
+| Edit an image | `AiRequest` with `EDIT_IMAGE` | `execute` | No | A non-empty `inputMedia`; DALL-E 3 is generation-only |
 | Create text embeddings | `EmbeddingRequest` | `embed` | No | A non-blank embedding model and at least one non-blank input |
 
 ## Configuration and client
@@ -39,7 +39,7 @@ import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
-import com.webjetcms.ai.ImageOptions;
+import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.provider.openai.OpenAiProvider;
 
@@ -168,40 +168,57 @@ indices. Embeddings are not streamed.
 ## Generate images
 
 For generation, `inputText` and `userPrompt` both contribute to the image prompt.
-`inputMedia` and `store` are ignored.
+`inputMedia` and `store` are ignored. At least one of `instructions`, `inputText`,
+or `userPrompt` must contain meaningful text; automatically injected security
+rules do not satisfy this requirement.
 
 ```java
 AiRequest request = AiRequest.builder()
     .operation(AiOperation.GENERATE_IMAGE)
-    .model("your-openai-image-model")
+    .model("gpt-image-2")
     .instructions("Create a clean product illustration.")
     .inputText("A red touring bicycle on a neutral background.")
     .userPrompt("Use soft studio lighting and do not include text or logos.")
-    .imageOptions(new ImageOptions(1, "1024x1024", null))
+    .imageOptions(ImageOptions.builder()
+        .count(1)
+        .size("1024x1024")
+        .quality("high")
+        .providerOption("background", "transparent")
+        .providerOption("output_format", "webp")
+        .build())
     .build();
 
 AiResponse response = client.execute(request, config);
 List<GeneratedMedia> images = response.media();
 ```
 
-The adapter forwards the image options, but the selected model decides whether
-their values are valid. Multiple images are therefore not guaranteed merely
-because `count` is greater than one.
+Call `client.imageOptions("gpt-image-2", AiOperation.GENERATE_IMAGE)` to obtain
+the immutable option definitions before constructing a request. Explicit values
+are validated against that model and operation before transport. Unset values are
+omitted so OpenAI defaults apply.
+
+An uncatalogued model ID returns an empty option map. For compatibility with
+custom OpenAI-compatible endpoints and future aliases, the adapter still forwards
+the portable `count`, `size`, and `quality` fields for those IDs without applying
+model-specific validation. Provider-specific options require a catalogued model.
 
 ## Edit an image
 
 Editing requires non-empty `inputMedia`. Put the edit instruction in
 `instructions` and/or `userPrompt`. Do not use `inputText` for an image path or
-edit prompt because OpenAI image editing ignores that field.
+edit prompt because OpenAI image editing ignores that field. At least one of
+`instructions` or `userPrompt` must contain meaningful text.
 
 ```java
 AiRequest request = AiRequest.builder()
     .operation(AiOperation.EDIT_IMAGE)
-    .model("your-openai-image-edit-model")
+    .model("gpt-image-2")
     .instructions("Edit the supplied image while preserving its main subject.")
     .userPrompt("Replace the background with a mountain landscape.")
     .inputMedia(BinaryContent.from(Path.of("source.png"), "image/png"))
-    .imageOptions(new ImageOptions(1, "1024x1024", null))
+    .imageOptions(ImageOptions.builder()
+        .size("1024x1024")
+        .build())
     .build();
 
 AiResponse response = client.execute(request, config);
@@ -218,30 +235,45 @@ with the separate `model`, `inputs`, and `options` components.
 | Field | `TEXT` | `GENERATE_IMAGE` | `EDIT_IMAGE` |
 | --- | --- | --- | --- |
 | `operation` | Use `TEXT` or omit it | Required value | Required value |
-| `model` | Required | Required | Required; exact `dall-e-2` is rejected |
+| `model` | Required | Required | Required; DALL-E 3 is rejected |
 | `instructions` | Trusted system/task instructions | Included in the prompt | Included in the prompt |
 | `inputText` | Protected and sent | Protected and included in the prompt | Ignored |
 | `userPrompt` | Protected and sent | Protected and included in the prompt | Protected and included in the prompt |
 | `inputMedia` | Optional multimodal input | Ignored | Required and must contain bytes |
 | `store` | Forwarded | Ignored | Ignored |
-| `imageOptions` | Ignored | Forwarded | Forwarded |
+| `imageOptions` | Ignored | Validated for catalogued models; portable fields pass through for uncatalogued IDs | Validated for catalogued models; portable fields pass through for uncatalogued IDs |
 
 ## `ImageOptions`
 
 | Option | Adapter behavior |
 | --- | --- |
-| `count` | Sent as `n`; `null` or a value below 1 becomes `1` |
-| `size` | Forwarded; null/blank defaults to `1024x1024` |
-| `quality` | Omitted when null/blank; otherwise forwarded verbatim |
+| `count` | Portable field sent as `n`; the advertised range is model-specific |
+| `size` | Portable model-specific choice, or a patterned dimension for GPT Image 2 |
+| `quality` | Portable model-specific choice |
+| `background` | `auto`, `transparent`, or `opaque` on supported GPT Image models |
+| `output_format` | `png`, `jpeg`, or `webp` on supported GPT Image models |
+| `output_compression` | Integer 0–100; requires explicit JPEG or WebP output |
+| `moderation` | Supported GPT Image moderation choice |
+| `style` | DALL-E 3 generation style |
+| `input_fidelity` | GPT Image editing control where advertised |
 
-The library intentionally does not validate model-specific count limits, sizes,
-or quality names. Their acceptance and behavior are determined by the selected
-model and provider endpoint.
+Transparent output requires PNG or WebP. GPT Image 2 additionally accepts
+arbitrary `WIDTHxHEIGHT` dimensions when both edges are divisible by 16, neither
+edge exceeds 3840, the aspect ratio is at most 3:1, and total pixels are between
+655,360 and 8,294,400. Invalid counts, types, choices, dimensions, and option
+combinations fail locally.
 
-No request fields currently expose temperature, top-p, maximum output tokens,
-image background, output compression, or output format.
+For an uncatalogued model, only the portable fields are accepted and forwarded;
+the compatible endpoint determines whether their values are valid. This fallback
+preserves existing custom-endpoint behavior without accepting unknown
+provider-specific wire options.
 
 ## Models and responses
+
+The image-option catalogue retains DALL-E 2 and DALL-E 3 metadata for legacy
+compatibility. OpenAI has removed these models from its current public API, so
+non-empty option metadata does not imply that a legacy model is currently
+available.
 
 ```java
 List<ModelInfo> models = client.listModels(config);
@@ -254,11 +286,12 @@ embedding, text, vision, generation, or editing capability.
   `response.usage()`.
 - Image responses use `response.media()`. Every supported Base64 image returned
   by the API is decoded into `GeneratedMedia`.
+- The returned MIME type follows the validated `output_format`, even when OpenAI
+  omits that field from the response.
 - Image response URLs are not downloaded by this adapter; the response must
   contain Base64 image data. For generation, the adapter explicitly requests
-  `b64_json` only when the model string is exactly `dall-e-2` or `dall-e-3`.
-  Other generation models and all edit requests rely on the endpoint returning
-  Base64 data without that explicit request option.
+  `b64_json` for DALL-E 2/3 generation and DALL-E 2 editing. Other image
+  requests rely on the endpoint returning Base64 data without that legacy option.
 - `GeneratedMedia.data()` returns a defensive byte-array copy. Saving it to an
   output file is optional.
 - Embedding responses expose ordered vectors through `embeddingResponse.embeddings()`
