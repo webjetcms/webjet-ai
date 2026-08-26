@@ -22,7 +22,15 @@ public record ImageOptionDefinition(
     String pattern
 ) {
 
-    /** Validates the definition and defensively copies its allowed values. */
+    /**
+     * Validates the definition and defensively copies its allowed values.
+     *
+     * @param valueType accepted value shape
+     * @param allowedValues ordered string values advertised by the provider
+     * @param minimum inclusive integer minimum, when applicable
+     * @param maximum inclusive integer maximum, when applicable
+     * @param pattern regular expression for patterned string values, when applicable
+     */
     public ImageOptionDefinition {
         Objects.requireNonNull(valueType, "valueType");
         allowedValues = allowedValues == null ? List.of() : List.copyOf(allowedValues);

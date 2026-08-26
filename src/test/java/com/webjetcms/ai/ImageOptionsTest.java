@@ -22,6 +22,11 @@ class ImageOptionsTest {
         "output_format", ImageOptionDefinition.choices("png", "jpeg", "webp"),
         "output_compression", ImageOptionDefinition.integerRange(0, 100)
     );
+    private static final Map<String, ImageOptionDefinition> JPEG_ONLY_OUTPUT_OPTIONS = Map.of(
+        "background", ImageOptionDefinition.choices("auto", "transparent", "opaque"),
+        "output_format", ImageOptionDefinition.choices("jpeg"),
+        "output_compression", ImageOptionDefinition.integerRange(0, 100)
+    );
 
     @Test
     void imageOptionValuesAreTypedImmutableAndSecretSafe() {
@@ -94,6 +99,11 @@ class ImageOptionsTest {
                 "requires png or webp"
             ),
             new Failure(
+                options("background", "transparent"),
+                JPEG_ONLY_OUTPUT_OPTIONS,
+                "requires png or webp"
+            ),
+            new Failure(
                 options("output_compression", 80),
                 OUTPUT_OPTIONS,
                 "requires jpeg or webp"
@@ -127,6 +137,10 @@ class ImageOptionsTest {
             "output_compression", 80
         );
         assertEquals(webp.providerOptions(), validate(webp, OUTPUT_OPTIONS));
+        assertEquals(
+            Map.of("output_compression", 80),
+            validate(options("output_compression", 80), JPEG_ONLY_OUTPUT_OPTIONS)
+        );
         assertEquals(
             Map.of("output_compression", 80),
             validate(

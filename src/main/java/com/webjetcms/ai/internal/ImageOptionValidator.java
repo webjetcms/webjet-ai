@@ -8,6 +8,7 @@ import java.util.Map;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.image.ImageOptionValueType;
 import com.webjetcms.ai.image.ImageOptions;
 
 /** Shared normalization and local validation for built-in image providers. */
@@ -97,7 +98,7 @@ public final class ImageOptionValidator {
         Map<String, Object> supplied,
         Map<String, ImageOptionDefinition> definitions
     ) throws AiProviderException {
-        String format = normalizedString(supplied.get("output_format"));
+        String format = effectiveOutputFormat(supplied, definitions);
         String background = normalizedString(supplied.get("background"));
         if ("transparent".equals(background)
             && format != null
@@ -119,6 +120,24 @@ public final class ImageOptionValidator {
                 "requires jpeg or webp output_format when output_compression is set"
             );
         }
+    }
+
+    private static String effectiveOutputFormat(
+        Map<String, Object> supplied,
+        Map<String, ImageOptionDefinition> definitions
+    ) {
+        String suppliedFormat = normalizedString(supplied.get("output_format"));
+        if (suppliedFormat != null) {
+            return suppliedFormat;
+        }
+
+        ImageOptionDefinition definition = definitions.get("output_format");
+        if (definition == null
+            || definition.valueType() != ImageOptionValueType.CHOICE
+            || definition.allowedValues().size() != 1) {
+            return null;
+        }
+        return normalizedString(definition.allowedValues().get(0));
     }
 
     private static AiProviderException failure(String providerId, String model, String message) {

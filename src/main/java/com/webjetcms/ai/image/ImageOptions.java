@@ -33,6 +33,11 @@ public record ImageOptions(
 
     /**
      * Creates options while defensively copying and validating provider-specific values.
+     *
+     * @param count requested number of images, or {@code null} for the provider default
+     * @param size provider-supported dimensions or resolution, or {@code null}
+     * @param quality provider-supported quality level, or {@code null}
+     * @param providerOptions provider-specific scalar rendering options, possibly {@code null}
      */
     public ImageOptions {
         providerOptions = immutableProviderOptions(providerOptions);

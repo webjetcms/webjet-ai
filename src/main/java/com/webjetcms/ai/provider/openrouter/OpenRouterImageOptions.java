@@ -36,6 +36,8 @@ final class OpenRouterImageOptions {
     private static final ImageOptionDefinition RIVER_ASPECT = ImageOptionDefinition.choices(
         "1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16", "21:9", "auto"
     );
+    private static final ImageOptionDefinition BACKGROUND_AUTO_OPAQUE =
+        ImageOptionDefinition.choices("auto", "opaque");
     private static final Map<String, ImageOptionDefinition> OPENAI_GPT_IMAGE_1 =
         ImageOptionCatalog.options(
             ImageOptions.COUNT, ImageOptionCatalog.COUNT_ONE_TO_TEN,
@@ -275,8 +277,20 @@ final class OpenRouterImageOptions {
             routerOptions(ImageOptionCatalog.COUNT_ONE, resolution, RIVER_ASPECT)
         );
         options.put("output_format", outputFormat);
-        options.put("background", ImageOptionCatalog.BACKGROUND_AUTO_TRANSPARENT_OPAQUE);
+        options.put(
+            "background",
+            supportsTransparentBackground(outputFormat)
+                ? ImageOptionCatalog.BACKGROUND_AUTO_TRANSPARENT_OPAQUE
+                : BACKGROUND_AUTO_OPAQUE
+        );
         return Collections.unmodifiableMap(options);
+    }
+
+    private static boolean supportsTransparentBackground(
+        ImageOptionDefinition outputFormat
+    ) {
+        return outputFormat.allowedValues().stream()
+            .anyMatch(format -> "png".equalsIgnoreCase(format) || "webp".equalsIgnoreCase(format));
     }
 
     private static boolean isRecraftRasterModel(String model) {

@@ -80,6 +80,12 @@ class OpenRouterProviderTest {
                 "future/image-model",
                 AiOperation.GENERATE_IMAGE
             ).isEmpty());
+            Map<String, ImageOptionDefinition> riverFast = provider.imageOptions(
+                "sourceful/riverflow-v2.5-fast",
+                AiOperation.GENERATE_IMAGE
+            );
+            assertEquals(List.of("jpeg"), riverFast.get("output_format").allowedValues());
+            assertEquals(List.of("auto", "opaque"), riverFast.get("background").allowedValues());
             assertEquals("2026-08-25", OpenRouterProvider.IMAGE_MODELS_CATALOGUE_VERSION);
             assertThrows(UnsupportedOperationException.class, openAi::clear);
         }
@@ -158,6 +164,22 @@ class OpenRouterProviderTest {
             );
 
             assertTrue(exception.getMessage().contains("must not be empty"));
+        }
+        assertEquals(0, transport.calls);
+    }
+
+    @ParameterizedTest(name = "rejects SVG-only model {0} before transport")
+    @MethodSource("recraftVectorModels")
+    void rejectsKnownRecraftVectorModelsBeforeTransport(String model) throws Exception {
+        RecordingHttpClient transport = new RecordingHttpClient(200, "{}");
+
+        try (OpenRouterProvider provider = new OpenRouterProvider(transport, MAPPER)) {
+            AiProviderException exception = assertThrows(
+                AiProviderException.class,
+                () -> provider.execute(imageRequest(model), embeddingConfig("key", "trusted"))
+            );
+
+            assertTrue(exception.getMessage().contains("return SVG"));
         }
         assertEquals(0, transport.calls);
     }
@@ -492,6 +514,8 @@ class OpenRouterProviderTest {
         return Stream.of(
             "", "{not-json", "{}", "{\"error\":{\"message\":\"failed\"}}",
             "{\"data\":[]}", "{\"data\":[\"image\"]}", "{\"data\":[{}]}",
+            "{\"data\":[{\"b64_json\":\"AQI=\"},{\"media_type\":\"image/png\"}]}",
+            "{\"data\":[{\"b64_json\":\"AQI=\"},{\"b64_json\":\"  \"}]}",
             "{\"data\":[{\"b64_json\":1234,\"media_type\":\"image/png\"}]}",
             "{\"data\":[{\"b64_json\":\"%%%\",\"media_type\":\"image/png\"}]}",
             "{\"data\":[{\"b64_json\":\"AQI=\",\"media_type\":12}]}",
@@ -503,6 +527,15 @@ class OpenRouterProviderTest {
 
     private static Stream<String> supportedRasterMediaTypes() {
         return Stream.of("image/png", "image/jpeg", "image/jpg", "image/webp", "IMAGE/PNG; charset=binary");
+    }
+
+    private static Stream<String> recraftVectorModels() {
+        return Stream.of(
+            "recraft/recraft-v4.1-pro-vector",
+            "recraft/recraft-v4.1-vector",
+            "recraft/recraft-v4-pro-vector",
+            "recraft/recraft-v4-vector"
+        );
     }
 
     private static void assertImagePromptsRejected(ImageRequestExecutor executor) {

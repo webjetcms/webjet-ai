@@ -35,8 +35,8 @@ Maven:
 </dependency>
 ```
 
-The provider-discovery API below targets the current development branch and is
-scheduled for the next release; it is not part of the `1.0.0` artifact.
+The current development branch targets version `1.2.0`, which includes the
+provider-discovery API below. This API is not available in `1.1.1` or earlier.
 
 ## Minimal usage
 

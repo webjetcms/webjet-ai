@@ -267,7 +267,9 @@ For image operations, the adapter keeps prompt-security rules in
 `systemInstruction` and moves trusted task instructions into the user-content
 parts expected by the image request.
 
-If a request has no user content, the adapter adds a neutral fallback instruction.
+If a `TEXT` request has no user content, the adapter adds a neutral fallback
+instruction. Image generation and editing requests without a meaningful prompt
+are rejected before transport.
 
 ## Models and responses
 

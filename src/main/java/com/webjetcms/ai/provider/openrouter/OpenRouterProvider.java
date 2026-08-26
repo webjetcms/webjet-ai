@@ -392,7 +392,14 @@ public final class OpenRouterProvider implements AiProvider {
                 );
             }
             JsonNode encodedNode = image.get("b64_json");
-            if (encodedNode != null && encodedNode.isNull() == false && encodedNode.isTextual() == false) {
+            if (encodedNode == null || encodedNode.isNull()) {
+                throw malformedResponse(
+                    statusCode,
+                    "OpenRouter image response entry does not contain Base64 data.",
+                    rawResponse
+                );
+            }
+            if (encodedNode.isTextual() == false) {
                 throw malformedResponse(
                     statusCode,
                     "OpenRouter image response contains non-text Base64 data.",
@@ -400,7 +407,13 @@ public final class OpenRouterProvider implements AiProvider {
                 );
             }
             String encoded = textOrNull(encodedNode);
-            if (isBlank(encoded)) continue;
+            if (isBlank(encoded)) {
+                throw malformedResponse(
+                    statusCode,
+                    "OpenRouter image response contains blank Base64 data.",
+                    rawResponse
+                );
+            }
             JsonNode mediaTypeNode = image.get("media_type");
             if (mediaTypeNode != null && mediaTypeNode.isNull() == false && mediaTypeNode.isTextual() == false) {
                 throw malformedResponse(
@@ -797,6 +810,13 @@ public final class OpenRouterProvider implements AiProvider {
         }
         if (isBlank(request.model())) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter model is required.");
+        }
+        if (request.operation() != AiOperation.TEXT
+            && OpenRouterImageOptions.isRecraftVectorModel(request.model())) {
+            throw new AiProviderException(
+                PROVIDER_ID,
+                "OpenRouter Recraft vector models return SVG, which is not supported."
+            );
         }
         if (request.operation() == AiOperation.EDIT_IMAGE && request.inputMedia() == null) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter image editing requires input media.");
