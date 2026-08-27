@@ -1,10 +1,10 @@
 # WebJET AI
 
 WebJET AI is a framework-neutral Java library for communicating with OpenAI,
-Google Gemini, and OpenRouter. It provides provider-neutral request and response
-types, streaming support, image operations, text embeddings, model discovery,
-and prompt-security utilities without requiring Spring, a servlet container, a
-database, or WebJET CMS.
+Google Gemini, and OpenRouter, with optional local ONNX embedding and text runtimes. It
+provides provider-neutral request and response types, streaming support, image
+operations, text embeddings, model discovery, and prompt-security utilities
+without requiring Spring, a servlet container, a database, or WebJET CMS.
 
 ## Requirements
 
@@ -35,8 +35,9 @@ Maven:
 </dependency>
 ```
 
-The current development branch targets version `1.2.0`, which includes the
-provider-discovery API below. This API is not available in `1.1.1` or earlier.
+The current development branch targets `2.0.0-SNAPSHOT`. The latest stable core
+artifact remains `1.2.0`; the local runtime described below is currently a
+development feature.
 
 ## Minimal usage
 
@@ -231,6 +232,200 @@ vectors. Apply any host-specific privacy or content policy before calling
 `embed`. `EmbeddingRequest.toString()` reports only the model, input count, and
 options, never the input text.
 
+## Preparing local models
+
+The published `webjet-ai` JAR also contains a JDK-only preparation tool for the
+`intfloat/multilingual-e5-base` model. The tool downloads a pinned, verified set
+of ONNX and tokenizer files and writes one reproducible ZIP for later use. It does
+not load the model or generate embeddings; runtime ZIP consumption is a separate
+integration concern.
+
+Prepare the portable FP32 bundle:
+
+```shell
+java -jar webjet-ai-VERSION.jar prepare \
+  --model multilingual-e5-base \
+  --output /path/to/multilingual-e5-base-fp32.zip
+```
+
+The canonical model ID `intfloat/multilingual-e5-base` is accepted as an alias.
+If `--output` is omitted, the tool writes
+`multilingual-e5-base-fp32.zip` in the current directory. Existing files are kept
+unless `--overwrite` is specified.
+
+An explicitly selected quantized bundle is available for CPUs with AVX-512 VNNI:
+
+```shell
+java -jar webjet-ai-VERSION.jar prepare \
+  --model multilingual-e5-base \
+  --variant int8-avx512-vnni
+```
+
+Its default output is `multilingual-e5-base-int8-avx512-vnni.zip`. FP32 is the
+portable default; select INT8 only when the target server supports AVX-512 VNNI.
+
+The generated ZIP contains these root-level entries in a stable order:
+
+```text
+webjet-model.json
+model.onnx
+config.json
+tokenizer.json
+tokenizer_config.json
+special_tokens_map.json
+sentencepiece.bpe.model
+MODEL_CARD.md
+SHA256SUMS
+```
+
+Every upstream file is pinned to a full Hugging Face revision and accepted only
+after its byte size and SHA-256 match the built-in recipe. `SHA256SUMS` records
+the packaged contents. Downloads and ZIP creation use temporary files, so a failed
+run does not expose a partial destination.
+
+The embedding width is fixed by this model at 768. `--dimensions 768` can be used
+as a configuration check; any other value is rejected before a download starts.
+Preparation progress is written to standard error, while a successful run writes
+only the absolute ZIP path to standard output. Use `--help` for all options and
+`--version` to print the JAR version.
+
+Prepare the portable quantized M2M100 translation bundle in the same way:
+
+```shell
+java -jar webjet-ai-VERSION.jar prepare \
+  --model facebook/m2m100_418M \
+  --variant int8
+```
+
+Its default output is `m2m100-418m-int8.zip`. M2M100 also accepts `--variant fp32`,
+but INT8 is the portable default because the two FP32 graphs require substantially
+more memory and disk space. Both variants are pinned to one approved
+`Xenova/m2m100_418M` ONNX conversion revision. The text bundle includes separate
+encoder and merged-decoder graphs plus all tokenizer assets; language tokens are
+read from that tokenizer rather than hardcoded by the library.
+
+`webjet-ai-local-model-tool` only prepares local model bundles. Model execution is
+provided by the separate `webjet-ai-local` artifact, so ordinary cloud-provider
+users do not receive ONNX Runtime or tokenizer native dependencies.
+
+## Running a local embedding model
+
+Add the runtime artifact through Maven or Gradle so its pinned native dependency
+graph is resolved. Copying only `webjet-ai-local.jar` is not sufficient.
+
+```gradle
+dependencies {
+    implementation 'com.webjetcms:webjet-ai-local:VERSION'
+}
+```
+
+Open the ZIP once, reuse the provider, and close it during application shutdown:
+
+```java
+import java.nio.file.Path;
+import java.util.List;
+
+import com.webjetcms.ai.EmbeddingOptions;
+import com.webjetcms.ai.EmbeddingRequest;
+import com.webjetcms.ai.EmbeddingResponse;
+import com.webjetcms.ai.provider.local.LocalEmbeddingModelProvider;
+
+try (LocalEmbeddingModelProvider provider = LocalEmbeddingModelProvider.open(
+    Path.of("/models/multilingual-e5-base-fp32.zip")
+)) {
+    EmbeddingResponse response = provider.embed(new EmbeddingRequest(
+        null,
+        List.of("multilingual semantic search"),
+        new EmbeddingOptions()
+    ));
+}
+```
+
+The provider applies the approved model's input preparation before tokenization;
+applications must not add model-specific prefixes themselves. Inputs are truncated
+to the bundle limit of 512 tokens, batched eight at a time by default, mean-pooled
+with the attention mask, and L2-normalized to 768 values.
+
+The provider can also be owned by an explicitly configured client:
+
+```java
+try (AiClient client = AiClient.of(LocalEmbeddingModelProvider.open(modelZip))) {
+    EmbeddingResponse response = client.embed(
+        request,
+        AiProviderConfig.empty()
+    );
+}
+```
+
+`AiClient.discover()` does not create a local provider because the ZIP path and
+lifecycle must be explicit. Advanced initialization supports `intraOpThreads`,
+`maximumBatchSize`, and an existing writable temporary-directory parent through
+`LocalEmbeddingModelProvider.builder(path)`.
+
+FP32 bundles are supported on Linux x86-64 and macOS ARM64. The INT8 variant is
+accepted only on Linux x86-64 when `/proc/cpuinfo` proves AVX-512 VNNI support;
+there is no automatic fallback. Opening a provider temporarily requires enough
+free disk space to extract the model (about 1.11 GB for FP32) in addition to the
+original ZIP. Normal `close()` removes the private extracted directory; abrupt JVM
+termination can leave it for operating-system or administrator cleanup.
+
+The runtime uses only files from the validated ZIP. Initialization forces DJL's
+JVM-wide `ai.djl.offline=true` policy and disables ONNX Runtime telemetry. It never
+downloads a model or tokenizer and accepts no model URL.
+
+## Running local translation
+
+M2M100 uses the normal `TEXT` request and text-only response. Supply the text
+literally through `inputText` and the language pair through `TranslationOptions`:
+
+```java
+import java.nio.file.Path;
+
+import com.webjetcms.ai.AiClient;
+import com.webjetcms.ai.AiProviderConfig;
+import com.webjetcms.ai.AiRequest;
+import com.webjetcms.ai.AiResponse;
+import com.webjetcms.ai.TranslationOptions;
+import com.webjetcms.ai.provider.local.LocalTranslationModelProvider;
+
+try (AiClient client = AiClient.of(LocalTranslationModelProvider.open(
+    Path.of("/models/m2m100-418m-int8.zip")
+))) {
+    AiRequest request = AiRequest.builder()
+        .model("facebook/m2m100_418M")
+        .inputText("Hello, how are you?")
+        .translationOptions(new TranslationOptions("en", "sk", 100))
+        .build();
+
+    AiResponse response = client.execute(request, AiProviderConfig.empty());
+    String translated = response.text();
+}
+```
+
+This model is a deterministic text transformer, not an instruction-following
+language model. Do not set `instructions` or `userPrompt`; those fields are rejected.
+The provider deliberately tells `AiClient` to preserve `inputText` byte-for-byte
+instead of adding prompt-security boundary text. Other providers retain the default
+protected-prompt behavior.
+
+Language selection may instead be configured as provider defaults, which makes the
+direct convenience call return only a string:
+
+```java
+try (LocalTranslationModelProvider provider = LocalTranslationModelProvider.builder(modelZip)
+    .sourceLanguage("en")
+    .targetLanguage("sk")
+    .build()) {
+    String translated = provider.translate("Hello, how are you?");
+}
+```
+
+Per-request `TranslationOptions` override builder defaults. `supportedLanguages()` returns
+the immutable set discovered from the validated tokenizer. Generation currently uses
+deterministic greedy decoding, is capped at 200 output tokens by the approved M2M100
+bundle, and does not support streaming. The provider and its ONNX sessions are reusable;
+open them once and close them during application shutdown.
+
 ## Provider guides
 
 Each provider guide shows how to build requests for text, streaming, multimodal
@@ -248,6 +443,11 @@ Pass the immutable `AiRequest` directly to `AiClient.execute(...)` or
 `AiClient.stream(...)`. The client automatically prepares a protected copy before
 delegating to the provider: it hardens trusted instructions and protects untrusted
 input text and user prompts. The original request keeps its readable input values.
+
+An `AiProvider` may explicitly select literal handling for a deterministic text
+transformation where boundary markers would change the result. The local M2M100
+provider uses that narrowly scoped mode for `TEXT`; the protected mode remains the
+default for existing and custom providers.
 
 Hosts with an audit trail can inspect the immutable `request.suspiciousSources()`
 metadata. Ordinary callers do not need to handle request preparation or detection
@@ -318,6 +518,22 @@ composite build instead of publishing to `mavenLocal()`:
 ./gradlew --include-build ../webjet-ai test
 ```
 
+To test a `2.0.0-SNAPSHOT` through a normal Maven dependency graph instead:
+
+```shell
+./gradlew -PreleaseVersion=2.0.0-SNAPSHOT publishToMavenLocal
+```
+
+Then add `mavenLocal()` and depend on
+`com.webjetcms:webjet-ai-local:2.0.0-SNAPSHOT` in the consuming project.
+
+The opt-in production-bundle smoke test performs no download:
+
+```shell
+./gradlew :webjet-ai-local:localModelSmokeTest \
+  -PlocalModelBundle=/path/multilingual-e5-base-fp32.zip
+```
+
 ## Releases
 
 Releases follow semantic versioning and are published to Maven Central from a
@@ -356,7 +572,7 @@ both stable and `-SNAPSHOT` semantic versions. Configure `githubUsername` and
 `GITHUB_TOKEN`, then run:
 
 ```shell
-./gradlew publishMavenJavaPublicationToGitHubPackagesRepository -PreleaseVersion=1.2.0-SNAPSHOT
+./gradlew publishAllPublicationsToGitHubPackagesRepository -PreleaseVersion=1.2.0-SNAPSHOT
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development rules,

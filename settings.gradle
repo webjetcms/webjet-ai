@@ -1,1 +1,3 @@
 rootProject.name = 'webjet-ai'
+
+include('webjet-ai-local')

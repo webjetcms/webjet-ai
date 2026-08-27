@@ -222,7 +222,7 @@ jobs:
               mavenCentral()
           }
           dependencies {
-              implementation 'com.webjetcms:webjet-ai:${RELEASE_VERSION}'
+              implementation 'com.webjetcms:webjet-ai-local:${RELEASE_VERSION}'
           }
           application {
               mainClass = 'VerifyConsumer'
@@ -234,9 +234,13 @@ jobs:
           import com.webjetcms.ai.AiProviderException;
           import com.webjetcms.ai.AiRequest;
           import com.webjetcms.ai.provider.openai.OpenAiProvider;
+          import com.webjetcms.ai.provider.local.LocalModelProvider;
 
           public final class VerifyConsumer {
               public static void main(String[] args) throws Exception {
+                  if (LocalModelProvider.PROVIDER_ID.equals("local") == false) {
+                      throw new IllegalStateException("Local provider artifact did not resolve");
+                  }
                   AiProviderConfig config = AiProviderConfig.builder("consumer-test-key").build();
                   AiRequest request = AiRequest.builder().build();
                   try (AiClient client = AiClient.of(new OpenAiProvider())) {
@@ -261,11 +265,11 @@ jobs:
               resolved=true
               break
             fi
-            echo "Artifact is not anonymously resolvable yet (${attempt}/60)."
+            echo "Artifacts are not anonymously resolvable yet (${attempt}/60)."
             sleep 15
           done
           if [[ "${resolved}" != true ]]; then
-            echo "Timed out resolving com.webjetcms:webjet-ai:${RELEASE_VERSION} from Maven Central." >&2
+            echo "Timed out resolving WebJET AI artifacts at ${RELEASE_VERSION} from Maven Central." >&2
             exit 1
           fi
 

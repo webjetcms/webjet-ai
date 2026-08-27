@@ -23,6 +23,7 @@ public final class AiProviderConfig {
     private static final Duration DEFAULT_CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration DEFAULT_RESPONSE_TIMEOUT = Duration.ofMinutes(2);
     private static final long MAX_TIMEOUT_MILLIS = Integer.MAX_VALUE;
+    private static final AiProviderConfig EMPTY = builder(null).build();
 
     private final String apiKey;
     private final URI baseUri;
@@ -51,6 +52,15 @@ public final class AiProviderConfig {
      * @return a new configuration builder
      */
     public static Builder builder(String apiKey) { return new Builder(apiKey); }
+
+    /**
+     * Returns a reusable configuration with no credentials, endpoint, or trusted headers.
+     *
+     * <p>This is intended for providers that require no remote connection settings.</p>
+     *
+     * @return an immutable unconfigured provider configuration
+     */
+    public static AiProviderConfig empty() { return EMPTY; }
 
     /**
      * Returns the provider credential.
