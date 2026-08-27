@@ -47,12 +47,11 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
 
     private LocalEmbeddingModelProvider(
         PreparedBundle bundle,
-        EmbeddingModelDefinition model,
         Resources runtime,
         int maximumBatchSize
     ) {
         this.bundle = bundle;
-        this.model = model;
+        this.model = bundle.manifest().model();
         this.tokenizer = runtime.tokenizer();
         this.inference = runtime.inference();
         this.maximumBatchSize = maximumBatchSize;
@@ -97,7 +96,7 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
             String variant = bundle.manifest().variant().name()
                 .replace('-', ' ')
                 .toUpperCase(Locale.ROOT);
-            return List.of(new ModelInfo(model.canonicalId(), "Multilingual E5 Base (" + variant + ")"));
+            return List.of(new ModelInfo(model.canonicalId(), model.displayName() + " (" + variant + ")"));
         } finally {
             lifecycleLock.readLock().unlock();
         }
@@ -193,7 +192,11 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
             for (int start = 0; start < request.inputs().size(); start += maximumBatchSize) {
                 int end = Math.min(start + maximumBatchSize, request.inputs().size());
                 List<String> preparedInputs = request.inputs().subList(start, end).stream()
-                    .map(input -> model.inputPreparation().prepare(bundle.manifest(), input))
+                    .map(input -> model.inputPreparation().prepare(
+                        bundle.manifest(),
+                        input,
+                        request.options().inputType()
+                    ))
                     .toList();
                 NativeEmbeddingTokenizer.Batch tokens = tokenizer.encode(preparedInputs);
                 float[][][] hiddenState = inference.run(tokens);
@@ -286,7 +289,7 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
     boolean isOpen() { return state.get() == State.OPEN; }
 
     private static AiProviderException closedFailure() {
-        return new AiProviderException(PROVIDER_ID, "Local model provider is closing or closed");
+        return new AiProviderException(PROVIDER_ID, "Local embedding model provider is closing or closed");
     }
 
     private static AiProviderException invalid(String message) {
@@ -373,7 +376,7 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
                 prepared = new EmbeddingBundleValidator(catalog)
                     .validateAndExtract(bundle, parent);
                 runtime = NativeEmbeddingRuntimeFactory.create(prepared, intraOpThreads);
-                return new LocalEmbeddingModelProvider(prepared, catalog.model(), runtime, maximumBatchSize);
+                return new LocalEmbeddingModelProvider(prepared, runtime, maximumBatchSize);
             } catch (Throwable failure) {
                 cleanupFailedInitialization(prepared, runtime, failure);
                 if (failure instanceof Error error) throw error;

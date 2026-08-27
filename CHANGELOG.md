@@ -9,11 +9,14 @@ uses [Semantic Versioning](https://semver.org/).
 
 - JDK-only `webjet-ai-local-model-tool` CLI in the existing library JAR for
   preparing verified, reproducible FP32 or AVX-512 VNNI INT8
-  `intfloat/multilingual-e5-base` bundles without executing the model.
+  `intfloat/multilingual-e5-base` and `intfloat/multilingual-e5-small` bundles
+  without executing the model.
 - Separate `com.webjetcms:webjet-ai-local` artifact with DJL local tokenization,
   ONNX Runtime inference, strict schema-v1 bundle validation, E5 mean pooling,
   L2 normalization, model-specific input preparation, batching, and
   provider-owned native/extraction lifecycle.
+- Provider-neutral query and document embedding input roles, with automatic E5
+  `query:` and `passage:` preparation and document-compatible defaults.
 - `AiProviderConfig.empty()` for providers that require no connection settings.
 - FP32 local runtime support for Linux x86-64 and macOS ARM64, plus fail-closed
   AVX-512 VNNI validation for the explicit Linux INT8 bundle.

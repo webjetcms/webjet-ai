@@ -16,7 +16,6 @@ final class EmbeddingBundleValidator {
     }
 
     PreparedBundle validateAndExtract(Path bundle, Path temporaryParent) throws IOException {
-        EmbeddingModelDefinition model = catalog.model();
         VerifiedBundleExtractor.Result<EmbeddingBundleManifest> result =
             VerifiedBundleExtractor.validateAndExtract(
                 bundle,
@@ -24,22 +23,27 @@ final class EmbeddingBundleValidator {
                 "webjet-ai-local-",
                 new Specification<>() {
                     @Override
-                    public List<String> entryOrder() {
-                        return ApprovedEmbeddingModelCatalog.ENTRY_ORDER;
+                    public List<String> entryOrder(EmbeddingBundleManifest manifest) {
+                        return manifest.model().entryOrder();
                     }
 
                     @Override
                     public EmbeddingBundleManifest parseManifest(byte[] content) throws IOException {
-                        EmbeddingBundleManifest manifest = EmbeddingBundleManifest.parse(content, model);
-                        PlatformSupport.requireSupported(manifest.variant());
-                        return manifest;
+                        try {
+                            EmbeddingModelDefinition model = catalog.model(EmbeddingBundleManifest.modelId(content));
+                            EmbeddingBundleManifest manifest = EmbeddingBundleManifest.parse(content, model);
+                            PlatformSupport.requireSupported(manifest.variant());
+                            return manifest;
+                        } catch (IllegalArgumentException exception) {
+                            throw new IOException(exception.getMessage(), exception);
+                        }
                     }
 
                     @Override
                     public Artifact artifact(EmbeddingBundleManifest manifest, String name)
                         throws IOException {
                         try {
-                            EmbeddingArtifactDefinition approved = model.artifact(name, manifest.variant());
+                            EmbeddingArtifactDefinition approved = manifest.model().artifact(name, manifest.variant());
                             return new Artifact(approved.size(), approved.sha256());
                         } catch (IllegalArgumentException exception) {
                             throw new IOException(exception.getMessage(), exception);
@@ -48,7 +52,7 @@ final class EmbeddingBundleValidator {
 
                     @Override
                     public long maximumExtractedBytes(EmbeddingBundleManifest manifest) {
-                        return model.maximumExtractedBytes(manifest.variant());
+                        return manifest.model().maximumExtractedBytes(manifest.variant());
                     }
                 }
             );

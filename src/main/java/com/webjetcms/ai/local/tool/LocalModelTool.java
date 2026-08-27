@@ -12,7 +12,7 @@ import java.util.List;
  * Command-line tool that prepares verified, deterministic local-model bundles for WebJET AI.
  *
  * <p>The tool downloads pinned model artifacts but does not load or execute the model. Run it
- * with {@code --help} to see the supported model, variants, and preparation options.</p>
+ * with {@code --help} to see the supported models, variants, and preparation options.</p>
  */
 public final class LocalModelTool {
     private static final int SUCCESS = 0;
@@ -31,7 +31,7 @@ public final class LocalModelTool {
             arguments,
             System.out,
             System.err,
-            List.of(new MultilingualE5BaseRecipe(), new M2m100Recipe()),
+            productionRecipes(),
             HttpDownloader.production()
         );
         if (exitCode != SUCCESS) {
@@ -62,12 +62,12 @@ public final class LocalModelTool {
         } catch (CliException exception) {
             standardError.println("Error: " + exception.getMessage());
             standardError.println();
-            standardError.print(help());
+            standardError.print(help(recipes));
             return INVALID_ARGUMENTS;
         }
 
         if (options.action() == LocalModelArguments.Action.HELP) {
-            standardOutput.print(help());
+            standardOutput.print(help(recipes));
             return SUCCESS;
         }
         if (options.action() == LocalModelArguments.Action.VERSION) {
@@ -140,7 +140,20 @@ public final class LocalModelTool {
             : implementationVersion;
     }
 
-    private static String help() {
+    private static List<LocalModelRecipe> productionRecipes() {
+        List<LocalModelRecipe> recipes = new ArrayList<>();
+        for (EmbeddingModelCatalog.Model model : EmbeddingModelCatalog.INSTANCE.models()) {
+            recipes.add(new MultilingualE5Recipe(model));
+        }
+        recipes.add(new M2m100Recipe());
+        return List.copyOf(recipes);
+    }
+
+    private static String help(List<LocalModelRecipe> recipes) {
+        String models = recipes.stream()
+            .map(LocalModelRecipe::canonicalId)
+            .sorted()
+            .collect(java.util.stream.Collectors.joining(" or "));
         return """
             webjet-ai-local-model-tool
 
@@ -152,7 +165,7 @@ public final class LocalModelTool {
               java -jar webjet-ai-VERSION.jar --version
 
             Required:
-              --model MODEL       intfloat/multilingual-e5-base or facebook/m2m100_418M
+              --model MODEL       %s
 
             Options:
               --variant VARIANT   Model-specific fp32, int8, or int8-avx512-vnni variant
@@ -161,7 +174,7 @@ public final class LocalModelTool {
               --overwrite         Replace an existing destination after preparation succeeds
               -h, --help          Show this help
               --version           Show the JAR implementation version
-            """;
+            """.formatted(models);
     }
 
     private static void deleteTree(Path root) throws IOException {

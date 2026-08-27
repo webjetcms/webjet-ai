@@ -28,21 +28,26 @@ final class NativeEmbeddingTokenizer implements AutoCloseable {
 
         long[][] inputIds = new long[encodings.length][sequenceLength];
         long[][] attentionMask = new long[encodings.length][sequenceLength];
+        long[][] tokenTypeIds = new long[encodings.length][sequenceLength];
         for (int row = 0; row < encodings.length; row++) {
             long[] ids = encodings[row].getIds();
             long[] mask = encodings[row].getAttentionMask();
-            if (ids.length != sequenceLength || mask.length != sequenceLength) {
+            long[] types = encodings[row].getTypeIds();
+            if (ids.length != sequenceLength || mask.length != sequenceLength
+                || types.length != sequenceLength) {
                 throw new IOException("Tokenizer did not pad the batch to a common sequence length");
             }
             for (int column = 0; column < sequenceLength; column++) {
                 if (mask[column] != 0 && mask[column] != 1) {
                     throw new IOException("Tokenizer returned a non-binary attention mask");
                 }
+                if (types[column] < 0) throw new IOException("Tokenizer returned a negative token type ID");
                 inputIds[row][column] = ids[column];
                 attentionMask[row][column] = mask[column];
+                tokenTypeIds[row][column] = types[column];
             }
         }
-        return new Batch(inputIds, attentionMask);
+        return new Batch(inputIds, attentionMask, tokenTypeIds);
     }
 
     @Override
@@ -50,7 +55,7 @@ final class NativeEmbeddingTokenizer implements AutoCloseable {
         tokenizer.close();
     }
 
-    record Batch(long[][] inputIds, long[][] attentionMask) {
+    record Batch(long[][] inputIds, long[][] attentionMask, long[][] tokenTypeIds) {
         int batchSize() { return inputIds.length; }
 
         int sequenceLength() { return inputIds.length == 0 ? 0 : inputIds[0].length; }

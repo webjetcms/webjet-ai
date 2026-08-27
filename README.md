@@ -235,10 +235,10 @@ options, never the input text.
 ## Preparing local models
 
 The published `webjet-ai` JAR also contains a JDK-only preparation tool for the
-`intfloat/multilingual-e5-base` model. The tool downloads a pinned, verified set
-of ONNX and tokenizer files and writes one reproducible ZIP for later use. It does
-not load the model or generate embeddings; runtime ZIP consumption is a separate
-integration concern.
+approved `intfloat/multilingual-e5-base` and `intfloat/multilingual-e5-small`
+models. The tool downloads a pinned, verified set of ONNX and tokenizer files and
+writes one reproducible ZIP for later use. It does not load the model or generate
+embeddings; runtime ZIP consumption is a separate integration concern.
 
 Prepare the portable FP32 bundle:
 
@@ -252,6 +252,16 @@ The canonical model ID `intfloat/multilingual-e5-base` is accepted as an alias.
 If `--output` is omitted, the tool writes
 `multilingual-e5-base-fp32.zip` in the current directory. Existing files are kept
 unless `--overwrite` is specified.
+
+Use the same command for the smaller 384-value model:
+
+```shell
+java -jar webjet-ai-VERSION.jar prepare \
+  --model multilingual-e5-small
+```
+
+Its default FP32 output is `multilingual-e5-small-fp32.zip`; the canonical
+`intfloat/multilingual-e5-small` ID is also accepted.
 
 An explicitly selected quantized bundle is available for CPUs with AVX-512 VNNI:
 
@@ -283,11 +293,12 @@ after its byte size and SHA-256 match the built-in recipe. `SHA256SUMS` records
 the packaged contents. Downloads and ZIP creation use temporary files, so a failed
 run does not expose a partial destination.
 
-The embedding width is fixed by this model at 768. `--dimensions 768` can be used
-as a configuration check; any other value is rejected before a download starts.
-Preparation progress is written to standard error, while a successful run writes
-only the absolute ZIP path to standard output. Use `--help` for all options and
-`--version` to print the JAR version.
+The embedding width is fixed at 768 for E5 base and 384 for E5 small.
+`--dimensions` can be used as a configuration check; a value that does not match
+the selected model is rejected before a download starts. Preparation progress is
+written to standard error, while a successful run writes only the absolute ZIP
+path to standard output. Use `--help` for all options and `--version` to print the
+JAR version.
 
 Prepare the portable quantized M2M100 translation bundle in the same way:
 
@@ -325,26 +336,35 @@ Open the ZIP once, reuse the provider, and close it during application shutdown:
 import java.nio.file.Path;
 import java.util.List;
 
+import com.webjetcms.ai.EmbeddingInputType;
 import com.webjetcms.ai.EmbeddingOptions;
 import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.provider.local.LocalEmbeddingModelProvider;
 
 try (LocalEmbeddingModelProvider provider = LocalEmbeddingModelProvider.open(
-    Path.of("/models/multilingual-e5-base-fp32.zip")
+    Path.of("/models/multilingual-e5-small-fp32.zip")
 )) {
-    EmbeddingResponse response = provider.embed(new EmbeddingRequest(
+    EmbeddingResponse documents = provider.embed(new EmbeddingRequest(
         null,
-        List.of("multilingual semantic search"),
-        new EmbeddingOptions()
+        List.of("Bratislava is the capital of Slovakia."),
+        new EmbeddingOptions(null, EmbeddingInputType.DOCUMENT)
+    ));
+    EmbeddingResponse queries = provider.embed(new EmbeddingRequest(
+        null,
+        List.of("What is the capital of Slovakia?"),
+        new EmbeddingOptions(null, EmbeddingInputType.QUERY)
     ));
 }
 ```
 
 The provider applies the approved model's input preparation before tokenization;
-applications must not add model-specific prefixes themselves. Inputs are truncated
-to the bundle limit of 512 tokens, batched eight at a time by default, mean-pooled
-with the attention mask, and L2-normalized to 768 values.
+applications must not add model-specific prefixes themselves. Use `DOCUMENT` for
+passages being indexed and `QUERY` for search text. The default is `DOCUMENT`,
+which preserves the behavior of the one-argument and no-argument
+`EmbeddingOptions` constructors. Inputs are truncated to the bundle limit of 512
+tokens, batched eight at a time by default, mean-pooled with the attention mask,
+and L2-normalized to 768 values for E5 base or 384 for E5 small.
 
 The provider can also be owned by an explicitly configured client:
 
@@ -365,9 +385,10 @@ lifecycle must be explicit. Advanced initialization supports `intraOpThreads`,
 FP32 bundles are supported on Linux x86-64 and macOS ARM64. The INT8 variant is
 accepted only on Linux x86-64 when `/proc/cpuinfo` proves AVX-512 VNNI support;
 there is no automatic fallback. Opening a provider temporarily requires enough
-free disk space to extract the model (about 1.11 GB for FP32) in addition to the
-original ZIP. Normal `close()` removes the private extracted directory; abrupt JVM
-termination can leave it for operating-system or administrator cleanup.
+free disk space to extract the model in addition to the original ZIP: about 1.11
+GB for E5 base FP32 or 470 MB for E5 small FP32. Normal `close()` removes the
+private extracted directory; abrupt JVM termination can leave it for
+operating-system or administrator cleanup.
 
 The runtime uses only files from the validated ZIP. Initialization forces DJL's
 JVM-wide `ai.djl.offline=true` policy and disables ONNX Runtime telemetry. It never

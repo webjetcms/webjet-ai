@@ -61,21 +61,39 @@ final class VerifiedBundleExtractor {
         Path extraction,
         Specification<M> specification
     ) throws IOException {
-        M manifest = null;
+        M manifest;
         Map<String, String> actualHashes = new LinkedHashMap<>();
         Set<String> seen = new HashSet<>();
-        long totalBytes = 0;
-        long totalLimit = GENERATED_ENTRY_LIMIT;
-        List<String> expectedOrder = specification.entryOrder();
-        if (expectedOrder.size() < 3
-            || "webjet-model.json".equals(expectedOrder.get(0)) == false
-            || "SHA256SUMS".equals(expectedOrder.get(expectedOrder.size() - 1)) == false) {
-            throw new IOException("Invalid local model bundle specification");
-        }
+        long totalBytes;
+        long totalLimit;
 
         try (InputStream input = Files.newInputStream(bundle);
              ZipInputStream zip = new ZipInputStream(input, StandardCharsets.UTF_8)) {
-            for (int index = 0; index < expectedOrder.size(); index++) {
+            ZipEntry manifestEntry = zip.getNextEntry();
+            if (manifestEntry == null) {
+                throw new IOException("Local model bundle is missing entry: webjet-model.json");
+            }
+            validateEntry(manifestEntry, "webjet-model.json", seen);
+            EntryResult manifestResult = extractEntry(
+                zip,
+                extraction.resolve("webjet-model.json"),
+                GENERATED_ENTRY_LIMIT,
+                true
+            );
+            zip.closeEntry();
+            manifest = specification.parseManifest(manifestResult.content());
+            totalBytes = manifestResult.size();
+            totalLimit = specification.maximumExtractedBytes(manifest);
+            actualHashes.put("webjet-model.json", manifestResult.sha256());
+
+            List<String> expectedOrder = specification.entryOrder(manifest);
+            if (expectedOrder.size() < 3
+                || "webjet-model.json".equals(expectedOrder.get(0)) == false
+                || "SHA256SUMS".equals(expectedOrder.get(expectedOrder.size() - 1)) == false) {
+                throw new IOException("Invalid local model bundle specification");
+            }
+
+            for (int index = 1; index < expectedOrder.size(); index++) {
                 String expectedName = expectedOrder.get(index);
                 ZipEntry entry = zip.getNextEntry();
                 if (entry == null) {
@@ -84,15 +102,11 @@ final class VerifiedBundleExtractor {
                 validateEntry(entry, expectedName, seen);
                 Specification.Artifact artifact = null;
                 long entryLimit = GENERATED_ENTRY_LIMIT;
-                if (index > 0 && index < expectedOrder.size() - 1) {
-                    if (manifest == null) {
-                        throw new IOException("Local model manifest must be validated before artifacts");
-                    }
+                if (index < expectedOrder.size() - 1) {
                     artifact = specification.artifact(manifest, expectedName);
                     entryLimit = artifact.size();
                 }
-                boolean capture = "webjet-model.json".equals(expectedName)
-                    || "SHA256SUMS".equals(expectedName);
+                boolean capture = "SHA256SUMS".equals(expectedName);
                 EntryResult result = extractEntry(
                     zip,
                     extraction.resolve(expectedName),
@@ -109,17 +123,13 @@ final class VerifiedBundleExtractor {
                         throw new IOException("Approved SHA-256 mismatch for " + expectedName);
                     }
                 }
-                if ("webjet-model.json".equals(expectedName)) {
-                    manifest = specification.parseManifest(result.content());
-                    totalLimit = specification.maximumExtractedBytes(manifest);
-                } else if ("SHA256SUMS".equals(expectedName)) {
+                if ("SHA256SUMS".equals(expectedName)) {
                     validateChecksums(result.content(), actualHashes);
+                } else {
+                    actualHashes.put(expectedName, result.sha256());
                 }
                 if (totalBytes > totalLimit) {
                     throw new IOException("Local model bundle exceeds the approved extracted size");
-                }
-                if ("SHA256SUMS".equals(expectedName) == false) {
-                    actualHashes.put(expectedName, result.sha256());
                 }
             }
             ZipEntry extra = zip.getNextEntry();
@@ -129,7 +139,6 @@ final class VerifiedBundleExtractor {
         } catch (ArithmeticException exception) {
             throw new IOException("Local model bundle size overflow", exception);
         }
-        if (manifest == null) throw new IOException("Local model bundle manifest is missing");
         return new Result<>(extraction, manifest);
     }
 
@@ -234,7 +243,7 @@ final class VerifiedBundleExtractor {
     record Result<M>(Path directory, M manifest) { }
 
     interface Specification<M> {
-        List<String> entryOrder();
+        List<String> entryOrder(M manifest);
 
         M parseManifest(byte[] content) throws IOException;
 

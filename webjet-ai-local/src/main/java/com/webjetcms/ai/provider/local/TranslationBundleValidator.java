@@ -24,7 +24,7 @@ final class TranslationBundleValidator {
                 "webjet-ai-local-translation-",
                 new Specification<>() {
                     @Override
-                    public List<String> entryOrder() {
+                    public List<String> entryOrder(TranslationBundleManifest manifest) {
                         return ApprovedTranslationModelCatalog.ENTRY_ORDER;
                     }
 

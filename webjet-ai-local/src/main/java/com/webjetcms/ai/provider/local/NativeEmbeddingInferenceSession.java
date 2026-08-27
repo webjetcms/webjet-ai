@@ -23,6 +23,7 @@ final class NativeEmbeddingInferenceSession implements AutoCloseable {
     private final OrtSession session;
     private final String inputIdsName;
     private final String attentionMaskName;
+    private final String tokenTypeIdsName;
     private final String outputName;
     private final int dimensions;
 
@@ -37,6 +38,7 @@ final class NativeEmbeddingInferenceSession implements AutoCloseable {
         this.session = session;
         this.inputIdsName = inputNames.get(0);
         this.attentionMaskName = inputNames.get(1);
+        this.tokenTypeIdsName = inputNames.contains("token_type_ids") ? "token_type_ids" : null;
         this.outputName = outputNames.get(0);
         this.dimensions = dimensions;
         validateModelContract(inputNames, outputNames);
@@ -48,12 +50,15 @@ final class NativeEmbeddingInferenceSession implements AutoCloseable {
         long[] shape = {batchSize, sequenceLength};
         long[] ids = flatten(tokens.inputIds(), batchSize, sequenceLength);
         long[] mask = flatten(tokens.attentionMask(), batchSize, sequenceLength);
+        long[] types = flatten(tokens.tokenTypeIds(), batchSize, sequenceLength);
 
         try (OnnxTensor idsTensor = OnnxTensor.createTensor(environment, LongBuffer.wrap(ids), shape);
-             OnnxTensor maskTensor = OnnxTensor.createTensor(environment, LongBuffer.wrap(mask), shape)) {
+             OnnxTensor maskTensor = OnnxTensor.createTensor(environment, LongBuffer.wrap(mask), shape);
+             OnnxTensor typesTensor = OnnxTensor.createTensor(environment, LongBuffer.wrap(types), shape)) {
             Map<String, OnnxTensor> inputs = new LinkedHashMap<>();
             inputs.put(inputIdsName, idsTensor);
             inputs.put(attentionMaskName, maskTensor);
+            if (tokenTypeIdsName != null) inputs.put(tokenTypeIdsName, typesTensor);
             try (OrtSession.Result result = session.run(inputs, Set.of(outputName))) {
                 OnnxValue value = result.get(outputName)
                     .orElseThrow(() -> new IOException("ONNX output is missing: " + outputName));
@@ -96,7 +101,9 @@ final class NativeEmbeddingInferenceSession implements AutoCloseable {
 
     private void validateModelContract(List<String> inputNames, List<String> outputNames)
         throws IOException, OrtException {
-        if (inputNames.size() != 2 || outputNames.size() != 1
+        boolean supportedInputs = inputNames.equals(List.of("input_ids", "attention_mask"))
+            || inputNames.equals(List.of("input_ids", "attention_mask", "token_type_ids"));
+        if (supportedInputs == false || outputNames.size() != 1
             || session.getInputNames().equals(Set.copyOf(inputNames)) == false
             || session.getOutputNames().equals(Set.copyOf(outputNames)) == false) {
             throw new IOException("ONNX model tensor names do not match the approved manifest");
@@ -104,6 +111,9 @@ final class NativeEmbeddingInferenceSession implements AutoCloseable {
         Map<String, NodeInfo> inputs = session.getInputInfo();
         requireTensor(inputs.get(inputIdsName), OnnxJavaType.INT64, 2, inputIdsName);
         requireTensor(inputs.get(attentionMaskName), OnnxJavaType.INT64, 2, attentionMaskName);
+        if (tokenTypeIdsName != null) {
+            requireTensor(inputs.get(tokenTypeIdsName), OnnxJavaType.INT64, 2, tokenTypeIdsName);
+        }
         requireTensor(session.getOutputInfo().get(outputName), OnnxJavaType.FLOAT, 3, outputName);
     }
 

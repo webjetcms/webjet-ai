@@ -2,6 +2,7 @@ package com.webjetcms.ai.provider.local;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -9,38 +10,23 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 
-/** Loads the production-approved embedding model identities from the core catalogue resource. */
+/** Loads production-approved embedding model identities from the core catalogue resource. */
 final class ApprovedEmbeddingModelCatalog {
     static final String RESOURCE = "META-INF/webjet-ai/local-embedding-model-catalog-v1.properties";
-    static final List<String> ENTRY_ORDER = List.of(
-        "webjet-model.json",
-        "model.onnx",
-        "config.json",
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "special_tokens_map.json",
-        "sentencepiece.bpe.model",
-        "MODEL_CARD.md",
-        "SHA256SUMS"
-    );
 
-    private static final List<String> ARTIFACT_NAMES = List.of(
-        "config.json",
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "special_tokens_map.json",
-        "sentencepiece.bpe.model",
-        "MODEL_CARD.md"
-    );
+    private final Map<String, EmbeddingModelDefinition> modelsByAlias;
 
-    private final EmbeddingModelDefinition model;
-
-    private ApprovedEmbeddingModelCatalog(EmbeddingModelDefinition model) {
-        this.model = model;
-    }
-
-    static ApprovedEmbeddingModelCatalog of(EmbeddingModelDefinition model) {
-        return new ApprovedEmbeddingModelCatalog(model);
+    private ApprovedEmbeddingModelCatalog(List<EmbeddingModelDefinition> models) {
+        Map<String, EmbeddingModelDefinition> aliases = new LinkedHashMap<>();
+        for (EmbeddingModelDefinition model : models) {
+            for (String alias : model.aliases()) {
+                EmbeddingModelDefinition previous = aliases.putIfAbsent(alias, model);
+                if (previous != null) {
+                    throw new IllegalStateException("Embedding model alias is not unique: " + alias);
+                }
+            }
+        }
+        modelsByAlias = Map.copyOf(aliases);
     }
 
     static ApprovedEmbeddingModelCatalog load() {
@@ -60,62 +46,86 @@ final class ApprovedEmbeddingModelCatalog {
             throw new IllegalStateException("Unsupported approved embedding model catalogue version");
         }
 
-        Map<String, EmbeddingVariantDefinition> variants = new LinkedHashMap<>();
-        for (String name : List.of("fp32", "int8-avx512-vnni")) {
-            String prefix = "variant." + name + ".";
-            variants.put(name, new EmbeddingVariantDefinition(
-                name,
-                values.required(prefix + "cpu-target"),
-                values.required(prefix + "source-path"),
-                values.positiveLong(prefix + "model-size"),
-                values.sha256(prefix + "model-sha256")
-            ));
+        List<EmbeddingModelDefinition> models = new ArrayList<>();
+        Set<String> keys = new LinkedHashSet<>(values.list("catalog.models"));
+        if (keys.size() != values.list("catalog.models").size()) {
+            throw new IllegalStateException("Approved embedding model keys must be unique");
         }
-
-        Map<String, EmbeddingArtifactDefinition> artifacts = new LinkedHashMap<>();
-        for (String name : ARTIFACT_NAMES) {
-            String prefix = "artifact." + name + ".";
-            artifacts.put(name, new EmbeddingArtifactDefinition(
-                name,
-                values.required(prefix + "source-path"),
-                values.positiveLong(prefix + "size"),
-                values.sha256(prefix + "sha256")
-            ));
-        }
-
-        Set<String> aliases = new LinkedHashSet<>(List.of(
-            values.required("model.aliases").split(",", -1)
-        ));
-        if (aliases.stream().anyMatch(String::isBlank)) {
-            throw new IllegalStateException("Approved embedding model aliases must not be blank");
-        }
-
-        return new ApprovedEmbeddingModelCatalog(new EmbeddingModelDefinition(
-            values.required("model.canonical-id"),
-            Set.copyOf(aliases),
-            values.required("model.revision"),
-            values.positiveInteger("model.dimensions"),
-            values.positiveInteger("model.maximum-length"),
-            values.required("model.format"),
-            values.required("model.license"),
-            values.required("model.task"),
-            values.required("model.pooling"),
-            values.bool("model.normalize"),
-            EmbeddingInputPreparation.fromCatalog(values.required("model.input-preparation")),
-            values.required("model.query-prefix"),
-            values.required("model.document-prefix"),
-            List.of(values.required("model.input-names").split(",", -1)),
-            List.of(values.required("model.output-names").split(",", -1)),
-            values.required("model.repository"),
-            values.required("model.model-card-path"),
-            Map.copyOf(variants),
-            Map.copyOf(artifacts)
-        ));
+        for (String key : keys) models.add(loadModel(values, key));
+        return new ApprovedEmbeddingModelCatalog(List.copyOf(models));
     }
 
-    EmbeddingModelDefinition model() { return model; }
+    EmbeddingModelDefinition model(String id) {
+        EmbeddingModelDefinition model = modelsByAlias.get(id);
+        if (model == null) throw new IllegalArgumentException("Unsupported local embedding model: " + id);
+        return model;
+    }
+
+    private static EmbeddingModelDefinition loadModel(Values values, String key) {
+        String prefix = "model." + key + ".";
+
+        Map<String, EmbeddingVariantDefinition> variants = new LinkedHashMap<>();
+        for (String name : values.list(prefix + "variants")) {
+            String variantPrefix = prefix + "variant." + name + ".";
+            variants.put(name, new EmbeddingVariantDefinition(
+                name,
+                values.required(variantPrefix + "cpu-target"),
+                values.required(variantPrefix + "source-path"),
+                values.positiveLong(variantPrefix + "model-size"),
+                values.sha256(variantPrefix + "model-sha256")
+            ));
+        }
+
+        List<String> artifactNames = values.list(prefix + "artifacts");
+        Map<String, EmbeddingArtifactDefinition> artifacts = new LinkedHashMap<>();
+        for (String name : artifactNames) {
+            String artifactPrefix = prefix + "artifact." + name + ".";
+            artifacts.put(name, new EmbeddingArtifactDefinition(
+                name,
+                values.required(artifactPrefix + "source-path"),
+                values.positiveLong(artifactPrefix + "size"),
+                values.sha256(artifactPrefix + "sha256")
+            ));
+        }
+
+        Set<String> aliases = new LinkedHashSet<>(values.list(prefix + "aliases"));
+        if (aliases.size() != values.list(prefix + "aliases").size()) {
+            throw new IllegalStateException("Approved embedding model aliases must be unique");
+        }
+
+        String defaultVariant = values.required(prefix + "default-variant");
+        if (variants.containsKey(defaultVariant) == false) {
+            throw new IllegalStateException("Approved embedding model default variant is unsupported: " + key);
+        }
+
+        return new EmbeddingModelDefinition(
+            values.required(prefix + "display-name"),
+            values.required(prefix + "canonical-id"),
+            Set.copyOf(aliases),
+            values.required(prefix + "revision"),
+            values.positiveInteger(prefix + "dimensions"),
+            values.positiveInteger(prefix + "maximum-length"),
+            values.required(prefix + "format"),
+            values.required(prefix + "license"),
+            values.required(prefix + "task"),
+            values.required(prefix + "pooling"),
+            values.bool(prefix + "normalize"),
+            EmbeddingInputPreparation.fromCatalog(values.required(prefix + "input-preparation")),
+            values.required(prefix + "query-prefix"),
+            values.required(prefix + "document-prefix"),
+            values.list(prefix + "input-names"),
+            values.list(prefix + "output-names"),
+            values.required(prefix + "repository"),
+            values.required(prefix + "model-card-path"),
+            defaultVariant,
+            Map.copyOf(variants),
+            artifactNames,
+            Map.copyOf(artifacts)
+        );
+    }
 
     record EmbeddingModelDefinition(
+        String displayName,
         String canonicalId,
         Set<String> aliases,
         String revision,
@@ -133,7 +143,9 @@ final class ApprovedEmbeddingModelCatalog {
         List<String> outputNames,
         String repository,
         String modelCardPath,
+        String defaultVariant,
         Map<String, EmbeddingVariantDefinition> variants,
+        List<String> artifactNames,
         Map<String, EmbeddingArtifactDefinition> artifacts
     ) {
         EmbeddingVariantDefinition variant(String name) {
@@ -153,6 +165,15 @@ final class ApprovedEmbeddingModelCatalog {
                 throw new IllegalArgumentException("Unsupported local embedding model artifact: " + name);
             }
             return artifact;
+        }
+
+        List<String> entryOrder() {
+            List<String> entries = new ArrayList<>(artifactNames.size() + 3);
+            entries.add("webjet-model.json");
+            entries.add("model.onnx");
+            entries.addAll(artifactNames);
+            entries.add("SHA256SUMS");
+            return List.copyOf(entries);
         }
 
         long maximumExtractedBytes(EmbeddingVariantDefinition variant) {
@@ -181,6 +202,14 @@ final class ApprovedEmbeddingModelCatalog {
                 throw new IllegalStateException("Missing approved embedding model catalogue value: " + key);
             }
             return value;
+        }
+
+        List<String> list(String key) {
+            List<String> values = List.of(required(key).split(",", -1));
+            if (values.stream().anyMatch(String::isBlank)) {
+                throw new IllegalStateException("Blank approved embedding model catalogue value: " + key);
+            }
+            return values;
         }
 
         int integer(String key) {

@@ -12,8 +12,7 @@ import com.webjetcms.ai.provider.local.ApprovedEmbeddingModelCatalog.EmbeddingVa
 
 /** Parsed and approved schema-v1 model bundle metadata. */
 record EmbeddingBundleManifest(
-    String modelId,
-    String revision,
+    EmbeddingModelDefinition model,
     EmbeddingVariantDefinition variant,
     int dimensions,
     int maximumLength,
@@ -23,6 +22,18 @@ record EmbeddingBundleManifest(
     List<String> outputNames
 ) {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    static String modelId(byte[] json) throws IOException {
+        JsonNode root = MAPPER.readTree(json);
+        if (root == null || root.isObject() == false) {
+            throw new IOException("Local embedding model manifest must be an object");
+        }
+        JsonNode model = root.get("model");
+        if (model == null || model.isObject() == false) {
+            throw new IOException("Local embedding model manifest field must be an object: model");
+        }
+        return requiredText(model, "id");
+    }
 
     static EmbeddingBundleManifest parse(byte[] json, EmbeddingModelDefinition approved) throws IOException {
         JsonNode root = MAPPER.readTree(json);
@@ -79,8 +90,7 @@ record EmbeddingBundleManifest(
         requireText(source, "modelCardPath", approved.modelCardPath());
 
         return new EmbeddingBundleManifest(
-            approved.canonicalId(),
-            approved.revision(),
+            approved,
             variant,
             approved.dimensions(),
             approved.maximumLength(),
