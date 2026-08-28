@@ -33,7 +33,7 @@ record ModelArtifact(String sourcePath, String bundlePath, URI sourceUri, long e
 }
 
 enum ModelVariant {
-    FP32("fp32"), INT8("int8"), INT8_AVX512_VNNI("int8-avx512-vnni");
+    FP32("fp32"), INT8("int8"), INT8_AVX512_VNNI("int8-avx512-vnni"), Q4_K_M("q4-k-m");
     private final String cliName;
     ModelVariant(String cliName) { this.cliName = cliName; }
     String cliName() { return cliName; }

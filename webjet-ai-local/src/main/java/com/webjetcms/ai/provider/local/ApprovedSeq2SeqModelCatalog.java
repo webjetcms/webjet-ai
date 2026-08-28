@@ -9,9 +9,6 @@ import java.util.Set;
 final class ApprovedSeq2SeqModelCatalog {
     static final String TRANSLATION_RESOURCE =
         "META-INF/webjet-ai/local-translation-model-catalog-v1.properties";
-    static final String GENERATION_RESOURCE =
-        "META-INF/webjet-ai/local-generation-model-catalog-v1.properties";
-
     private ApprovedSeq2SeqModelCatalog() { }
 
     static ModelDefinition load(String resource, String description) {
@@ -48,37 +45,37 @@ final class ApprovedSeq2SeqModelCatalog {
         if (variants.stream().noneMatch(variant -> variant.name().equals(defaultVariant)))
             throw new IllegalStateException("Approved model default variant is unsupported: " + defaultVariant);
 
+        requireM2m100Tokenizer(values.required("model.tokenizer-kind"));
         return new ModelDefinition(
             values.required("model.display-name"), canonicalId, aliases,
             values.required("model.repository"), values.required("model.revision"),
             values.required("model.license"), values.required("model.task"),
-            tokenizerKind(values.required("model.tokenizer-kind")), values.positiveInteger("model.maximum-length"),
+            values.positiveInteger("model.maximum-length"),
             values.positiveInteger("model.maximum-output-length"),
             values.nonNegativeInteger("model.decoder-start-token-id"), values.nonNegativeInteger("model.eos-token-id"),
             values.nonNegativeInteger("model.pad-token-id"), values.positiveInteger("model.vocabulary-size"),
             values.positiveInteger("model.decoder-layers"), values.positiveInteger("model.hidden-size"),
             values.positiveInteger("model.attention-heads"), values.positiveInteger("model.attention-head-size"),
             values.required("model.encoder-file"), values.required("model.decoder-file"),
-            values.required("model.tokenizer-file"), values.required("model.tokenizer-config-file"),
             values.required("model.tokenizer-model-file"), values.optional("model.vocabulary-file"),
             values.required("model.special-tokens-file"), values.required("model.model-card-path"),
             defaultVariant, List.copyOf(variants), List.copyOf(artifacts)
         );
     }
 
-    private static String tokenizerKind(String value) {
-        if ("m2m100".equals(value) || "huggingface".equals(value)) return value;
-        throw new IllegalStateException("Unsupported approved tokenizer kind: " + value);
+    private static void requireM2m100Tokenizer(String value) {
+        if ("m2m100".equals(value) == false)
+            throw new IllegalStateException("Unsupported approved tokenizer kind: " + value);
     }
 
     record ModelDefinition(
         String displayName, String canonicalId, Set<String> aliases,
         String repository, String revision, String license, String task,
-        String tokenizerKind, int maximumLength, int maximumOutputLength,
+        int maximumLength, int maximumOutputLength,
         int decoderStartTokenId, int eosTokenId, int padTokenId, int vocabularySize,
         int decoderLayers, int hiddenSize, int attentionHeads, int attentionHeadSize,
-        String encoderFile, String decoderFile, String tokenizerFile, String tokenizerConfigFile,
-        String tokenizerModelFile, String vocabularyFile, String specialTokensFile, String modelCardPath,
+        String encoderFile, String decoderFile, String tokenizerModelFile, String vocabularyFile,
+        String specialTokensFile, String modelCardPath,
         String defaultVariant, List<VariantDefinition> variants, List<ArtifactDefinition> artifacts
     ) {
         VariantDefinition variant(String name) throws IOException {

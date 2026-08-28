@@ -12,11 +12,13 @@ final class CatalogRecipe implements LocalModelRecipe {
     private final ModelCatalog files;
     private final URI repository;
     private final boolean embedding;
+    private final boolean causal;
 
     private CatalogRecipe(ModelCatalog model, ModelCatalog files, boolean embedding) {
         this.model = model;
         this.files = files;
         this.embedding = embedding;
+        causal = model.has("model-file");
         repository = URI.create("https://huggingface.co/" + value("repository") + "/resolve/");
         validate();
     }
@@ -47,13 +49,14 @@ final class CatalogRecipe implements LocalModelRecipe {
 
     @Override public String manifest(ModelVariant variant) {
         requireSupported(variant);
-        return embedding ? embeddingManifest(variant) : seq2seqManifest(variant);
+        return embedding ? embeddingManifest(variant) : causal ? causalManifest(variant) : seq2seqManifest(variant);
     }
 
     @Override public List<ModelArtifact> artifacts(ModelVariant variant) {
         requireSupported(variant);
         List<ModelArtifact> result = new ArrayList<>();
         if (embedding) result.add(variantArtifact(variant, "model", "model.onnx"));
+        else if (causal) result.add(variantArtifact(variant, "model", value("model-file")));
         else {
             result.add(variantArtifact(variant, "encoder", value("encoder-file")));
             result.add(variantArtifact(variant, "decoder", value("decoder-file")));
@@ -87,15 +90,20 @@ final class CatalogRecipe implements LocalModelRecipe {
                 value("model-card-path"));
     }
 
+    private String causalManifest(ModelVariant variant) {
+        return """
+            {"schemaVersion":1,"model":{"id":"%s","revision":"%s","variant":"%s","format":"gguf","file":"%s","license":"%s"},"task":"%s","generation":{"maximumLength":%d,"contextLength":%d,"strategy":"greedy"},"runtime":{"cpuTarget":"%s"},"source":{"repository":"%s","revision":"%s","modelPath":"%s","modelCardPath":"%s"}}
+            """.formatted(canonicalId(), revision(), variant.cliName(), value("model-file"), value("license"),
+                value("task"), model.positiveInteger("maximum-output-length"), maximumLength(),
+                files.variant(variant, "cpu-target"), value("repository"), revision(),
+                files.variant(variant, "source-path"), value("model-card-path"));
+    }
+
     private String tokenizer() {
         return switch (value("tokenizer-kind")) {
             case "m2m100" -> ("{\"engine\":\"sentencepiece\",\"modelFile\":\"%s\",\"vocabularyFile\":\"%s\","
                 + "\"specialTokensFile\":\"%s\",\"maximumLength\":%d,\"languageTokenPattern\":\"__%%s__\"}")
                 .formatted(value("tokenizer-model-file"), value("vocabulary-file"), value("special-tokens-file"), maximumLength());
-            case "huggingface" -> ("{\"engine\":\"huggingface\",\"tokenizerFile\":\"%s\",\"configFile\":\"%s\","
-                + "\"modelFile\":\"%s\",\"specialTokensFile\":\"%s\",\"maximumLength\":%d}")
-                .formatted(value("tokenizer-file"), value("tokenizer-config-file"), value("tokenizer-model-file"),
-                    value("special-tokens-file"), maximumLength());
             default -> throw new IllegalStateException("Unsupported local model tokenizer kind");
         };
     }
@@ -107,6 +115,10 @@ final class CatalogRecipe implements LocalModelRecipe {
             throw new IllegalStateException("Local model aliases must contain the canonical ID: " + canonicalId());
         }
         if (embedding) value("input-preparation");
+        else if (causal) {
+            model.positiveInteger("maximum-output-length");
+            for (String key : List.of("model-file", "model-card-path")) value(key);
+        }
         else {
             model.positiveInteger("hidden-size");
             for (String key : List.of("encoder-file", "decoder-file", "tokenizer-file", "tokenizer-config-file",
@@ -126,8 +138,8 @@ final class CatalogRecipe implements LocalModelRecipe {
             throw new IllegalArgumentException("Unsupported variant for " + canonicalId() + ": " + variant.cliName());
     }
     private ModelArtifact variantArtifact(ModelVariant variant, String role, String path) {
-        String prefix = embedding ? "model" : role;
-        String source = embedding ? "source-path" : role + "-source-path";
+        String prefix = embedding || causal ? "model" : role;
+        String source = embedding || causal ? "source-path" : role + "-source-path";
         return artifact(files.variant(variant, source), path,
             files.variantNumber(variant, prefix + "-size"), files.variantSha256(variant, prefix + "-sha256"));
     }

@@ -2,7 +2,6 @@ package com.webjetcms.ai.provider.local;
 
 import java.nio.file.Path;
 
-import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.djl.sentencepiece.SpTokenizer;
 
 /** Initializes model-specific tokenization around the shared ONNX encoder-decoder generator. */
@@ -15,21 +14,6 @@ final class NativeSeq2SeqRuntimeFactory {
             tokenizer -> new NativeTranslationTokenizer(tokenizer,
                 directory.resolve(model.vocabularyFile()), directory.resolve(model.specialTokensFile()),
                 model.maximumLength(), model.eosTokenId(), model.vocabularySize())
-        ));
-    }
-    static Resources<NativeGenerationTokenizer> createGeneration(
-        Seq2SeqBundleValidator.PreparedBundle bundle, Integer intraOpThreads) throws Exception {
-        return create(bundle, intraOpThreads, (directory, model) -> LocalProviderLifecycle.transfer(
-            HuggingFaceTokenizer.builder()
-                .optTokenizerPath(directory.resolve(model.tokenizerFile()))
-                .optTokenizerConfigPath(directory.resolve(model.tokenizerConfigFile()).toString())
-                .optAddSpecialTokens(true)
-                .optTruncation(true)
-                .optPadding(false)
-                .optMaxLength(model.maximumLength())
-                .build(),
-            tokenizer -> new NativeGenerationTokenizer(
-                tokenizer, model.maximumLength(), model.vocabularySize())
         ));
     }
     private static <T extends AutoCloseable> Resources<T> create(

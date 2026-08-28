@@ -58,7 +58,7 @@ final class LocalModelBundleWriter {
             for (Entry source : entries) {
                 ZipEntry entry = new ZipEntry(source.name);
                 entry.setTimeLocal(ZIP_TIMESTAMP);
-                if (source.name.endsWith(".onnx")) {
+                if (source.name.endsWith(".onnx") || source.name.endsWith(".gguf")) {
                     entry.setMethod(ZipEntry.STORED);
                     entry.setSize(source.size);
                     entry.setCompressedSize(source.size);

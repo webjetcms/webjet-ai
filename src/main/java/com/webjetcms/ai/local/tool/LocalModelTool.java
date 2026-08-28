@@ -151,7 +151,7 @@ public final class LocalModelTool {
             + "Usage:\n  java -jar webjet-ai-VERSION.jar prepare --model MODEL [options]\n"
             + "  java -jar webjet-ai-VERSION.jar --help\n  java -jar webjet-ai-VERSION.jar --version\n\n"
             + "Required:\n  --model MODEL       %s\n\nOptions:\n"
-            + "  --variant VARIANT   Model-specific fp32, int8, or int8-avx512-vnni variant\n"
+            + "  --variant VARIANT   Model-specific quantization variant\n"
             + "  --dimensions SIZE   Validate an embedding model's fixed dimensions\n"
             + "  --output PATH       Destination ZIP (uses a model-specific default)\n"
             + "  --overwrite         Replace an existing destination after preparation succeeds\n"

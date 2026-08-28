@@ -120,3 +120,14 @@ final class NativeTranslationTokenizer implements AutoCloseable {
     private record Metadata(Map<String, Integer> tokenIds, String[] tokensById,
         Map<String, Long> languageTokenIds, int unknownTokenId) { }
 }
+
+/** Defensive token IDs and matching encoder attention mask shared by local tokenizers. */
+record NativeTokenizerBatch(long[] inputIds, long[] attentionMask) {
+    NativeTokenizerBatch {
+        inputIds = inputIds.clone(); attentionMask = attentionMask.clone();
+        if (inputIds.length == 0 || inputIds.length != attentionMask.length)
+            throw new IllegalArgumentException("Token IDs and attention mask must have equal non-zero length");
+    }
+    @Override public long[] inputIds() { return inputIds.clone(); }
+    @Override public long[] attentionMask() { return attentionMask.clone(); }
+}

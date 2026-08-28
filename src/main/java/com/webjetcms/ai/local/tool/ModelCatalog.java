@@ -23,6 +23,7 @@ record ModelCatalog(Properties values, String description, String prefix) {
         return result;
     }
     ModelCatalog at(String nestedPrefix) { return new ModelCatalog(values, description, prefix + nestedPrefix); }
+    boolean has(String key) { return values.containsKey(prefix + key); }
     String value(String key) {
         String result = values.getProperty(prefix + key);
         if (result == null || result.isEmpty()) throw invalid("Missing", key, null);

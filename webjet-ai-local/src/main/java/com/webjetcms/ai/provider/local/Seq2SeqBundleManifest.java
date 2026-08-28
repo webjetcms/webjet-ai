@@ -23,11 +23,7 @@ record Seq2SeqBundleManifest(ModelDefinition model, VariantDefinition variant) {
         VariantDefinition variant = approved.variant(JSON.text(model, "variant"));
         JSON.expect(root, "task", approved.task());
 
-        switch (approved.tokenizerKind()) {
-            case "m2m100" -> validateM2m100Tokenizer(root, approved);
-            case "huggingface" -> validateHuggingFaceTokenizer(root, approved);
-            default -> throw new IOException("Unsupported local tokenizer kind");
-        }
+        validateM2m100Tokenizer(root, approved);
 
         JSON.values(root, "generation", "maximumLength", approved.maximumOutputLength(),
             "decoderStartTokenId", approved.decoderStartTokenId(), "eosTokenId", approved.eosTokenId(),
@@ -49,11 +45,5 @@ record Seq2SeqBundleManifest(ModelDefinition model, VariantDefinition variant) {
         JSON.values(node, "tokenizer", "engine", "sentencepiece", "modelFile", approved.tokenizerModelFile(),
             "vocabularyFile", approved.vocabularyFile(), "specialTokensFile", approved.specialTokensFile(),
             "maximumLength", approved.maximumLength(), "languageTokenPattern", "__%s__");
-    }
-
-    private static void validateHuggingFaceTokenizer(JsonNode node, ModelDefinition approved) throws IOException {
-        JSON.values(node, "tokenizer", "engine", "huggingface", "tokenizerFile", approved.tokenizerFile(),
-            "configFile", approved.tokenizerConfigFile(), "modelFile", approved.tokenizerModelFile(),
-            "specialTokensFile", approved.specialTokensFile(), "maximumLength", approved.maximumLength());
     }
 }
