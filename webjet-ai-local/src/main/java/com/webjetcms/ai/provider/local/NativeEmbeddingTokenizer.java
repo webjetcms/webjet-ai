@@ -18,46 +18,42 @@ final class NativeEmbeddingTokenizer implements AutoCloseable {
 
     public synchronized Batch encode(List<String> inputs) throws IOException {
         Encoding[] encodings = tokenizer.batchEncode(inputs);
-        if (encodings.length != inputs.size() || encodings.length == 0) {
-            throw new IOException("Tokenizer returned an unexpected batch size");
-        }
+        require(encodings.length == inputs.size() && encodings.length > 0,
+            "Tokenizer returned an unexpected batch size");
         int sequenceLength = encodings[0].getIds().length;
-        if (sequenceLength < 1 || sequenceLength > maximumLength) {
-            throw new IOException("Tokenizer returned an invalid sequence length: " + sequenceLength);
-        }
+        require(sequenceLength >= 1 && sequenceLength <= maximumLength,
+            "Tokenizer returned an invalid sequence length: " + sequenceLength);
 
-        long[][] inputIds = new long[encodings.length][sequenceLength];
-        long[][] attentionMask = new long[encodings.length][sequenceLength];
-        long[][] tokenTypeIds = new long[encodings.length][sequenceLength];
+        Batch batch = new Batch(
+            new long[encodings.length][], new long[encodings.length][], new long[encodings.length][]);
         for (int row = 0; row < encodings.length; row++) {
-            long[] ids = encodings[row].getIds();
-            long[] mask = encodings[row].getAttentionMask();
-            long[] types = encodings[row].getTypeIds();
-            if (ids.length != sequenceLength || mask.length != sequenceLength
-                || types.length != sequenceLength) {
-                throw new IOException("Tokenizer did not pad the batch to a common sequence length");
-            }
+            Encoding encoding = encodings[row];
+            long[] ids = encoding.getIds();
+            long[] mask = encoding.getAttentionMask();
+            long[] types = encoding.getTypeIds();
+            require(ids.length == sequenceLength && mask.length == sequenceLength && types.length == sequenceLength,
+                "Tokenizer did not pad the batch to a common sequence length");
             for (int column = 0; column < sequenceLength; column++) {
-                if (mask[column] != 0 && mask[column] != 1) {
-                    throw new IOException("Tokenizer returned a non-binary attention mask");
-                }
-                if (types[column] < 0) throw new IOException("Tokenizer returned a negative token type ID");
-                inputIds[row][column] = ids[column];
-                attentionMask[row][column] = mask[column];
-                tokenTypeIds[row][column] = types[column];
+                require(mask[column] == 0 || mask[column] == 1,
+                    "Tokenizer returned a non-binary attention mask");
+                require(types[column] >= 0, "Tokenizer returned a negative token type ID");
             }
+            batch.inputIds()[row] = ids.clone();
+            batch.attentionMask()[row] = mask.clone();
+            batch.tokenTypeIds()[row] = types.clone();
         }
-        return new Batch(inputIds, attentionMask, tokenTypeIds);
+        return batch;
     }
 
     @Override
-    public synchronized void close() {
-        tokenizer.close();
+    public synchronized void close() { tokenizer.close(); }
+
+    private static void require(boolean valid, String message) throws IOException {
+        if (valid == false) throw new IOException(message);
     }
 
     record Batch(long[][] inputIds, long[][] attentionMask, long[][] tokenTypeIds) {
         int batchSize() { return inputIds.length; }
-
         int sequenceLength() { return inputIds.length == 0 ? 0 : inputIds[0].length; }
     }
 }

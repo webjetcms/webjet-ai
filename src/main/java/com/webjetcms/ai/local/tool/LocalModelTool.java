@@ -3,10 +3,14 @@ package com.webjetcms.ai.local.tool;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Command-line tool that prepares verified, deterministic local-model bundles for WebJET AI.
@@ -15,9 +19,8 @@ import java.util.List;
  * with {@code --help} to see the supported models, variants, and preparation options.</p>
  */
 public final class LocalModelTool {
-    private static final int SUCCESS = 0;
-    private static final int OPERATIONAL_FAILURE = 1;
-    private static final int INVALID_ARGUMENTS = 2;
+    private static final int SUCCESS = 0, OPERATIONAL_FAILURE = 1, INVALID_ARGUMENTS = 2;
+    private static final Set<String> VALUE_OPTIONS = Set.of("--model", "--variant", "--dimensions", "--output");
 
     private LocalModelTool() { }
 
@@ -27,165 +30,154 @@ public final class LocalModelTool {
      * @param arguments command-line arguments
      */
     public static void main(String[] arguments) {
-        int exitCode = run(
-            arguments,
-            System.out,
-            System.err,
-            productionRecipes(),
-            HttpDownloader.production()
-        );
-        if (exitCode != SUCCESS) {
-            System.exit(exitCode);
-        }
+        int exitCode = run(arguments, System.out, System.err, productionRecipes(), HttpDownloader.production());
+        if (exitCode != SUCCESS) System.exit(exitCode);
     }
 
-    static int run(
-        String[] arguments,
-        PrintStream standardOutput,
-        PrintStream standardError,
-        LocalModelRecipe recipe,
-        HttpDownloader downloader
-    ) {
-        return run(arguments, standardOutput, standardError, List.of(recipe), downloader);
+    static int run(String[] arguments, PrintStream out, PrintStream error, LocalModelRecipe recipe,
+        HttpDownloader downloader) {
+        return run(arguments, out, error, List.of(recipe), downloader);
     }
 
-    static int run(
-        String[] arguments,
-        PrintStream standardOutput,
-        PrintStream standardError,
-        List<LocalModelRecipe> recipes,
-        HttpDownloader downloader
-    ) {
-        LocalModelArguments options;
+    static int run(String[] arguments, PrintStream out, PrintStream error, List<LocalModelRecipe> recipes,
+        HttpDownloader downloader) {
+        Options options;
         try {
-            options = LocalModelArguments.parse(arguments, recipes);
-        } catch (CliException exception) {
-            standardError.println("Error: " + exception.getMessage());
-            standardError.println();
-            standardError.print(help(recipes));
+            options = parse(arguments, recipes);
+        } catch (CliFailure failure) {
+            error.println("Error: " + failure.getMessage()); error.println();
+            error.print(help(recipes));
             return INVALID_ARGUMENTS;
         }
+        if (options.action == Action.HELP) { out.print(help(recipes)); return SUCCESS; }
+        if (options.action == Action.VERSION) { out.println(version()); return SUCCESS; }
+        return prepare(options, out, error, downloader);
+    }
 
-        if (options.action() == LocalModelArguments.Action.HELP) {
-            standardOutput.print(help(recipes));
-            return SUCCESS;
-        }
-        if (options.action() == LocalModelArguments.Action.VERSION) {
-            standardOutput.println(version());
-            return SUCCESS;
-        }
-
-        Path output = options.output().toAbsolutePath().normalize();
-        if (Files.exists(output) && options.overwrite() == false) {
-            standardError.println("Error: Output already exists; use --overwrite to replace it: " + output);
+    private static int prepare(Options options, PrintStream out, PrintStream error, HttpDownloader downloader) {
+        Path output = options.output.toAbsolutePath().normalize();
+        if (Files.exists(output) && options.overwrite == false) {
+            error.println("Error: Output already exists; use --overwrite to replace it: " + output);
             return OPERATIONAL_FAILURE;
         }
-
-        Path downloadDirectory = null;
+        Path directory = null;
         try {
             Path parent = output.getParent();
-            if (parent == null) {
-                throw new IOException("Output path has no parent directory: " + output);
-            }
+            if (parent == null) throw new IOException("Output path has no parent directory: " + output);
             Files.createDirectories(parent);
-            downloadDirectory = Files.createTempDirectory(parent, ".webjet-model-download-");
-            LocalModelRecipe recipe = options.recipe();
-            List<ModelArtifact> artifacts = recipe.artifacts(options.variant());
+            directory = Files.createTempDirectory(parent, ".webjet-model-download-");
+            List<ModelArtifact> artifacts = options.recipe.artifacts(options.variant);
             List<DownloadResult> downloads = new ArrayList<>(artifacts.size());
             for (int index = 0; index < artifacts.size(); index++) {
                 ModelArtifact artifact = artifacts.get(index);
-                standardError.println(
-                    "Downloading " + artifact.sourcePath() + " (" + (index + 1) + "/" + artifacts.size() + ")"
-                );
-                Path temporaryFile = downloadDirectory.resolve(index + "-" + artifact.bundlePath());
-                downloads.add(downloader.download(
-                    new DownloadRequest(
-                        artifact.sourceUri(),
-                        temporaryFile,
-                        artifact.expectedSize(),
-                        artifact.expectedSha256()
-                    ),
-                    standardError::println
-                ));
+                error.println("Downloading " + artifact.sourcePath() + " (" + (index + 1) + "/" + artifacts.size() + ")");
+                downloads.add(downloader.download(new DownloadRequest(artifact.sourceUri(),
+                    directory.resolve(index + "-" + artifact.bundlePath()), artifact.expectedSize(),
+                    artifact.expectedSha256()), error::println));
             }
-            standardError.println("Creating reproducible bundle");
-            Path prepared = new LocalModelBundleWriter().write(
-                output,
-                options.overwrite(),
-                recipe,
-                options.variant(),
-                artifacts,
-                downloads
-            );
-            standardOutput.println(prepared);
+            error.println("Creating reproducible bundle");
+            out.println(new LocalModelBundleWriter().write(output, options.overwrite, options.recipe,
+                options.variant, artifacts, downloads));
             return SUCCESS;
         } catch (IOException | RuntimeException exception) {
-            standardError.println("Error: " + message(exception));
+            error.println("Error: " + message(exception));
             return OPERATIONAL_FAILURE;
         } finally {
-            if (downloadDirectory != null) {
-                try {
-                    deleteTree(downloadDirectory);
-                } catch (IOException exception) {
-                    standardError.println("Warning: Unable to remove temporary files: " + message(exception));
-                }
+            if (directory != null) try { deleteTree(directory); }
+            catch (IOException exception) {
+                error.println("Warning: Unable to remove temporary files: " + message(exception));
             }
         }
     }
 
-    private static String version() {
-        String implementationVersion = LocalModelTool.class.getPackage().getImplementationVersion();
-        return implementationVersion == null || implementationVersion.isBlank()
-            ? "development"
-            : implementationVersion;
+    private static Options parse(String[] arguments, List<LocalModelRecipe> recipes) throws CliFailure {
+        if (arguments.length == 0) throw fail("Missing command; expected prepare, --help, or --version");
+        if (arguments.length == 1 && isHelp(arguments[0])) return Options.action(Action.HELP);
+        if (arguments.length == 1 && "--version".equals(arguments[0])) return Options.action(Action.VERSION);
+        if ("prepare".equals(arguments[0]) == false) throw fail("Unknown command: " + arguments[0]);
+        if (arguments.length == 2 && isHelp(arguments[1])) return Options.action(Action.HELP);
+
+        Map<String, String> values = new HashMap<>();
+        boolean overwrite = false;
+        for (int index = 1; index < arguments.length; index++) {
+            String option = arguments[index];
+            if ("--overwrite".equals(option)) {
+                if (overwrite) throw fail("Option specified more than once: " + option); overwrite = true; continue;
+            }
+            if (option.startsWith("--") == false) throw fail("Unexpected argument: " + option);
+            if (values.containsKey(option)) throw fail("Option specified more than once: " + option);
+            if (++index >= arguments.length || arguments[index].startsWith("--")) throw fail("Missing value for " + option);
+            if (VALUE_OPTIONS.contains(option) == false) throw fail("Unknown option: " + option);
+            values.put(option, arguments[index]);
+        }
+        String modelId = values.get("--model");
+        if (modelId == null) throw fail("Missing required option: --model");
+        LocalModelRecipe recipe = recipes.stream().filter(item -> item.acceptedIds().contains(modelId)).findFirst().orElse(null);
+        if (recipe == null) throw fail("Unsupported model: " + modelId + "; expected one of "
+            + recipes.stream().map(LocalModelRecipe::canonicalId).sorted().toList());
+        ModelVariant variant;
+        try {
+            variant = values.containsKey("--variant") ? ModelVariant.parse(values.get("--variant")) : recipe.defaultVariant();
+        } catch (IllegalArgumentException exception) {
+            throw fail(exception.getMessage());
+        }
+        if (recipe.supportedVariants().contains(variant) == false) throw fail("Unsupported variant for "
+            + recipe.canonicalId() + ": " + variant.cliName() + "; expected "
+            + recipe.supportedVariants().stream().map(ModelVariant::cliName).sorted().toList());
+
+        Integer requestedDimensions;
+        try { requestedDimensions = values.containsKey("--dimensions") ? Integer.valueOf(values.get("--dimensions")) : null; }
+        catch (NumberFormatException exception) { throw fail("Invalid dimensions: " + values.get("--dimensions")); }
+        Integer dimensions = recipe.dimensions();
+        if (requestedDimensions != null && dimensions == null) throw fail("--dimensions is available only for embedding models");
+        if (requestedDimensions != null && requestedDimensions.equals(dimensions) == false) throw fail("Unsupported dimensions: "
+            + requestedDimensions + "; " + recipe.canonicalId() + " produces exactly " + dimensions + " dimensions");
+        Path output;
+        try { output = Path.of(values.getOrDefault("--output", recipe.defaultOutputName(variant))); }
+        catch (InvalidPathException exception) { throw fail("Invalid output path: " + values.get("--output")); }
+        return new Options(Action.PREPARE, recipe, variant, output, overwrite);
     }
 
     private static List<LocalModelRecipe> productionRecipes() {
-        List<LocalModelRecipe> recipes = new ArrayList<>();
-        for (EmbeddingModelCatalog.Model model : EmbeddingModelCatalog.INSTANCE.models()) {
-            recipes.add(new MultilingualE5Recipe(model));
-        }
-        recipes.add(new M2m100Recipe());
+        List<LocalModelRecipe> recipes = new ArrayList<>(CatalogRecipe.embeddings());
+        recipes.add(CatalogRecipe.seq2seq("META-INF/webjet-ai/local-translation-model-catalog-v1.properties", "translation-model"));
+        recipes.add(CatalogRecipe.seq2seq("META-INF/webjet-ai/local-generation-model-catalog-v1.properties", "generation-model"));
         return List.copyOf(recipes);
     }
 
     private static String help(List<LocalModelRecipe> recipes) {
-        String models = recipes.stream()
-            .map(LocalModelRecipe::canonicalId)
-            .sorted()
-            .collect(java.util.stream.Collectors.joining(" or "));
-        return """
-            webjet-ai-local-model-tool
-
-            Prepare a verified local-model ZIP without loading or executing the model.
-
-            Usage:
-              java -jar webjet-ai-VERSION.jar prepare --model MODEL [options]
-              java -jar webjet-ai-VERSION.jar --help
-              java -jar webjet-ai-VERSION.jar --version
-
-            Required:
-              --model MODEL       %s
-
-            Options:
-              --variant VARIANT   Model-specific fp32, int8, or int8-avx512-vnni variant
-              --dimensions SIZE   Validate an embedding model's fixed dimensions
-              --output PATH       Destination ZIP (uses a model-specific default)
-              --overwrite         Replace an existing destination after preparation succeeds
-              -h, --help          Show this help
-              --version           Show the JAR implementation version
-            """.formatted(models);
+        String models = String.join(" or ", recipes.stream().map(LocalModelRecipe::canonicalId).sorted().toList());
+        return ("webjet-ai-local-model-tool\n\nPrepare a verified local-model ZIP without loading or executing the model.\n\n"
+            + "Usage:\n  java -jar webjet-ai-VERSION.jar prepare --model MODEL [options]\n"
+            + "  java -jar webjet-ai-VERSION.jar --help\n  java -jar webjet-ai-VERSION.jar --version\n\n"
+            + "Required:\n  --model MODEL       %s\n\nOptions:\n"
+            + "  --variant VARIANT   Model-specific fp32, int8, or int8-avx512-vnni variant\n"
+            + "  --dimensions SIZE   Validate an embedding model's fixed dimensions\n"
+            + "  --output PATH       Destination ZIP (uses a model-specific default)\n"
+            + "  --overwrite         Replace an existing destination after preparation succeeds\n"
+            + "  -h, --help          Show this help\n  --version           Show the JAR implementation version\n").formatted(models);
     }
 
+    private static String version() {
+        String version = LocalModelTool.class.getPackage().getImplementationVersion();
+        return version == null || version.isBlank() ? "development" : version;
+    }
+    private static boolean isHelp(String value) { return "--help".equals(value) || "-h".equals(value); }
+    private static CliFailure fail(String message) { return new CliFailure(message); }
+    private static String message(Throwable exception) {
+        return exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage();
+    }
     private static void deleteTree(Path root) throws IOException {
         try (var paths = Files.walk(root)) {
-            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
-                Files.deleteIfExists(path);
-            }
+            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
         }
     }
 
-    private static String message(Throwable exception) {
-        return exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage();
+    private enum Action { PREPARE, HELP, VERSION }
+    private record Options(Action action, LocalModelRecipe recipe, ModelVariant variant, Path output, boolean overwrite) {
+        private static Options action(Action action) { return new Options(action, null, null, null, false); }
+    }
+    private static final class CliFailure extends Exception {
+        private CliFailure(String message) { super(message); }
     }
 }

@@ -4,9 +4,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Objects;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
@@ -14,6 +11,7 @@ import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiStreamListener;
+import com.webjetcms.ai.EmbeddingInputType;
 import com.webjetcms.ai.EmbeddingOptions;
 import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
@@ -21,8 +19,9 @@ import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
 import com.webjetcms.ai.provider.local.ApprovedEmbeddingModelCatalog.EmbeddingModelDefinition;
-import com.webjetcms.ai.provider.local.EmbeddingBundleValidator.PreparedBundle;
+import com.webjetcms.ai.provider.local.NativeEmbeddingInferenceSession.PoolingResult;
 import com.webjetcms.ai.provider.local.NativeEmbeddingRuntimeFactory.Resources;
+import com.webjetcms.ai.provider.local.VerifiedBundleExtractor.Result;
 
 /**
  * Generates embeddings locally from an approved WebJET AI schema-v1 model bundle.
@@ -37,24 +36,24 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
 
     private static final int DEFAULT_MAXIMUM_BATCH_SIZE = 8;
 
-    private final PreparedBundle bundle;
     private final EmbeddingModelDefinition model;
+    private final ModelInfo modelInfo;
     private final NativeEmbeddingTokenizer tokenizer;
     private final NativeEmbeddingInferenceSession inference;
     private final int maximumBatchSize;
-    private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock(true);
-    private final AtomicReference<State> state = new AtomicReference<>(State.OPEN);
+    private final LocalProviderLifecycle lifecycle;
 
-    private LocalEmbeddingModelProvider(
-        PreparedBundle bundle,
-        Resources runtime,
-        int maximumBatchSize
-    ) {
-        this.bundle = bundle;
+    private LocalEmbeddingModelProvider(Result<EmbeddingBundleManifest> bundle,
+        Resources runtime, int maximumBatchSize) {
         this.model = bundle.manifest().model();
+        String variant = bundle.manifest().variant().name().replace('-', ' ').toUpperCase(Locale.ROOT);
+        this.modelInfo = new ModelInfo(model.canonicalId(), model.displayName() + " (" + variant + ")");
         this.tokenizer = runtime.tokenizer();
         this.inference = runtime.inference();
         this.maximumBatchSize = maximumBatchSize;
+        this.lifecycle = new LocalProviderLifecycle(
+            PROVIDER_ID, "Local embedding model provider is closing or closed",
+            bundle.directory(), inference, tokenizer);
     }
 
     /**
@@ -90,16 +89,7 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
      */
     @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
-        lifecycleLock.readLock().lock();
-        try {
-            requireOpen();
-            String variant = bundle.manifest().variant().name()
-                .replace('-', ' ')
-                .toUpperCase(Locale.ROOT);
-            return List.of(new ModelInfo(model.canonicalId(), model.displayName() + " (" + variant + ")"));
-        } finally {
-            lifecycleLock.readLock().unlock();
-        }
+        return lifecycle.read(() -> List.of(modelInfo));
     }
 
     /**
@@ -124,14 +114,8 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
     @Override
     public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
         throws AiProviderException {
-        if (state.get() != State.OPEN) throw closedFailure();
-        lifecycleLock.readLock().lock();
-        try {
-            requireOpen();
-            return embedOpen(request);
-        } finally {
-            lifecycleLock.readLock().unlock();
-        }
+        lifecycle.requireOpen();
+        return lifecycle.read(() -> embedOpen(request));
     }
 
     @Override
@@ -157,54 +141,22 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
      * @throws Exception when a provider-owned resource or extracted file cannot be released
      */
     @Override
-    public void close() throws Exception {
-        if (state.compareAndSet(State.OPEN, State.CLOSING) == false) {
-            if (state.get() == State.CLOSED) return;
-            lifecycleLock.writeLock().lock();
-            lifecycleLock.writeLock().unlock();
-            return;
-        }
-
-        lifecycleLock.writeLock().lock();
-        Throwable failure = null;
-        try {
-            failure = closeResource(inference, failure);
-            failure = closeResource(tokenizer, failure);
-            try {
-                DirectoryCleaner.delete(bundle.directory());
-            } catch (Throwable exception) {
-                failure = appendFailure(failure, exception);
-            }
-        } finally {
-            state.set(State.CLOSED);
-            lifecycleLock.writeLock().unlock();
-        }
-        if (failure instanceof Exception exception) throw exception;
-        if (failure instanceof Error error) throw error;
-    }
+    public void close() throws Exception { lifecycle.close(); }
 
     private EmbeddingResponse embedOpen(EmbeddingRequest request) throws AiProviderException {
         validateRequest(request);
         List<EmbeddingVector> embeddings = new ArrayList<>(request.inputs().size());
         long inputTokens = 0;
+        String prefix = request.options().inputType() == EmbeddingInputType.QUERY
+            ? model.queryPrefix() : model.documentPrefix();
 
         try {
             for (int start = 0; start < request.inputs().size(); start += maximumBatchSize) {
                 int end = Math.min(start + maximumBatchSize, request.inputs().size());
                 List<String> preparedInputs = request.inputs().subList(start, end).stream()
-                    .map(input -> model.inputPreparation().prepare(
-                        bundle.manifest(),
-                        input,
-                        request.options().inputType()
-                    ))
-                    .toList();
+                    .map(prefix::concat).toList();
                 NativeEmbeddingTokenizer.Batch tokens = tokenizer.encode(preparedInputs);
-                float[][][] hiddenState = inference.run(tokens);
-                if (hiddenState.length != tokens.batchSize()) {
-                    throw new IllegalStateException("ONNX output batch size does not match tokenizer output");
-                }
-                for (int row = 0; row < tokens.batchSize(); row++) {
-                    PoolingResult pooled = poolAndNormalize(hiddenState[row], tokens.attentionMask()[row]);
+                for (PoolingResult pooled : inference.run(tokens)) {
                     embeddings.add(new EmbeddingVector(pooled.vector()));
                     inputTokens = Math.addExact(inputTokens, pooled.processedTokens());
                 }
@@ -215,18 +167,14 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
             throw new AiProviderException(PROVIDER_ID, "Local embedding inference failed", exception);
         }
 
-        return new EmbeddingResponse(
-            embeddings,
-            new TokenUsage(inputTokens, 0, inputTokens, java.util.Map.of())
-        );
+        return new EmbeddingResponse(embeddings, new TokenUsage(inputTokens, 0, inputTokens, java.util.Map.of()));
     }
 
     private void validateRequest(EmbeddingRequest request) throws AiProviderException {
         if (request == null) throw invalid("Embedding request must not be null");
         if (request.inputs().isEmpty()) throw invalid("Embedding inputs must not be empty");
-        for (String input : request.inputs()) {
-            if (input == null || input.isBlank()) throw invalid("Embedding inputs must not be blank");
-        }
+        if (request.inputs().stream().anyMatch(String::isBlank))
+            throw invalid("Embedding inputs must not be blank");
         if (request.model() != null && request.model().isBlank() == false
             && model.aliases().contains(request.model()) == false) {
             throw invalid("Unsupported local embedding model: " + request.model());
@@ -237,106 +185,26 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
         }
     }
 
-    private PoolingResult poolAndNormalize(float[][] hiddenState, long[] attentionMask)
-        throws AiProviderException {
-        if (hiddenState.length != attentionMask.length || hiddenState.length == 0) {
-            throw invalid("ONNX output sequence does not match the attention mask");
-        }
-        double[] pooled = new double[model.dimensions()];
-        long processedTokens = 0;
-        for (int token = 0; token < hiddenState.length; token++) {
-            float[] tokenVector = hiddenState[token];
-            if (tokenVector.length != model.dimensions()) {
-                throw invalid("ONNX output embedding dimension is invalid");
-            }
-            for (float value : tokenVector) {
-                if (Float.isFinite(value) == false) throw invalid("ONNX output contains a non-finite value");
-            }
-            long mask = attentionMask[token];
-            if (mask != 0 && mask != 1) throw invalid("Attention mask must contain only zero or one");
-            if (mask == 0) continue;
-            processedTokens++;
-            for (int dimension = 0; dimension < pooled.length; dimension++) {
-                pooled[dimension] += tokenVector[dimension];
-            }
-        }
-        if (processedTokens == 0) throw invalid("Attention mask does not contain a processed token");
-
-        double squaredNorm = 0;
-        for (int dimension = 0; dimension < pooled.length; dimension++) {
-            pooled[dimension] /= processedTokens;
-            squaredNorm += pooled[dimension] * pooled[dimension];
-        }
-        double norm = Math.sqrt(squaredNorm);
-        if (Double.isFinite(norm) == false || norm <= 0) {
-            throw invalid("Local embedding has an invalid L2 norm");
-        }
-
-        float[] normalized = new float[pooled.length];
-        for (int dimension = 0; dimension < pooled.length; dimension++) {
-            normalized[dimension] = (float) (pooled[dimension] / norm);
-            if (Float.isFinite(normalized[dimension]) == false) {
-                throw invalid("Local embedding contains a non-finite normalized value");
-            }
-        }
-        return new PoolingResult(normalized, processedTokens);
-    }
-
-    private void requireOpen() throws AiProviderException {
-        if (state.get() != State.OPEN) throw closedFailure();
-    }
-
-    boolean isOpen() { return state.get() == State.OPEN; }
-
-    private static AiProviderException closedFailure() {
-        return new AiProviderException(PROVIDER_ID, "Local embedding model provider is closing or closed");
-    }
+    boolean isOpen() { return lifecycle.isOpen(); }
 
     private static AiProviderException invalid(String message) {
         return new AiProviderException(PROVIDER_ID, message);
     }
 
-    private static Throwable closeResource(AutoCloseable resource, Throwable failure) {
-        try {
-            resource.close();
-            return failure;
-        } catch (Throwable exception) {
-            return appendFailure(failure, exception);
-        }
-    }
-
-    private static Throwable appendFailure(Throwable failure, Throwable addition) {
-        if (failure == null) return addition;
-        if (failure != addition) failure.addSuppressed(addition);
-        return failure;
-    }
-
-    private enum State { OPEN, CLOSING, CLOSED }
-
-    private record PoolingResult(float[] vector, long processedTokens) { }
-
     /** Builds an eagerly initialized {@link LocalEmbeddingModelProvider}. */
-    public static final class Builder {
-        private final Path bundle;
-        private Integer intraOpThreads;
+    public static final class Builder extends LocalProviderBuilder<Builder> {
         private int maximumBatchSize = DEFAULT_MAXIMUM_BATCH_SIZE;
-        private Path temporaryDirectory;
 
-        private Builder(Path bundle) {
-            this.bundle = Objects.requireNonNull(bundle, "bundle");
-        }
+        private Builder(Path bundle) { super(bundle); }
 
-        /**
-         * Sets the ONNX Runtime intra-operation worker count.
-         *
-         * @param threads positive worker count
-         * @return this builder
-         */
-        public Builder intraOpThreads(int threads) {
-            if (threads <= 0) throw new IllegalArgumentException("intraOpThreads must be positive");
-            this.intraOpThreads = threads;
-            return this;
-        }
+        @Override
+        Builder self() { return this; }
+
+        @Override
+        public Builder intraOpThreads(int threads) { return super.intraOpThreads(threads); }
+
+        @Override
+        public Builder temporaryDirectory(Path parent) { return super.temporaryDirectory(parent); }
 
         /**
          * Sets the maximum number of inputs tokenized and inferred together.
@@ -346,21 +214,9 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
          */
         public Builder maximumBatchSize(int size) {
             if (size <= 0) throw new IllegalArgumentException("maximumBatchSize must be positive");
-            this.maximumBatchSize = size;
+            maximumBatchSize = size;
             return this;
         }
-
-        /**
-         * Selects an existing writable parent for provider-owned extracted files.
-         *
-         * @param parent existing temporary directory parent
-         * @return this builder
-         */
-        public Builder temporaryDirectory(Path parent) {
-            this.temporaryDirectory = Objects.requireNonNull(parent, "parent");
-            return this;
-        }
-
         /**
          * Validates, extracts, and initializes the local embedding model provider.
          *
@@ -369,56 +225,25 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
          */
         public LocalEmbeddingModelProvider build() throws AiProviderException {
             ApprovedEmbeddingModelCatalog catalog = ApprovedEmbeddingModelCatalog.load();
-            Path parent = temporaryDirectory == null ? defaultTemporaryDirectory() : temporaryDirectory;
-            PreparedBundle prepared = null;
+            Path temporaryParent = temporaryDirectory();
+            Result<EmbeddingBundleManifest> prepared = null;
             Resources runtime = null;
             try {
                 prepared = new EmbeddingBundleValidator(catalog)
-                    .validateAndExtract(bundle, parent);
-                runtime = NativeEmbeddingRuntimeFactory.create(prepared, intraOpThreads);
+                    .validateAndExtract(bundle(), temporaryParent);
+                runtime = NativeEmbeddingRuntimeFactory.create(prepared, intraOpThreads());
                 return new LocalEmbeddingModelProvider(prepared, runtime, maximumBatchSize);
             } catch (Throwable failure) {
-                cleanupFailedInitialization(prepared, runtime, failure);
-                if (failure instanceof Error error) throw error;
+                LocalProviderLifecycle.cleanupAfterFailure(
+                    prepared == null ? null : prepared.directory(), failure,
+                    runtime == null ? null : runtime.inference(),
+                    runtime == null ? null : runtime.tokenizer());
+                if (failure instanceof Error) throw (Error) failure;
                 throw new AiProviderException(
                     PROVIDER_ID,
                     "Could not initialize the local embedding model provider: " + failure.getMessage(),
                     failure
                 );
-            }
-        }
-
-        private static Path defaultTemporaryDirectory() {
-            String value = System.getProperty("java.io.tmpdir");
-            if (value == null || value.isBlank()) {
-                throw new IllegalStateException("java.io.tmpdir is not configured");
-            }
-            return Path.of(value);
-        }
-
-        private static void cleanupFailedInitialization(
-            PreparedBundle prepared,
-            Resources runtime,
-            Throwable failure
-        ) {
-            if (runtime != null) {
-                closeAfterFailure(runtime.inference(), failure);
-                closeAfterFailure(runtime.tokenizer(), failure);
-            }
-            if (prepared != null) {
-                try {
-                    DirectoryCleaner.delete(prepared.directory());
-                } catch (Throwable cleanupFailure) {
-                    if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
-                }
-            }
-        }
-
-        private static void closeAfterFailure(AutoCloseable resource, Throwable failure) {
-            try {
-                resource.close();
-            } catch (Throwable cleanupFailure) {
-                if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
             }
         }
     }

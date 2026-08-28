@@ -235,10 +235,10 @@ options, never the input text.
 ## Preparing local models
 
 The published `webjet-ai` JAR also contains a JDK-only preparation tool for the
-approved `intfloat/multilingual-e5-base` and `intfloat/multilingual-e5-small`
-models. The tool downloads a pinned, verified set of ONNX and tokenizer files and
-writes one reproducible ZIP for later use. It does not load the model or generate
-embeddings; runtime ZIP consumption is a separate integration concern.
+approved E5 embedding, M2M100 translation, and FLAN-T5 generation models. The tool
+downloads a pinned, verified set of ONNX and tokenizer files and writes one
+reproducible ZIP for later use. It does not load or execute the model; runtime ZIP
+consumption is a separate integration concern.
 
 Prepare the portable FP32 bundle:
 
@@ -314,6 +314,18 @@ more memory and disk space. Both variants are pinned to one approved
 `Xenova/m2m100_418M` ONNX conversion revision. The text bundle includes separate
 encoder and merged-decoder graphs plus all tokenizer assets; language tokens are
 read from that tokenizer rather than hardcoded by the library.
+
+Prepare FLAN-T5 Small for local instruction-driven text generation:
+
+```shell
+java -jar webjet-ai-VERSION.jar prepare \
+  --model google/flan-t5-small
+```
+
+The alias `flan-t5-small` is also accepted. Its only approved variant is portable
+INT8 and its default output is `flan-t5-small-int8.zip`. The bundle contains about
+98 MB of model and tokenizer data from the pinned `Xenova/flan-t5-small` ONNX
+conversion.
 
 `webjet-ai-local-model-tool` only prepares local model bundles. Model execution is
 provided by the separate `webjet-ai-local` artifact, so ordinary cloud-provider
@@ -447,6 +459,56 @@ deterministic greedy decoding, is capped at 200 output tokens by the approved M2
 bundle, and does not support streaming. The provider and its ONNX sessions are reusable;
 open them once and close them during application shutdown.
 
+## Running local text generation
+
+FLAN-T5 Small uses the normal `TEXT` request. Trusted instructions describe the
+task, `inputText` supplies the CMS content, and the result is returned through
+`AiResponse.text()`:
+
+```java
+import java.nio.file.Path;
+
+import com.webjetcms.ai.AiClient;
+import com.webjetcms.ai.AiProviderConfig;
+import com.webjetcms.ai.AiRequest;
+import com.webjetcms.ai.AiResponse;
+import com.webjetcms.ai.provider.local.LocalGenerationModelProvider;
+
+try (AiClient client = AiClient.of(LocalGenerationModelProvider.builder(
+    Path.of("/models/flan-t5-small-int8.zip")
+).maximumOutputTokens(80).build())) {
+    AiRequest request = AiRequest.builder()
+        .model("google/flan-t5-small")
+        .instructions("Summarize the input in one sentence.")
+        .inputText(articleText)
+        .build();
+
+    AiResponse response = client.execute(request, AiProviderConfig.empty());
+    String summary = response.text();
+}
+```
+
+For a preformatted FLAN prompt, the direct convenience method returns only a string:
+
+```java
+try (LocalGenerationModelProvider provider = LocalGenerationModelProvider.open(modelZip)) {
+    String result = provider.generate("translate English to German: The house is wonderful.");
+}
+```
+
+The same provider can perform short CMS tasks such as summarization, rewriting,
+classification, and simple extraction; behavior is selected by the request text,
+not by a separate operation enum. FLAN-T5 Small is a 77-million-parameter model,
+so output quality and factual reliability are substantially below current hosted
+language models. Review generated content before publishing it.
+
+Input is truncated to 512 tokens. Generation uses deterministic greedy decoding,
+defaults to at most 200 output tokens, and does not support streaming. To keep the
+prompt useful within this small model's context, the provider uses compact literal
+`TEXT` handling and rejects requests whose immutable `suspiciousSources()` metadata
+indicates prompt-injection content. Apply any additional host content policy before
+inference.
+
 ## Provider guides
 
 Each provider guide shows how to build requests for text, streaming, multimodal
@@ -465,10 +527,11 @@ Pass the immutable `AiRequest` directly to `AiClient.execute(...)` or
 delegating to the provider: it hardens trusted instructions and protects untrusted
 input text and user prompts. The original request keeps its readable input values.
 
-An `AiProvider` may explicitly select literal handling for a deterministic text
-transformation where boundary markers would change the result. The local M2M100
-provider uses that narrowly scoped mode for `TEXT`; the protected mode remains the
-default for existing and custom providers.
+An `AiProvider` may explicitly select literal handling when boundary markers would
+change the result. The local M2M100 provider uses it for deterministic translation.
+The much smaller FLAN-T5 model also uses compact literal input, but rejects requests
+already detected as prompt injection. Protected prompt preparation remains the
+default for existing and custom generative providers.
 
 Hosts with an audit trail can inspect the immutable `request.suspiciousSources()`
 metadata. Ordinary callers do not need to handle request preparation or detection

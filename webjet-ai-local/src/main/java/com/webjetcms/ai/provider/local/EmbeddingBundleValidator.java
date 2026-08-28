@@ -2,62 +2,38 @@ package com.webjetcms.ai.provider.local;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.List;
 
 import com.webjetcms.ai.provider.local.ApprovedEmbeddingModelCatalog.EmbeddingArtifactDefinition;
-import com.webjetcms.ai.provider.local.ApprovedEmbeddingModelCatalog.EmbeddingModelDefinition;
+import com.webjetcms.ai.provider.local.VerifiedBundleExtractor.Result;
 import com.webjetcms.ai.provider.local.VerifiedBundleExtractor.Specification;
 
 /** Validates an approved embedding bundle through the shared secure extractor. */
 final class EmbeddingBundleValidator {
     private final ApprovedEmbeddingModelCatalog catalog;
-    EmbeddingBundleValidator(ApprovedEmbeddingModelCatalog catalog) {
-        this.catalog = catalog;
+    EmbeddingBundleValidator(ApprovedEmbeddingModelCatalog catalog) { this.catalog = catalog; }
+
+    Result<EmbeddingBundleManifest> validateAndExtract(Path bundle, Path temporaryParent) throws IOException {
+        return VerifiedBundleExtractor.validateAndExtract(bundle, temporaryParent, "webjet-ai-local-", new Specification<>(
+                manifest -> manifest.model().entryOrder(), this::parseManifest, this::artifact,
+                manifest -> manifest.model().maximumExtractedBytes(manifest.variant())));
     }
 
-    PreparedBundle validateAndExtract(Path bundle, Path temporaryParent) throws IOException {
-        VerifiedBundleExtractor.Result<EmbeddingBundleManifest> result =
-            VerifiedBundleExtractor.validateAndExtract(
-                bundle,
-                temporaryParent,
-                "webjet-ai-local-",
-                new Specification<>() {
-                    @Override
-                    public List<String> entryOrder(EmbeddingBundleManifest manifest) {
-                        return manifest.model().entryOrder();
-                    }
-
-                    @Override
-                    public EmbeddingBundleManifest parseManifest(byte[] content) throws IOException {
-                        try {
-                            EmbeddingModelDefinition model = catalog.model(EmbeddingBundleManifest.modelId(content));
-                            EmbeddingBundleManifest manifest = EmbeddingBundleManifest.parse(content, model);
-                            PlatformSupport.requireSupported(manifest.variant());
-                            return manifest;
-                        } catch (IllegalArgumentException exception) {
-                            throw new IOException(exception.getMessage(), exception);
-                        }
-                    }
-
-                    @Override
-                    public Artifact artifact(EmbeddingBundleManifest manifest, String name)
-                        throws IOException {
-                        try {
-                            EmbeddingArtifactDefinition approved = manifest.model().artifact(name, manifest.variant());
-                            return new Artifact(approved.size(), approved.sha256());
-                        } catch (IllegalArgumentException exception) {
-                            throw new IOException(exception.getMessage(), exception);
-                        }
-                    }
-
-                    @Override
-                    public long maximumExtractedBytes(EmbeddingBundleManifest manifest) {
-                        return manifest.model().maximumExtractedBytes(manifest.variant());
-                    }
-                }
-            );
-        return new PreparedBundle(result.directory(), result.manifest());
+    private EmbeddingBundleManifest parseManifest(byte[] content) throws IOException {
+        try {
+            EmbeddingBundleManifest manifest = EmbeddingBundleManifest.parse(content, catalog);
+            PlatformSupport.requireSupported(manifest.variant());
+            return manifest;
+        } catch (IllegalArgumentException exception) {
+            throw new IOException(exception.getMessage(), exception);
+        }
     }
 
-    record PreparedBundle(Path directory, EmbeddingBundleManifest manifest) { }
+    private Specification.Artifact artifact(EmbeddingBundleManifest manifest, String name) throws IOException {
+        try {
+            EmbeddingArtifactDefinition artifact = manifest.model().artifact(name, manifest.variant());
+            return new Specification.Artifact(artifact.size(), artifact.sha256());
+        } catch (IllegalArgumentException exception) {
+            throw new IOException(exception.getMessage(), exception);
+        }
+    }
 }

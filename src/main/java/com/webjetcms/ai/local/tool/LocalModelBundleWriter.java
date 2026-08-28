@@ -10,10 +10,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Map;
+import java.util.zip.CRC32;
 import java.util.zip.Deflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -21,138 +20,83 @@ import java.util.zip.ZipOutputStream;
 final class LocalModelBundleWriter {
     private static final LocalDateTime ZIP_TIMESTAMP = LocalDateTime.of(1980, 1, 1, 0, 0);
 
-    Path write(
-        Path destination,
-        boolean overwrite,
-        LocalModelRecipe recipe,
-        ModelVariant variant,
-        List<ModelArtifact> artifacts,
-        List<DownloadResult> downloads
-    ) throws IOException {
-        Path absoluteDestination = destination.toAbsolutePath().normalize();
-        Path parent = absoluteDestination.getParent();
-        if (parent == null) {
-            throw new IOException("Output path has no parent directory: " + destination);
-        }
+    Path write(Path destination, boolean overwrite, LocalModelRecipe recipe, ModelVariant variant,
+        List<ModelArtifact> artifacts, List<DownloadResult> downloads) throws IOException {
+        Path target = destination.toAbsolutePath().normalize();
+        Path parent = target.getParent();
+        if (parent == null) throw new IOException("Output path has no parent directory: " + destination);
         Files.createDirectories(parent);
-        if (Files.exists(absoluteDestination) && overwrite == false) {
-            throw new IOException("Output already exists; use --overwrite to replace it: " + absoluteDestination);
+        if (Files.exists(target) && overwrite == false) {
+            throw new IOException("Output already exists; use --overwrite to replace it: " + target);
         }
-        if (artifacts.size() != downloads.size()) {
-            throw new IllegalArgumentException("Artifact and download counts do not match");
-        }
+        if (artifacts.size() != downloads.size()) throw new IllegalArgumentException("Artifact and download counts do not match");
 
-        Map<String, DownloadResult> downloadsByBundlePath = new HashMap<>();
+        List<Entry> entries = new ArrayList<>(artifacts.size() + 2);
+        entries.add(Entry.generated("webjet-model.json", recipe.manifest(variant).getBytes(StandardCharsets.UTF_8)));
         for (int index = 0; index < artifacts.size(); index++) {
-            downloadsByBundlePath.put(artifacts.get(index).bundlePath(), downloads.get(index));
+            DownloadResult result = downloads.get(index);
+            entries.add(new Entry(artifacts.get(index).bundlePath(), result.path(), null,
+                result.size(), result.sha256(), result.crc32()));
         }
+        StringBuilder sums = new StringBuilder();
+        entries.forEach(entry -> sums.append(entry.sha256).append("  ").append(entry.name).append('\n'));
+        entries.add(Entry.generated("SHA256SUMS", sums.toString().getBytes(StandardCharsets.UTF_8)));
 
-        byte[] manifest = recipe.manifest(variant).getBytes(StandardCharsets.UTF_8);
-        List<EntrySource> entries = new ArrayList<>();
-        entries.add(EntrySource.generated("webjet-model.json", manifest));
-        for (ModelArtifact artifact : artifacts) {
-            DownloadResult result = downloadsByBundlePath.get(artifact.bundlePath());
-            entries.add(EntrySource.downloaded(artifact.bundlePath(), result));
-        }
-        byte[] checksums = checksums(entries).getBytes(StandardCharsets.UTF_8);
-        entries.add(EntrySource.generated("SHA256SUMS", checksums));
-
-        Path temporaryZip = Files.createTempFile(parent, "." + absoluteDestination.getFileName() + ".", ".tmp");
-        boolean moved = false;
+        Path temporary = Files.createTempFile(parent, "." + target.getFileName() + ".", ".tmp");
         try {
-            writeZip(temporaryZip, entries);
-            moveIntoPlace(temporaryZip, absoluteDestination, overwrite);
-            moved = true;
-            return absoluteDestination;
+            writeZip(temporary, entries);
+            move(temporary, target, overwrite);
+            return target;
         } finally {
-            if (moved == false) {
-                Files.deleteIfExists(temporaryZip);
-            }
+            Files.deleteIfExists(temporary);
         }
     }
 
-    private static String checksums(List<EntrySource> entries) {
-        StringBuilder checksums = new StringBuilder();
-        for (EntrySource entry : entries) {
-            checksums.append(entry.sha256()).append("  ").append(entry.name()).append('\n');
-        }
-        return checksums.toString();
-    }
-
-    private static void writeZip(Path target, List<EntrySource> entries) throws IOException {
+    private static void writeZip(Path target, List<Entry> entries) throws IOException {
         try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(target), StandardCharsets.UTF_8)) {
             zip.setLevel(Deflater.DEFAULT_COMPRESSION);
-            for (EntrySource source : entries) {
-                ZipEntry entry = new ZipEntry(source.name());
+            for (Entry source : entries) {
+                ZipEntry entry = new ZipEntry(source.name);
                 entry.setTimeLocal(ZIP_TIMESTAMP);
-                if (source.name().endsWith(".onnx")) {
+                if (source.name.endsWith(".onnx")) {
                     entry.setMethod(ZipEntry.STORED);
-                    entry.setSize(source.size());
-                    entry.setCompressedSize(source.size());
-                    entry.setCrc(source.crc32());
-                } else {
-                    entry.setMethod(ZipEntry.DEFLATED);
+                    entry.setSize(source.size);
+                    entry.setCompressedSize(source.size);
+                    entry.setCrc(source.crc32);
                 }
                 zip.putNextEntry(entry);
-                source.writeTo(zip);
+                if (source.content == null) Files.copy(source.path, zip); else zip.write(source.content);
                 zip.closeEntry();
             }
         }
     }
 
-    private static void moveIntoPlace(Path source, Path destination, boolean overwrite) throws IOException {
-        StandardCopyOption[] atomicOptions = overwrite
-            ? new StandardCopyOption[] {StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING}
-            : new StandardCopyOption[] {StandardCopyOption.ATOMIC_MOVE};
-        StandardCopyOption[] fallbackOptions = overwrite
-            ? new StandardCopyOption[] {StandardCopyOption.REPLACE_EXISTING}
-            : new StandardCopyOption[0];
+    private static void move(Path source, Path target, boolean overwrite) throws IOException {
         try {
-            Files.move(source, destination, atomicOptions);
+            if (overwrite) Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            else Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException exception) {
-            Files.move(source, destination, fallbackOptions);
+            if (overwrite) Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+            else Files.move(source, target);
         }
     }
 
-    private static String sha256(byte[] content) {
+    private record Entry(String name, Path path, byte[] content, long size, String sha256, long crc32) {
+        private static Entry generated(String name, byte[] content) {
+            CRC32 crc = new CRC32();
+            crc.update(content);
+            return new Entry(name, null, content, content.length, Hashes.sha256(content), crc.getValue());
+        }
+    }
+}
+
+final class Hashes {
+    static MessageDigest sha256() {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+            return MessageDigest.getInstance("SHA-256");
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 is not available", exception);
         }
     }
-
-    private record EntrySource(
-        String name,
-        Path path,
-        byte[] content,
-        long size,
-        String sha256,
-        long crc32
-    ) {
-        static EntrySource generated(String name, byte[] content) {
-            java.util.zip.CRC32 crc = new java.util.zip.CRC32();
-            crc.update(content);
-            return new EntrySource(
-                name,
-                null,
-                content,
-                content.length,
-                LocalModelBundleWriter.sha256(content),
-                crc.getValue()
-            );
-        }
-
-        static EntrySource downloaded(String name, DownloadResult result) {
-            return new EntrySource(name, result.path(), null, result.size(), result.sha256(), result.crc32());
-        }
-
-        void writeTo(ZipOutputStream zip) throws IOException {
-            if (content != null) {
-                zip.write(content);
-            } else {
-                Files.copy(path, zip);
-            }
-        }
-    }
+    static String sha256(byte[] content) { return HexFormat.of().formatHex(sha256().digest(content)); }
 }

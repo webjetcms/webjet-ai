@@ -2,82 +2,64 @@ package com.webjetcms.ai.local.tool;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.util.HexFormat;
+import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.zip.CRC32;
 
 final class HttpDownloader {
-    private static final int BUFFER_SIZE = 64 * 1024;
-    private static final long MAX_RETRY_DELAY_MILLIS = 60_000;
-
+    private static final long MAX_DELAY = 60_000;
     private final HttpClient client;
-    private final int maximumAttempts;
+    private final int attempts;
     private final Sleeper sleeper;
 
     HttpDownloader(HttpClient client, int maximumAttempts, Sleeper sleeper) {
+        if (maximumAttempts < 1) throw new IllegalArgumentException("Maximum attempts must be greater than zero");
         this.client = client;
-        if (maximumAttempts < 1) {
-            throw new IllegalArgumentException("Maximum attempts must be greater than zero");
-        }
-        this.maximumAttempts = maximumAttempts;
+        attempts = maximumAttempts;
         this.sleeper = sleeper;
     }
 
     static HttpDownloader production() {
-        HttpClient client = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(30))
-            .followRedirects(HttpClient.Redirect.NORMAL)
-            .build();
-        return new HttpDownloader(client, 3, Thread::sleep);
+        return new HttpDownloader(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(30))
+            .followRedirects(HttpClient.Redirect.NORMAL).build(), 3, Thread::sleep);
     }
 
     DownloadResult download(DownloadRequest request, Consumer<String> progress) throws IOException {
-        IOException finalFailure = null;
-        for (int attempt = 1; attempt <= maximumAttempts; attempt++) {
+        for (int attempt = 1; ; attempt++) {
             try {
                 return downloadOnce(request);
-            } catch (RetryableDownloadException exception) {
-                finalFailure = exception;
-                deletePartial(request.destination(), exception);
-                if (attempt == maximumAttempts) {
-                    break;
-                }
-                long delay = exception.retryDelayMillis() >= 0
-                    ? exception.retryDelayMillis()
-                    : Math.min(1_000L << (attempt - 1), MAX_RETRY_DELAY_MILLIS);
-                progress.accept(
-                    "Retrying " + request.uri() + " after " + exception.getMessage()
-                        + " (attempt " + (attempt + 1) + "/" + maximumAttempts + ")"
-                );
-                sleep(delay);
             } catch (IOException exception) {
-                deletePartial(request.destination(), exception);
-                throw exception;
+                try {
+                    if (Files.isDirectory(request.destination(), LinkOption.NOFOLLOW_LINKS) == false)
+                        Files.deleteIfExists(request.destination());
+                } catch (IOException cleanup) { exception.addSuppressed(cleanup); }
+                if (!(exception instanceof Retryable retryable) || attempt == attempts) throw exception;
+                long delay = retryable.delay >= 0 ? retryable.delay : Math.min(1_000L << attempt - 1, MAX_DELAY);
+                progress.accept("Retrying " + request.uri() + " after " + retryable.getMessage()
+                    + " (attempt " + (attempt + 1) + "/" + attempts + ")");
+                try { sleeper.sleep(delay); }
+                catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting to retry a download", interrupted);
+                }
             }
         }
-        throw finalFailure;
     }
 
     private DownloadResult downloadOnce(DownloadRequest request) throws IOException {
-        HttpRequest httpRequest = HttpRequest.newBuilder(request.uri())
-            .timeout(Duration.ofHours(2))
-            .header("User-Agent", "webjet-ai-local-model-tool")
-            .header("Accept-Encoding", "identity")
-            .GET()
-            .build();
+        HttpRequest httpRequest = HttpRequest.newBuilder(request.uri()).timeout(Duration.ofHours(2))
+            .header("User-Agent", "webjet-ai-local-model-tool").header("Accept-Encoding", "identity").GET().build();
         HttpResponse<InputStream> response;
         try {
             response = client.send(httpRequest, HttpResponse.BodyHandlers.ofInputStream());
@@ -85,170 +67,86 @@ final class HttpDownloader {
             Thread.currentThread().interrupt();
             throw new IOException("Download interrupted: " + request.uri(), exception);
         } catch (IOException exception) {
-            throw new RetryableDownloadException("I/O failure: " + message(exception), -1, exception);
+            throw retry("I/O failure: " + message(exception), -1, exception);
         }
-
         try (InputStream input = response.body()) {
             int status = response.statusCode();
-            if (status != 200) {
-                if (status == 429 || status >= 500 && status <= 599) {
-                    throw new RetryableDownloadException(
-                        "HTTP " + status,
-                        retryDelayMillis(response.headers().firstValue("Retry-After").orElse(null)),
-                        null
-                    );
-                }
-                throw new DownloadValidationException(
-                    "Download failed with HTTP " + status + ": " + request.uri()
-                );
-            }
-
-            long contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1);
-            if (contentLength > request.expectedSize()) {
-                throw new DownloadValidationException(
-                    "Response is larger than expected for " + request.uri() + ": expected "
-                        + request.expectedSize() + " bytes, received " + contentLength
-                );
-            }
-            if (contentLength >= 0 && contentLength < request.expectedSize()) {
-                throw new RetryableDownloadException(
-                    "truncated response: expected " + request.expectedSize() + " bytes, received " + contentLength,
-                    -1,
-                    null
-                );
-            }
-            return copyAndVerify(input, request);
+            if (status == 429 || status >= 500 && status < 600)
+                throw retry("HTTP " + status, retryDelay(response.headers().firstValue("Retry-After").orElse(null)), null);
+            if (status != 200) throw new IOException("Download failed with HTTP " + status + ": " + request.uri());
+            long length = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+            if (length > request.expectedSize()) throw new IOException(sizeMessage(request, length, "Response is larger than expected"));
+            if (length >= 0 && length < request.expectedSize()) throw retry(sizeMessage(request, length, "truncated response"), -1, null);
+            return copy(input, request);
         }
     }
 
-    private DownloadResult copyAndVerify(InputStream input, DownloadRequest request) throws IOException {
-        MessageDigest digest = sha256Digest();
-        CRC32 crc32 = new CRC32();
+    private DownloadResult copy(InputStream input, DownloadRequest request) throws IOException {
+        var digest = Hashes.sha256();
+        CRC32 crc = new CRC32();
         long size = 0;
-        byte[] buffer = new byte[BUFFER_SIZE];
-        try (var output = Files.newOutputStream(
-            request.destination(),
-            StandardOpenOption.CREATE,
-            StandardOpenOption.TRUNCATE_EXISTING,
-            StandardOpenOption.WRITE
-        )) {
+        byte[] buffer = new byte[64 * 1024];
+        try (var output = Files.newOutputStream(request.destination())) {
             while (true) {
                 int read;
-                try {
-                    read = input.read(buffer);
-                } catch (IOException exception) {
-                    throw new RetryableDownloadException(
-                        "I/O failure: " + message(exception),
-                        -1,
-                        exception
-                    );
-                }
-                if (read < 0) {
-                    break;
-                }
-                if (read == 0) {
-                    continue;
-                }
+                try { read = input.read(buffer); }
+                catch (IOException exception) { throw retry("I/O failure: " + message(exception), -1, exception); }
+                if (read < 0) break;
+                if (read == 0) continue;
                 size += read;
-                if (size > request.expectedSize()) {
-                    throw new DownloadValidationException(
-                        "Response is larger than expected for " + request.uri() + ": expected "
-                            + request.expectedSize() + " bytes"
-                    );
-                }
+                if (size > request.expectedSize()) throw new IOException(sizeMessage(request, size, "Response is larger than expected"));
                 output.write(buffer, 0, read);
                 digest.update(buffer, 0, read);
-                crc32.update(buffer, 0, read);
+                crc.update(buffer, 0, read);
             }
         }
-        if (size != request.expectedSize()) {
-            throw new RetryableDownloadException(
-                "truncated response: expected " + request.expectedSize() + " bytes, received " + size,
-                -1,
-                null
-            );
-        }
-        String sha256 = HexFormat.of().formatHex(digest.digest());
+        if (size != request.expectedSize()) throw retry(sizeMessage(request, size, "truncated response"), -1, null);
+        String sha256 = java.util.HexFormat.of().formatHex(digest.digest());
         if (request.expectedSha256().equals(sha256) == false) {
-            throw new DownloadValidationException(
-                "SHA-256 mismatch for " + request.uri() + ": expected "
-                    + request.expectedSha256() + ", received " + sha256
-            );
+            throw new IOException("SHA-256 mismatch for " + request.uri() + ": expected "
+                + request.expectedSha256() + ", received " + sha256);
         }
-        return new DownloadResult(request.destination(), size, sha256, crc32.getValue());
+        return new DownloadResult(request.destination(), size, sha256, crc.getValue());
     }
 
-    private static MessageDigest sha256Digest() {
+    private static long retryDelay(String value) {
+        if (value == null) return -1;
         try {
-            return MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("SHA-256 is not available", exception);
-        }
-    }
-
-    private static long retryDelayMillis(String value) {
-        if (value == null) {
-            return -1;
-        }
+            return Math.min(Math.multiplyExact(Long.parseLong(value), 1_000), MAX_DELAY);
+        } catch (ArithmeticException | NumberFormatException ignored) { }
         try {
-            return Math.min(Math.multiplyExact(Long.parseLong(value), 1_000), MAX_RETRY_DELAY_MILLIS);
-        } catch (ArithmeticException | NumberFormatException ignored) {
-            try {
-                long delay = Duration.between(
-                    ZonedDateTime.now(),
-                    ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME)
-                ).toMillis();
-                return Math.min(Math.max(delay, 0), MAX_RETRY_DELAY_MILLIS);
-            } catch (DateTimeParseException dateException) {
-                return -1;
-            }
-        }
+            long delay = Duration.between(ZonedDateTime.now(),
+                ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME)).toMillis();
+            return Math.min(Math.max(delay, 0), MAX_DELAY);
+        } catch (DateTimeParseException exception) { return -1; }
     }
 
-    private static void deletePartial(Path path, IOException failure) {
-        try {
-            if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) == false) {
-                Files.deleteIfExists(path);
-            }
-        } catch (IOException cleanupFailure) {
-            failure.addSuppressed(cleanupFailure);
-        }
+    private static String sizeMessage(DownloadRequest request, long size, String reason) {
+        return reason + " for " + request.uri() + ": expected " + request.expectedSize() + " bytes, received " + size;
     }
 
-    private void sleep(long delayMillis) throws IOException {
-        try {
-            sleeper.sleep(delayMillis);
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Interrupted while waiting to retry a download", exception);
-        }
-    }
-
+    private static Retryable retry(String message, long delay, Throwable cause) { return new Retryable(message, delay, cause); }
     private static String message(IOException exception) {
         return exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage();
     }
 
-    @FunctionalInterface
-    interface Sleeper {
-        void sleep(long milliseconds) throws InterruptedException;
+    @FunctionalInterface interface Sleeper { void sleep(long milliseconds) throws InterruptedException; }
+    private static final class Retryable extends IOException {
+        private final long delay;
+        private Retryable(String message, long delay, Throwable cause) { super(message, cause); this.delay = delay; }
     }
+}
 
-    private static final class RetryableDownloadException extends IOException {
-        private final long retryDelayMillis;
-
-        private RetryableDownloadException(String message, long retryDelayMillis, Throwable cause) {
-            super(message, cause);
-            this.retryDelayMillis = retryDelayMillis;
-        }
-
-        private long retryDelayMillis() {
-            return retryDelayMillis;
-        }
-    }
-
-    private static final class DownloadValidationException extends IOException {
-        private DownloadValidationException(String message) {
-            super(message);
+record DownloadRequest(URI uri, Path destination, long expectedSize, String expectedSha256) {
+    DownloadRequest {
+        Objects.requireNonNull(uri, "uri");
+        Objects.requireNonNull(destination, "destination");
+        Objects.requireNonNull(expectedSha256, "expectedSha256");
+        if (expectedSize < 1) throw new IllegalArgumentException("Expected size must be greater than zero");
+        if (expectedSha256.matches("[0-9a-f]{64}") == false) {
+            throw new IllegalArgumentException("Expected SHA-256 must contain 64 lowercase hexadecimal characters");
         }
     }
 }
+
+record DownloadResult(Path path, long size, String sha256, long crc32) { }

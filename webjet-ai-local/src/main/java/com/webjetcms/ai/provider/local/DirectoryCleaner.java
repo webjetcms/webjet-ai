@@ -17,11 +17,8 @@ final class DirectoryCleaner {
                 try {
                     Files.deleteIfExists(path);
                 } catch (IOException exception) {
-                    if (failure == null) {
-                        failure = exception;
-                    } else {
-                        failure.addSuppressed(exception);
-                    }
+                    if (failure == null) failure = exception;
+                    else failure.addSuppressed(exception);
                 }
             }
         }

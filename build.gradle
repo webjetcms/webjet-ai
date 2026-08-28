@@ -93,6 +93,21 @@ jacocoTestReport {
     }
 }
 
+ext.configureJavaArtifact = { target, String moduleName ->
+    ['java-library', 'maven-publish', 'signing', 'jacoco'].each { target.pluginManager.apply(it) }
+    target.group = group; target.version = version
+    target.repositories { mavenCentral() }
+    target.java { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17; withSourcesJar(); withJavadocJar() }
+    target.tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8'; options.release = 17 }
+    target.tasks.withType(AbstractArchiveTask).configureEach { preserveFileTimestamps = false; reproducibleFileOrder = true }
+    target.tasks.named('jar') {
+        manifest { attributes('Automatic-Module-Name': moduleName, 'Implementation-Version': target.version) }
+        from(rootProject.file('LICENSE')) { into 'META-INF' }; from(rootProject.file('NOTICE')) { into 'META-INF' }
+    }
+    target.tasks.named('test') { useJUnitPlatform { excludeTags 'local-model-smoke' }; finalizedBy target.tasks.jacocoTestReport }
+    target.tasks.named('jacocoTestReport') { dependsOn target.tasks.test; reports { xml.required = true; html.required = true } }
+}
+
 def forbiddenImportPrefixes = [
     'sk.iway.',
     'org.springframework.',
@@ -102,14 +117,15 @@ def forbiddenImportPrefixes = [
     'javax.persistence.'
 ]
 
-def checkStandaloneBoundary = tasks.register('checkStandaloneBoundary') {
+def registerStandaloneBoundary = { target, String taskDescription, String failureMessage ->
+def boundary = target.tasks.register('checkStandaloneBoundary') {
     group = 'verification'
-    description = 'Rejects host-framework imports from the standalone AI library.'
-    inputs.files(sourceSets.main.allJava)
+    description = taskDescription
+    inputs.files(target.sourceSets.main.allJava)
 
     doLast {
         def violations = []
-        sourceSets.main.allJava.files.sort().each { sourceFile ->
+        target.sourceSets.main.allJava.files.sort().each { sourceFile ->
             int lineNumber = 0
             sourceFile.eachLine('UTF-8') { line ->
                 lineNumber++
@@ -128,22 +144,27 @@ def checkStandaloneBoundary = tasks.register('checkStandaloneBoundary') {
         }
 
         if (violations.isEmpty() == false) {
-            throw new GradleException(
-                'webjet-ai must remain independent of WebJET CMS, Spring, servlet, and JPA APIs:\n'
-                    + violations.join('\n')
-            )
+            throw new GradleException(failureMessage + '\n' + violations.join('\n'))
         }
     }
 }
+boundary
+}
+ext.registerStandaloneBoundary = registerStandaloneBoundary
+def checkStandaloneBoundary = registerStandaloneBoundary(project,
+    'Rejects host-framework imports from the standalone AI library.',
+    'webjet-ai must remain independent of WebJET CMS, Spring, servlet, and JPA APIs:')
 
-publishing {
+def configurePublication = { target, String artifact, String pomName, String developerEmail,
+    boolean includeIssueManagement ->
+target.publishing {
     publications {
         mavenJava(MavenPublication) {
-            artifactId = 'webjet-ai'
-            from components.java
+            artifactId = artifact
+            from target.components.java
             pom {
-                name = 'WebJET AI'
-                description = project.description
+                name = pomName
+                description = target.description
                 url = 'https://github.com/webjetcms/webjet-ai'
                 inceptionYear = '2026'
                 licenses {
@@ -156,7 +177,7 @@ publishing {
                 developers {
                     developer {
                         name = 'Lubos Balat'
-                        email = 'info@webjet.eu'
+                        email = developerEmail
                         organization = 'InterWay, a. s.'
                         organizationUrl = 'https://www.interway.sk'
                     }
@@ -166,7 +187,7 @@ publishing {
                     developerConnection = 'scm:git:ssh://git@github.com/webjetcms/webjet-ai.git'
                     url = 'https://github.com/webjetcms/webjet-ai'
                 }
-                withXml {
+                if (includeIssueManagement) withXml {
                     def issueManagement = asNode().appendNode('issueManagement')
                     issueManagement.appendNode('system', 'GitHub')
                     issueManagement.appendNode('url', 'https://github.com/webjetcms/webjet-ai/issues')
@@ -181,7 +202,7 @@ publishing {
         }
         maven {
             name = 'GitHubPackages'
-            url = uri(githubPackagesUrl)
+            url = target.uri(githubPackagesUrl)
             credentials {
                 username = githubPackagesUsername.orNull
                 password = githubPackagesToken.orNull
@@ -191,29 +212,33 @@ publishing {
 }
 
 if (useInMemorySigningKey == false && localGpgKeyName != null) {
-    if (project.findProperty('signing.gnupg.keyName') == null) {
-        project.ext.set('signing.gnupg.keyName', localGpgKeyName)
+    if (target.findProperty('signing.gnupg.keyName') == null) {
+        target.ext.set('signing.gnupg.keyName', localGpgKeyName)
     }
-    if (signingPassword.isPresent() && project.findProperty('signing.gnupg.passphrase') == null) {
-        project.ext.set('signing.gnupg.passphrase', signingPassword.get())
+    if (signingPassword.isPresent() && target.findProperty('signing.gnupg.passphrase') == null) {
+        target.ext.set('signing.gnupg.passphrase', signingPassword.get())
     }
 }
 
 if (useInMemorySigningKey || localGpgKeyName != null) {
-    signing {
+    target.signing {
         if (useInMemorySigningKey) {
             useInMemoryPgpKeys(signingKeyValue, signingPassword.orNull)
         } else {
             useGpgCmd()
         }
-        sign publishing.publications.mavenJava
+        sign target.publishing.publications.mavenJava
     }
 }
 
 // The Central bundle intentionally contains only Maven-standard artifacts.
-tasks.withType(org.gradle.api.publish.tasks.GenerateModuleMetadata).configureEach {
+target.tasks.withType(org.gradle.api.publish.tasks.GenerateModuleMetadata).configureEach {
     enabled = false
 }
+}
+
+ext.configurePublication = configurePublication
+configurePublication(project, 'webjet-ai', 'WebJET AI', 'info@webjet.eu', true)
 
 def verifyPublicationArtifacts = tasks.register('verifyPublicationArtifacts') {
     group = 'verification'
@@ -253,16 +278,10 @@ def verifyPublicationArtifacts = tasks.register('verifyPublicationArtifacts') {
             }
         }
 
-        File javaExecutable = new File(System.getProperty('java.home'), 'bin/java')
-        [
-            ['--help', 'webjet-ai-local-model-tool'],
-            ['--version', releaseVersion]
-        ].each { cliCheck ->
+        [['--help', 'webjet-ai-local-model-tool'], ['--version', releaseVersion]].each { cliCheck ->
             Process process = new ProcessBuilder(
-                javaExecutable.absolutePath,
-                '-jar',
-                mainJar.absolutePath,
-                cliCheck[0]
+                new File(System.getProperty('java.home'), 'bin/java').absolutePath,
+                '-jar', mainJar.absolutePath, cliCheck[0]
             ).redirectErrorStream(true).start()
             String output = process.inputStream.getText('UTF-8')
             int exitCode = process.waitFor()
@@ -270,9 +289,7 @@ def verifyPublicationArtifacts = tasks.register('verifyPublicationArtifacts') {
                 ? cliCheck[1].equals(output.trim())
                 : output.contains(cliCheck[1])
             if (exitCode != 0 || expectedOutput == false) {
-                throw new GradleException(
-                    "JAR ${cliCheck[0]} check failed with exit ${exitCode}: ${output.trim()}"
-                )
+                throw new GradleException("JAR ${cliCheck[0]} check failed with exit ${exitCode}: ${output.trim()}")
             }
         }
 

@@ -27,3 +27,10 @@ at revision `9c374f0b7aca709787cea97b047bfbbd1559d177`. The preparation catalogu
 the encoder, merged decoder, tokenizer, configuration, vocabulary, SentencePiece,
 and model-card artifacts by exact byte size and SHA-256. The upstream model identity
 remains [`facebook/m2m100_418M`](https://huggingface.co/facebook/m2m100_418M).
+
+Local FLAN-T5 Small bundles are prepared from the
+[`Xenova/flan-t5-small`](https://huggingface.co/Xenova/flan-t5-small) ONNX conversion
+at revision `311454e83bc784267fd7eef5940ee854144abbec`. The preparation catalogue
+pins the INT8 encoder, merged decoder, tokenizer, configuration, SentencePiece,
+and model-card artifacts by exact byte size and SHA-256. The upstream model identity
+remains [`google/flan-t5-small`](https://huggingface.co/google/flan-t5-small).

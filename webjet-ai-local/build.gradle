@@ -1,305 +1,68 @@
-plugins {
-    id 'java-library'
-    id 'maven-publish'
-    id 'signing'
-    id 'jacoco'
-}
-
-group = rootProject.group
-version = rootProject.version
-description = 'Local ONNX embedding and translation runtime for WebJET AI model bundles'
-
-def releaseVersion = providers.gradleProperty('releaseVersion').getOrElse('0.1.0-SNAPSHOT')
-def centralStagingDirectory = rootProject.layout.buildDirectory.dir('central-staging')
-def githubPackagesUrl = providers.gradleProperty('githubPackagesUrl')
-    .getOrElse('https://maven.pkg.github.com/webjetcms/webjet-ai')
-def githubPackagesUsername = providers.gradleProperty('githubUsername')
-    .orElse(providers.environmentVariable('GITHUB_USERNAME'))
-def githubPackagesToken = providers.gradleProperty('githubToken')
-    .orElse(providers.environmentVariable('GITHUB_TOKEN'))
-def signingKey = providers.gradleProperty('signingKey')
-def signingKeyId = providers.gradleProperty('signingKeyId')
-def signingPassword = providers.gradleProperty('signingPassword')
-
-String signingKeyValue = signingKey.orNull
-String signingKeyIdValue = signingKeyId.orNull
-String gnupgKeyNameValue = providers.gradleProperty('signing.gnupg.keyName').orNull
-boolean useInMemorySigningKey = signingKeyValue != null && signingKeyValue.contains('BEGIN PGP PRIVATE KEY BLOCK')
-String localGpgKeyName = signingKeyIdValue ?: gnupgKeyNameValue ?: (useInMemorySigningKey ? null : signingKeyValue)
-
-repositories {
-    mavenCentral()
-}
-
-java {
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
-    withSourcesJar()
-    withJavadocJar()
-}
-
+rootProject.ext.configureJavaArtifact(project, 'com.webjetcms.ai.local')
+description = 'Local ONNX embedding and text runtime for WebJET AI model bundles'
+def releaseVersion = version.toString()
 dependencies {
     api project(':')
     implementation 'com.microsoft.onnxruntime:onnxruntime:1.29.0'
     implementation 'ai.djl.huggingface:tokenizers:0.36.0'
     implementation 'ai.djl.sentencepiece:sentencepiece:0.36.0'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.1'
-
     testImplementation platform('org.junit:junit-bom:6.0.0')
     testImplementation 'org.junit.jupiter:junit-jupiter-api'
     testImplementation 'org.junit.jupiter:junit-jupiter-params'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
-
-tasks.withType(JavaCompile).configureEach {
-    options.encoding = 'UTF-8'
-    options.release = 17
-}
-
-tasks.withType(AbstractArchiveTask).configureEach {
-    preserveFileTimestamps = false
-    reproducibleFileOrder = true
-}
-
-jar {
-    manifest {
-        attributes(
-            'Automatic-Module-Name': 'com.webjetcms.ai.local',
-            'Implementation-Version': version
-        )
-    }
-    from(rootProject.file('LICENSE')) {
-        into 'META-INF'
-    }
-    from(rootProject.file('NOTICE')) {
-        into 'META-INF'
-    }
-}
-
-test {
-    useJUnitPlatform {
-        excludeTags 'local-model-smoke'
-    }
-    finalizedBy jacocoTestReport
-}
-
 tasks.register('localModelSmokeTest', Test) {
     group = 'verification'
     description = 'Runs an opt-in embedding smoke test against a supplied production bundle.'
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath
-    useJUnitPlatform {
-        includeTags 'local-model-smoke'
-    }
+    useJUnitPlatform { includeTags 'local-model-smoke' }
     shouldRunAfter test
     doFirst {
         String bundle = providers.gradleProperty('localModelBundle').orNull
-        if (bundle == null || bundle.isBlank()) {
-            throw new GradleException('localModelSmokeTest requires -PlocalModelBundle=/path/model.zip')
-        }
+        if (bundle == null || bundle.isBlank()) throw new GradleException('localModelSmokeTest requires -PlocalModelBundle=/path/model.zip')
         systemProperty 'localModelBundle', bundle
     }
 }
-
-jacocoTestReport {
-    dependsOn test
-    reports {
-        xml.required = true
-        html.required = true
-    }
-}
-
-publishing {
-    publications {
-        mavenJava(MavenPublication) {
-            artifactId = 'webjet-ai-local'
-            from components.java
-            pom {
-                name = 'WebJET AI Local'
-                description = project.description
-                url = 'https://github.com/webjetcms/webjet-ai'
-                inceptionYear = '2026'
-                licenses {
-                    license {
-                        name = 'The Apache License, Version 2.0'
-                        url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
-                        distribution = 'repo'
-                    }
-                }
-                developers {
-                    developer {
-                        name = 'Lubos Balat'
-                        email = 'info@webjet.eu'
-                        organization = 'InterWay, a. s.'
-                        organizationUrl = 'https://www.interway.sk'
-                    }
-                }
-                scm {
-                    connection = 'scm:git:https://github.com/webjetcms/webjet-ai.git'
-                    developerConnection = 'scm:git:ssh://git@github.com/webjetcms/webjet-ai.git'
-                    url = 'https://github.com/webjetcms/webjet-ai'
-                }
-            }
-        }
-    }
-    repositories {
-        maven {
-            name = 'CentralStaging'
-            url = centralStagingDirectory
-        }
-        maven {
-            name = 'GitHubPackages'
-            url = uri(githubPackagesUrl)
-            credentials {
-                username = githubPackagesUsername.orNull
-                password = githubPackagesToken.orNull
-            }
-        }
-    }
-}
-
-if (useInMemorySigningKey == false && localGpgKeyName != null) {
-    if (project.findProperty('signing.gnupg.keyName') == null) {
-        project.ext.set('signing.gnupg.keyName', localGpgKeyName)
-    }
-    if (signingPassword.isPresent() && project.findProperty('signing.gnupg.passphrase') == null) {
-        project.ext.set('signing.gnupg.passphrase', signingPassword.get())
-    }
-}
-
-if (useInMemorySigningKey || localGpgKeyName != null) {
-    signing {
-        if (useInMemorySigningKey) {
-            useInMemoryPgpKeys(signingKeyValue, signingPassword.orNull)
-        } else {
-            useGpgCmd()
-        }
-        sign publishing.publications.mavenJava
-    }
-}
-
-tasks.withType(org.gradle.api.publish.tasks.GenerateModuleMetadata).configureEach {
-    enabled = false
-}
-
-def forbiddenImportPrefixes = [
-    'sk.iway.',
-    'org.springframework.',
-    'jakarta.servlet.',
-    'javax.servlet.',
-    'jakarta.persistence.',
-    'javax.persistence.'
-]
-
-def checkStandaloneBoundary = tasks.register('checkStandaloneBoundary') {
-    group = 'verification'
-    description = 'Rejects host-framework imports from the local runtime artifact.'
-    inputs.files(sourceSets.main.allJava)
-
-    doLast {
-        def violations = []
-        sourceSets.main.allJava.files.sort().each { sourceFile ->
-            int lineNumber = 0
-            sourceFile.eachLine('UTF-8') { line ->
-                lineNumber++
-                String importedType = line.trim()
-                if (importedType.startsWith('import ')) {
-                    importedType = importedType.substring('import '.length()).trim()
-                    if (importedType.startsWith('static ')) {
-                        importedType = importedType.substring('static '.length()).trim()
-                    }
-                    String forbiddenPrefix = forbiddenImportPrefixes.find { importedType.startsWith(it) }
-                    if (forbiddenPrefix != null) violations.add("${sourceFile}:${lineNumber}: ${line.trim()}")
-                }
-            }
-        }
-        if (violations.isEmpty() == false) {
-            throw new GradleException('webjet-ai-local must remain framework-neutral:\n' + violations.join('\n'))
-        }
-    }
-}
-
+rootProject.ext.configurePublication(project, 'webjet-ai-local', 'WebJET AI Local', 'info@interway.sk', false)
+def checkStandaloneBoundary = rootProject.ext.registerStandaloneBoundary(project,
+    'Rejects host-framework imports from the local runtime artifact.',
+    'webjet-ai-local must remain framework-neutral:')
 def verifyPublicationArtifacts = tasks.register('verifyPublicationArtifacts') {
     group = 'verification'
     description = 'Checks the local runtime JAR manifest, legal files, and Maven POM.'
-    dependsOn tasks.named('jar')
-    dependsOn tasks.named('sourcesJar')
-    dependsOn tasks.named('javadocJar')
-    dependsOn tasks.named('generatePomFileForMavenJavaPublication')
-
+    dependsOn 'jar', 'sourcesJar', 'javadocJar', 'generatePomFileForMavenJavaPublication'
     doLast {
-        File mainJar = tasks.named('jar').get().archiveFile.get().asFile
-        File sourcesJar = tasks.named('sourcesJar').get().archiveFile.get().asFile
-        File javadocJar = tasks.named('javadocJar').get().archiveFile.get().asFile
-        [mainJar, sourcesJar, javadocJar].each { artifact ->
-            if (artifact.isFile() == false || artifact.length() == 0) {
-                throw new GradleException("Missing local publication artifact: ${artifact}")
-            }
-        }
+        def require = { condition, message -> if (condition == false) throw new GradleException(message) }
+        File mainJar = tasks.jar.archiveFile.get().asFile
+        [mainJar, tasks.sourcesJar.archiveFile.get().asFile, tasks.javadocJar.archiveFile.get().asFile]
+            .each { require(it.isFile() && it.length(), "Missing local publication artifact: ${it}") }
         new java.util.jar.JarFile(mainJar).withCloseable { archive ->
-            if ('com.webjetcms.ai.local'.equals(
-                archive.manifest.mainAttributes.getValue('Automatic-Module-Name')
-            ) == false) {
-                throw new GradleException('Unexpected local Automatic-Module-Name')
-            }
-            if (archive.manifest.mainAttributes.getValue('Main-Class') != null) {
-                throw new GradleException('The local runtime JAR must not declare Main-Class')
-            }
-            if (releaseVersion.equals(
-                archive.manifest.mainAttributes.getValue('Implementation-Version')
-            ) == false) {
-                throw new GradleException('Unexpected local Implementation-Version')
-            }
-            ['META-INF/LICENSE', 'META-INF/NOTICE'].each { entry ->
-                if (archive.getEntry(entry) == null) {
-                    throw new GradleException("The local runtime JAR is missing ${entry}")
-                }
-            }
+            def attributes = archive.manifest.mainAttributes
+            require(attributes.getValue('Automatic-Module-Name') == 'com.webjetcms.ai.local', 'Unexpected local Automatic-Module-Name')
+            require(attributes.getValue('Main-Class') == null, 'The local runtime JAR must not declare Main-Class')
+            require(attributes.getValue('Implementation-Version') == releaseVersion, 'Unexpected local Implementation-Version')
+            ['LICENSE', 'NOTICE'].each { name -> require(archive.getEntry("META-INF/${name}") != null,
+                "The local runtime JAR is missing META-INF/${name}") }
         }
-
-        File pomFile = layout.buildDirectory.file('publications/mavenJava/pom-default.xml').get().asFile
-        def pom = new groovy.xml.XmlSlurper().parse(pomFile)
-        if ('com.webjetcms'.equals(pom.groupId.text()) == false
-            || 'webjet-ai-local'.equals(pom.artifactId.text()) == false
-            || releaseVersion.equals(pom.version.text()) == false) {
-            throw new GradleException('Unexpected webjet-ai-local Maven coordinates')
-        }
-        def coreDependency = pom.dependencies.dependency.find { it.artifactId.text() == 'webjet-ai' }
-        if (coreDependency == null || releaseVersion.equals(coreDependency.version.text()) == false) {
-            throw new GradleException('The local POM must depend on the matching webjet-ai version')
-        }
-        def expectedRuntimeDependencies = [
-            'onnxruntime': '1.29.0',
-            'tokenizers': '0.36.0',
-            'jackson-databind': '2.22.1'
-        ]
-        expectedRuntimeDependencies.each { artifactId, expectedVersion ->
-            def dependency = pom.dependencies.dependency.find { it.artifactId.text() == artifactId }
-            if (dependency == null || expectedVersion.equals(dependency.version.text()) == false
-                || 'runtime'.equals(dependency.scope.text()) == false) {
-                throw new GradleException("Unexpected local runtime dependency: ${artifactId}")
+        def pom = new groovy.xml.XmlSlurper().parse(
+            layout.buildDirectory.file('publications/mavenJava/pom-default.xml').get().asFile)
+        require([pom.groupId.text(), pom.artifactId.text(), pom.version.text()]
+            == ['com.webjetcms', 'webjet-ai-local', releaseVersion], 'Unexpected webjet-ai-local Maven coordinates')
+        def core = pom.dependencies.dependency.find { it.artifactId.text() == 'webjet-ai' }
+        require(core != null && core.version.text() == releaseVersion, 'The local POM must depend on the matching webjet-ai version')
+        ['onnxruntime': '1.29.0', 'tokenizers': '0.36.0', 'jackson-databind': '2.22.1']
+            .each { artifactId, expectedVersion ->
+                def dependency = pom.dependencies.dependency.find { it.artifactId.text() == artifactId }
+                require(dependency != null && dependency.version.text() == expectedVersion
+                    && dependency.scope.text() == 'runtime',
+                    "Unexpected local runtime dependency: ${artifactId}")
             }
-        }
     }
 }
-
-tasks.named('check') {
-    dependsOn checkStandaloneBoundary
-    dependsOn verifyPublicationArtifacts
-    dependsOn jacocoTestReport
-}
-
-tasks.named('jar') {
-    dependsOn checkStandaloneBoundary
-}
-
-tasks.named('publishMavenJavaPublicationToGitHubPackagesRepository') {
-    dependsOn rootProject.tasks.named('validateGitHubPackagesConfiguration')
-}
-
-tasks.named('publishMavenJavaPublicationToCentralStagingRepository') {
-    dependsOn rootProject.tasks.named('validateReleaseConfiguration')
-    dependsOn rootProject.tasks.named('prepareCentralStaging')
-    mustRunAfter rootProject.tasks.named('prepareCentralStaging')
-}
+tasks.named('check') { dependsOn checkStandaloneBoundary, verifyPublicationArtifacts, jacocoTestReport }
+tasks.named('jar') { dependsOn checkStandaloneBoundary }
+tasks.named('publishMavenJavaPublicationToGitHubPackagesRepository') { dependsOn rootProject.tasks.named('validateGitHubPackagesConfiguration') }
+tasks.named('publishMavenJavaPublicationToCentralStagingRepository') { def staging = rootProject.tasks.named('prepareCentralStaging'); dependsOn rootProject.tasks.named('validateReleaseConfiguration'), staging; mustRunAfter staging }

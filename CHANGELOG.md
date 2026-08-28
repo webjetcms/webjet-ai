@@ -23,6 +23,11 @@ uses [Semantic Versioning](https://semver.org/).
 - Normal `AiRequest`/`AiResponse` local text translation through the approved
   `facebook/m2m100_418M` encoder-decoder bundle, with dynamic tokenizer-derived
   language selection, portable FP32 and INT8 variants, and reusable greedy decoding.
+- Normal `TEXT` request generation through the approved INT8
+  `google/flan-t5-small` bundle for lightweight CPU summarization, rewriting,
+  classification, extraction, and other short instruction-driven CMS tasks.
+- Catalogue-driven encoder-decoder bundle preparation, validation, and cached greedy
+  generation shared by M2M100 and FLAN-T5 model families.
 - Provider-neutral `TranslationOptions` and provider-selectable literal translation input handling, so
   deterministic transformations can preserve input without weakening prompt defenses
   for generative providers.
