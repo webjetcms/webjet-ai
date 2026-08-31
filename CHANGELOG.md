@@ -3,7 +3,7 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.0.0]
 
 ### Added
 
@@ -103,6 +103,8 @@ uses [Semantic Versioning](https://semver.org/).
 - Prompt-injection defense utilities.
 - Java 17 build, tests, API documentation, and Maven Central publication.
 
+[2.0.0]: https://github.com/webjetcms/webjet-ai/compare/v1.2.0...v2.0.0
+[1.2.0]: https://github.com/webjetcms/webjet-ai/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/webjetcms/webjet-ai/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/webjetcms/webjet-ai/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/webjetcms/webjet-ai/compare/v0.1.0...v1.0.0
