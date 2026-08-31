@@ -234,11 +234,11 @@ jobs:
           import com.webjetcms.ai.AiProviderException;
           import com.webjetcms.ai.AiRequest;
           import com.webjetcms.ai.provider.openai.OpenAiProvider;
-          import com.webjetcms.ai.provider.local.LocalModelProvider;
+          import com.webjetcms.ai.provider.local.LocalGenerationModelProvider;
 
           public final class VerifyConsumer {
               public static void main(String[] args) throws Exception {
-                  if (LocalModelProvider.PROVIDER_ID.equals("local") == false) {
+                  if (LocalGenerationModelProvider.PROVIDER_ID.equals("local-generation") == false) {
                       throw new IllegalStateException("Local provider artifact did not resolve");
                   }
                   AiProviderConfig config = AiProviderConfig.builder("consumer-test-key").build();

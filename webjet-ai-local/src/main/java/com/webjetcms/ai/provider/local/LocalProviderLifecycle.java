@@ -2,6 +2,7 @@ package com.webjetcms.ai.provider.local;
 
 import java.nio.file.Path;
 import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -14,7 +15,7 @@ final class LocalProviderLifecycle implements AutoCloseable {
     private final Path directory;
     private final AutoCloseable[] closeOrder;
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
-    private final AtomicReference<State> state = new AtomicReference<>(State.OPEN);
+    private final CloseCoordinator closeCoordinator = new CloseCoordinator();
     LocalProviderLifecycle(String providerId, String closedMessage, Path directory, AutoCloseable... closeOrder) {
         this.providerId = providerId;
         this.closedMessage = closedMessage;
@@ -31,22 +32,17 @@ final class LocalProviderLifecycle implements AutoCloseable {
         }
     }
     void requireOpen() throws AiProviderException {
-        if (state.get() != State.OPEN) throw new AiProviderException(providerId, closedMessage);
+        if (closeCoordinator.isOpen() == false) throw new AiProviderException(providerId, closedMessage);
     }
-    boolean isOpen() { return state.get() == State.OPEN; }
+    boolean isOpen() { return closeCoordinator.isOpen(); }
     @Override
     public void close() throws Exception {
-        if (state.compareAndSet(State.OPEN, State.CLOSING) == false) {
-            if (state.get() == State.CLOSED) return;
-            lock.writeLock().lock();
-            lock.writeLock().unlock();
-            return;
-        }
+        if (closeCoordinator.claimOrAwaitCompletion() == false) return;
         lock.writeLock().lock();
         try {
             rethrow(cleanup(directory, null, closeOrder));
         } finally {
-            state.set(State.CLOSED);
+            closeCoordinator.complete();
             lock.writeLock().unlock();
         }
     }
@@ -95,7 +91,40 @@ final class LocalProviderLifecycle implements AutoCloseable {
     interface Operation<T> { T run() throws AiProviderException; }
     @FunctionalInterface
     interface ResourceInitializer<S, T> { T initialize(S resource) throws Exception; }
-    private enum State { OPEN, CLOSING, CLOSED }
+    static final class CloseCoordinator {
+        private final AtomicReference<State> state = new AtomicReference<>(State.OPEN);
+        private final CountDownLatch completion = new CountDownLatch(1);
+        private volatile Thread owner;
+
+        boolean claimOrAwaitCompletion() {
+            if (state.compareAndSet(State.OPEN, State.CLOSING)) {
+                owner = Thread.currentThread();
+                return true;
+            }
+            if (owner == Thread.currentThread()) return false;
+            boolean interrupted = false;
+            while (true) {
+                try {
+                    completion.await();
+                    break;
+                } catch (InterruptedException exception) {
+                    interrupted = true;
+                }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+            return false;
+        }
+
+        boolean isOpen() { return state.get() == State.OPEN; }
+
+        void complete() {
+            state.set(State.CLOSED);
+            owner = null;
+            completion.countDown();
+        }
+
+        private enum State { OPEN, CLOSING, CLOSED }
+    }
 }
 /** Common bundle and native-runtime settings for local provider builders. */
 abstract class LocalProviderBuilder<B extends LocalProviderBuilder<B>> {

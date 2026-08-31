@@ -88,11 +88,6 @@ public final class LocalGenerationModelProvider implements AiProvider {
     public String id() { return PROVIDER_ID; }
 
     @Override
-    public AiInputHandling inputHandling(AiOperation operation) {
-        return operation == AiOperation.TEXT ? AiInputHandling.LITERAL : AiInputHandling.PROTECTED_PROMPT;
-    }
-
-    @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
         return read(() -> List.of(new ModelInfo(model.required("model.canonical-id"),
             model.required("model.display-name") + " ("
@@ -105,7 +100,14 @@ public final class LocalGenerationModelProvider implements AiProvider {
      * @throws AiProviderException when validation or local inference fails
      */
     public String generate(String prompt) throws AiProviderException {
-        return execute(AiRequest.builder().userPrompt(prompt).build(), AiProviderConfig.empty()).text();
+        return execute(prepareDirectRequest(prompt), AiProviderConfig.empty()).text();
+    }
+
+    static AiRequest prepareDirectRequest(String prompt) {
+        return AiRequest.builder()
+            .instructions(PromptInjectionDefense.hardenSystemInstructions(null))
+            .userPrompt(PromptInjectionDefense.protectUntrustedText(prompt, UntrustedSource.USER_PROMPT).protectedText())
+            .build();
     }
 
     /** Executes protected, non-streaming local text generation.
@@ -171,14 +173,16 @@ public final class LocalGenerationModelProvider implements AiProvider {
             throw invalid("Unsupported local generation model: " + request.model());
     }
 
-    private static String chatPrompt(AiRequest request) throws AiProviderException {
-        String instructions = chatContent(request.instructions());
+    static String chatPrompt(AiRequest request) throws AiProviderException {
+        String instructions = chatContent(PromptInjectionDefense.hardenSystemInstructions(request.instructions()));
         StringBuilder user = new StringBuilder();
-        append(user, chatContent(request.inputText()));
-        append(user, chatContent(request.userPrompt()));
+        append(user, chatContent(PromptInjectionDefense
+            .protectUntrustedText(request.inputText(), UntrustedSource.INPUT_TEXT).protectedText()));
+        append(user, chatContent(PromptInjectionDefense
+            .protectUntrustedText(request.userPrompt(), UntrustedSource.USER_PROMPT).protectedText()));
 
         StringBuilder prompt = new StringBuilder();
-        appendMessage(prompt, "system", instructions);
+        prompt.append(CHAT_START).append("system\n").append(instructions).append(CHAT_END).append('\n');
         appendMessage(prompt, "user", user.toString());
         prompt.append(CHAT_START).append("assistant\n");
         return prompt.toString();

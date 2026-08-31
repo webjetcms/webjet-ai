@@ -22,11 +22,12 @@ final class NativeTranslationTokenizer implements AutoCloseable {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Pattern LANGUAGE_TOKEN = Pattern.compile("^__([A-Za-z0-9_-]+)__$");
     private final SpTokenizer tokenizer;
-    private final int maximumLength, eosTokenId;
+    private final int maximumLength, eosTokenId, vocabularySize;
     private final Metadata metadata;
     NativeTranslationTokenizer(SpTokenizer tokenizer, Path vocabularyJson, Path specialTokensJson,
         int maximumLength, int eosTokenId, int vocabularySize) throws IOException {
         this.tokenizer = tokenizer; this.maximumLength = maximumLength; this.eosTokenId = eosTokenId;
+        this.vocabularySize = vocabularySize;
         this.metadata = readMetadata(vocabularyJson, specialTokensJson, vocabularySize);
     }
     public synchronized NativeTokenizerBatch encode(String text, String sourceLanguage) throws IOException {
@@ -42,16 +43,21 @@ final class NativeTranslationTokenizer implements AutoCloseable {
         return new NativeTokenizerBatch(inputIds, attentionMask);
     }
     public synchronized String decode(long[] tokenIds) throws IOException {
+        List<String> pieces = decodePieces(tokenIds, metadata.tokensById(), vocabularySize);
+        return nativeCall(() -> tokenizer.buildSentence(pieces), "Could not decode generated text tokens");
+    }
+    static List<String> decodePieces(long[] tokenIds, String[] tokensById, int vocabularySize)
+        throws IOException {
         List<String> pieces = new ArrayList<>();
         for (long tokenId : tokenIds) {
-            if (tokenId < 0 || tokenId >= metadata.tokensById().length) {
-                if (metadata.languageTokenIds().containsValue(tokenId)) continue;
+            if (tokenId < 0 || tokenId >= vocabularySize) {
                 throw new IOException("Generated token ID is outside the decodable vocabulary: " + tokenId);
             }
-            int id = Math.toIntExact(tokenId); String piece = metadata.tokensById()[id];
+            if (tokenId >= tokensById.length) continue;
+            int id = Math.toIntExact(tokenId); String piece = tokensById[id];
             if (piece != null) pieces.add(piece);
         }
-        return nativeCall(() -> tokenizer.buildSentence(pieces), "Could not decode generated text tokens");
+        return pieces;
     }
     public long languageTokenId(String language) throws IOException {
         String normalized = normalizeLanguage(language);

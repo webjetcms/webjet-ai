@@ -2,8 +2,10 @@ package com.webjetcms.ai.provider.local;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.function.BooleanSupplier;
 
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
+import ai.djl.util.Utils;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtSession;
 
@@ -49,14 +51,20 @@ final class NativeEmbeddingRuntimeFactory {
     }
 
     static void requireDjlOffline() throws IOException {
+        requireDjlOffline(Utils::isOfflineMode);
+    }
+
+    static void requireDjlOffline(BooleanSupplier effectiveOfflineMode) throws IOException {
         synchronized (OFFLINE_LOCK) {
             try {
                 System.setProperty("ai.djl.offline", "true");
+                if ("true".equalsIgnoreCase(System.getProperty("ai.djl.offline")) == false
+                    || effectiveOfflineMode.getAsBoolean() == false) {
+                    throw new IOException("Could not enforce DJL offline mode");
+                }
             } catch (SecurityException exception) {
                 throw new IOException("Could not enforce DJL offline mode", exception);
             }
-            if ("true".equalsIgnoreCase(System.getProperty("ai.djl.offline")) == false)
-                throw new IOException("Could not enforce DJL offline mode");
         }
     }
 
