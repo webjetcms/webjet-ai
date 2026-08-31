@@ -10,7 +10,14 @@ package com.webjetcms.ai;
  */
 public record EmbeddingOptions(Integer dimensions, EmbeddingInputType inputType) {
 
-    /** Validates an explicitly requested vector size. */
+    /**
+     * Validates the requested vector size and normalizes the input role.
+     *
+     * @param dimensions requested number of values in every returned vector, or {@code null}
+     *     to use the provider default
+     * @param inputType input role used for model-specific preparation; {@code null} selects
+     *     {@link EmbeddingInputType#DOCUMENT}
+     */
     public EmbeddingOptions {
         if (dimensions != null && dimensions < 1) {
             throw new IllegalArgumentException("Embedding dimensions must be greater than zero");

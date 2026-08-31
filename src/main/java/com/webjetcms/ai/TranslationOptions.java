@@ -12,7 +12,13 @@ public record TranslationOptions(
     String targetLanguage,
     Integer maximumOutputTokens
 ) {
-    /** Validates optional language codes and the output-token limit. */
+    /**
+     * Validates optional language codes and the output-token limit.
+     *
+     * @param sourceLanguage source language code, or {@code null} when provider defaults apply
+     * @param targetLanguage target language code, or {@code null} when provider defaults apply
+     * @param maximumOutputTokens output-token limit, or {@code null} when provider defaults apply
+     */
     public TranslationOptions {
         if (sourceLanguage != null && sourceLanguage.isBlank()) {
             throw new IllegalArgumentException("Source language must not be blank");

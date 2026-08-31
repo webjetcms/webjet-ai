@@ -9,7 +9,11 @@ import java.util.Arrays;
  */
 public record EmbeddingVector(float[] values) {
 
-    /** Stores a defensive copy of the supplied vector. */
+    /**
+     * Stores a defensive copy of the supplied vector.
+     *
+     * @param values vector values; {@code null} becomes an empty vector
+     */
     public EmbeddingVector {
         values = values == null ? new float[0] : Arrays.copyOf(values, values.length);
     }

@@ -17,6 +17,9 @@ public record EmbeddingRequest(String model, List<String> inputs, EmbeddingOptio
     /**
      * Normalizes nullable values and stores an immutable copy of the inputs.
      *
+     * @param model provider-specific embedding model identifier, possibly {@code null}
+     * @param inputs text values to embed; {@code null} becomes an empty list
+     * @param options embedding settings; {@code null} becomes default options
      * @throws NullPointerException when an input element is {@code null}
      */
     public EmbeddingRequest {

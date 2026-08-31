@@ -10,7 +10,12 @@ import java.util.List;
  */
 public record EmbeddingResponse(List<EmbeddingVector> embeddings, TokenUsage usage) {
 
-    /** Normalizes nullable values and stores an immutable copy of the vectors. */
+    /**
+     * Normalizes nullable values and stores an immutable copy of the vectors.
+     *
+     * @param embeddings generated vectors in request input order; {@code null} becomes an empty list
+     * @param usage provider-reported token usage; {@code null} becomes {@link TokenUsage#EMPTY}
+     */
     public EmbeddingResponse {
         embeddings = embeddings == null ? List.of() : List.copyOf(embeddings);
         usage = usage == null ? TokenUsage.EMPTY : usage;
