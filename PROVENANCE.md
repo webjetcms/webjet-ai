@@ -28,9 +28,9 @@ the encoder, merged decoder, tokenizer, configuration, vocabulary, SentencePiece
 and model-card artifacts by exact byte size and SHA-256. The upstream model identity
 remains [`facebook/m2m100_418M`](https://huggingface.co/facebook/m2m100_418M).
 
-Local FLAN-T5 Small bundles are prepared from the
-[`Xenova/flan-t5-small`](https://huggingface.co/Xenova/flan-t5-small) ONNX conversion
-at revision `311454e83bc784267fd7eef5940ee854144abbec`. The preparation catalogue
-pins the INT8 encoder, merged decoder, tokenizer, configuration, SentencePiece,
-and model-card artifacts by exact byte size and SHA-256. The upstream model identity
-remains [`google/flan-t5-small`](https://huggingface.co/google/flan-t5-small).
+Local EuroLLM-1.7B-Instruct bundles are prepared from the
+[`QuantFactory/EuroLLM-1.7B-Instruct-GGUF`](https://huggingface.co/QuantFactory/EuroLLM-1.7B-Instruct-GGUF)
+conversion at revision `4126f034ddfe7fd39ca3378ae58d3b1d74065315`. The preparation
+catalogue pins the Q4_K_M GGUF model and model card by exact byte size and SHA-256.
+The upstream model identity remains
+[`utter-project/EuroLLM-1.7B-Instruct`](https://huggingface.co/utter-project/EuroLLM-1.7B-Instruct).
