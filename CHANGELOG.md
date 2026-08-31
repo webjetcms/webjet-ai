@@ -3,6 +3,34 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
+## [2.0.0]
+
+### Added
+
+- JDK-only `webjet-ai-local-model-tool` CLI in the existing library JAR for
+  preparing verified, reproducible E5 embedding, M2M100 translation, and
+  Q4_K_M EuroLLM-1.7B-Instruct generation bundles without executing the model.
+- Separate `com.webjetcms:webjet-ai-local` artifact with DJL local tokenization,
+  ONNX Runtime inference, llama.cpp GGUF generation, strict schema-v1 bundle
+  validation, E5 mean pooling, L2 normalization, model-specific input preparation,
+  batching, and provider-owned native/extraction lifecycle.
+- Provider-neutral query and document embedding input roles, with automatic E5
+  `query:` and `passage:` preparation and document-compatible defaults.
+- `AiProviderConfig.empty()` for providers that require no connection settings.
+- FP32 local runtime support for Linux x86-64 and macOS ARM64, plus fail-closed
+  AVX-512 VNNI validation for the explicit Linux INT8 bundle.
+- Normal `AiRequest`/`AiResponse` local text translation through the approved
+  `facebook/m2m100_418M` encoder-decoder bundle, with dynamic tokenizer-derived
+  language selection, portable FP32 and INT8 variants, and reusable greedy decoding.
+- Normal `TEXT` request generation through the approved Q4_K_M
+  `utter-project/EuroLLM-1.7B-Instruct` GGUF bundle for multilingual CPU
+  summarization, rewriting, classification, extraction, and other CMS tasks.
+- Catalogue-driven preparation, strict validation, and greedy local inference for
+  ONNX encoder-decoder and GGUF causal model families.
+- Provider-neutral `TranslationOptions` and provider-selectable literal translation input handling, so
+  deterministic transformations can preserve input without weakening prompt defenses
+  for generative providers.
+
 ## [1.2.0]
 
 ### Added
@@ -75,6 +103,8 @@ uses [Semantic Versioning](https://semver.org/).
 - Prompt-injection defense utilities.
 - Java 17 build, tests, API documentation, and Maven Central publication.
 
+[2.0.0]: https://github.com/webjetcms/webjet-ai/compare/v1.2.0...v2.0.0
+[1.2.0]: https://github.com/webjetcms/webjet-ai/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/webjetcms/webjet-ai/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/webjetcms/webjet-ai/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/webjetcms/webjet-ai/compare/v0.1.0...v1.0.0

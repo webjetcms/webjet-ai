@@ -30,6 +30,20 @@ public interface AiProvider extends AutoCloseable {
     String id();
 
     /**
+     * Selects client-side preparation for the requested operation.
+     *
+     * <p>The default keeps prompt defenses enabled for existing and generative providers.
+     * Providers that perform a literal transformation may return {@link AiInputHandling#LITERAL}
+     * for the applicable operation.</p>
+     *
+     * @param operation requested provider operation
+     * @return input preparation mode; never {@code null}
+     */
+    default AiInputHandling inputHandling(AiOperation operation) {
+        return AiInputHandling.PROTECTED_PROMPT;
+    }
+
+    /**
      * Loads the models currently exposed by the provider.
      *
      * @param config credentials, endpoint, and transport settings for the call
@@ -79,7 +93,9 @@ public interface AiProvider extends AutoCloseable {
      * <p>The default implementation preserves compatibility for providers that do not
      * support embeddings.</p>
      *
-     * <p>Embedding inputs are forwarded unchanged; prompt-defense markers are not added.</p>
+     * <p>Prompt-defense markers are not added. A provider may still apply model-required
+     * preprocessing selected through {@link EmbeddingOptions}, such as a retrieval role
+     * prefix, without modifying the request value.</p>
      *
      * @param request provider-neutral embedding request
      * @param config credentials, endpoint, and transport settings for the call

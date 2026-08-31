@@ -20,6 +20,7 @@ public final class AiRequest {
     private final String userPrompt;
     private final BinaryContent inputMedia;
     private final boolean store;
+    private final TranslationOptions translationOptions;
     private final ImageOptions imageOptions;
     private final ProtectionResult inputTextProtection;
     private final ProtectionResult userPromptProtection;
@@ -45,6 +46,7 @@ public final class AiRequest {
         userPrompt = builder.userPrompt;
         inputMedia = builder.inputMedia;
         store = builder.store;
+        translationOptions = builder.translationOptions;
         imageOptions = builder.imageOptions;
         this.inputTextProtection = Objects.requireNonNull(inputTextProtection, "inputTextProtection");
         this.userPromptProtection = Objects.requireNonNull(userPromptProtection, "userPromptProtection");
@@ -68,6 +70,7 @@ public final class AiRequest {
             .userPrompt(source.userPromptProtection.protectedText())
             .inputMedia(source.inputMedia)
             .store(source.store)
+            .translationOptions(source.translationOptions)
             .imageOptions(source.imageOptions);
         return new AiRequest(builder, source.inputTextProtection, source.userPromptProtection);
     }
@@ -129,6 +132,13 @@ public final class AiRequest {
     public boolean store() { return store; }
 
     /**
+     * Returns optional settings for text translation.
+     *
+     * @return translation settings, or {@code null} to use provider defaults
+     */
+    public TranslationOptions translationOptions() { return translationOptions; }
+
+    /**
      * Returns provider-neutral image generation options.
      *
      * @return image options, or {@code null} to use provider defaults
@@ -168,6 +178,7 @@ public final class AiRequest {
         private String userPrompt;
         private BinaryContent inputMedia;
         private boolean store;
+        private TranslationOptions translationOptions;
         private ImageOptions imageOptions;
 
         private Builder() { }
@@ -227,6 +238,17 @@ public final class AiRequest {
          * @return this builder
          */
         public Builder store(boolean store) { this.store = store; return this; }
+
+        /**
+         * Supplies optional translation settings.
+         *
+         * @param translationOptions provider-neutral translation settings
+         * @return this builder
+         */
+        public Builder translationOptions(TranslationOptions translationOptions) {
+            this.translationOptions = translationOptions;
+            return this;
+        }
 
         /**
          * Supplies optional image generation settings.

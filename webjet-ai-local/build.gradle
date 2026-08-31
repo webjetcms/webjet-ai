@@ -1,0 +1,84 @@
+rootProject.ext.configureJavaArtifact(project, 'com.webjetcms.ai.local')
+description = 'Local embedding, translation, and text-generation runtime for WebJET AI model bundles'
+def releaseVersion = version.toString()
+dependencies {
+    api project(':')
+    implementation 'com.microsoft.onnxruntime:onnxruntime:1.29.0'
+    implementation 'de.kherud:llama:3.4.1'
+    implementation 'ai.djl.huggingface:tokenizers:0.36.0'
+    implementation 'ai.djl.sentencepiece:sentencepiece:0.36.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.1'
+    testImplementation platform('org.junit:junit-bom:6.0.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter-api'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+tasks.register('localModelSmokeTest', Test) {
+    group = 'verification'
+    description = 'Runs an opt-in embedding smoke test against a supplied production bundle.'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform { includeTags 'local-model-smoke' }
+    filter {
+        includeTestsMatching 'com.webjetcms.ai.provider.local.LocalEmbeddingModelSmokeTest'
+        failOnNoMatchingTests = true
+    }
+    outputs.upToDateWhen { false }
+    shouldRunAfter test
+    doFirst {
+        String bundle = providers.gradleProperty('localModelBundle').orNull
+        if (bundle == null || bundle.isBlank()) {
+            throw new GradleException(
+                'localModelSmokeTest requires -PlocalModelBundle=/path/model.zip'
+            )
+        }
+        File bundleFile = rootProject.file(bundle)
+        if (bundleFile.isFile() == false) {
+            throw new GradleException(
+                "localModelSmokeTest bundle does not exist or is not a file: ${bundleFile}"
+            )
+        }
+        systemProperty 'localModelBundle', bundleFile.absolutePath
+    }
+}
+rootProject.ext.configurePublication(project, 'webjet-ai-local', 'WebJET AI Local', 'info@interway.sk', false)
+def checkStandaloneBoundary = rootProject.ext.registerStandaloneBoundary(project,
+    'Rejects host-framework imports from the local runtime artifact.',
+    'webjet-ai-local must remain framework-neutral:')
+def verifyPublicationArtifacts = tasks.register('verifyPublicationArtifacts') {
+    group = 'verification'
+    description = 'Checks the local runtime JAR manifest, legal files, and Maven POM.'
+    dependsOn 'jar', 'sourcesJar', 'javadocJar', 'generatePomFileForMavenJavaPublication'
+    doLast {
+        def require = { condition, message -> if (condition == false) throw new GradleException(message) }
+        File mainJar = tasks.jar.archiveFile.get().asFile
+        [mainJar, tasks.sourcesJar.archiveFile.get().asFile, tasks.javadocJar.archiveFile.get().asFile]
+            .each { require(it.isFile() && it.length(), "Missing local publication artifact: ${it}") }
+        new java.util.jar.JarFile(mainJar).withCloseable { archive ->
+            def attributes = archive.manifest.mainAttributes
+            require(attributes.getValue('Automatic-Module-Name') == 'com.webjetcms.ai.local', 'Unexpected local Automatic-Module-Name')
+            require(attributes.getValue('Main-Class') == null, 'The local runtime JAR must not declare Main-Class')
+            require(attributes.getValue('Implementation-Version') == releaseVersion, 'Unexpected local Implementation-Version')
+            ['LICENSE', 'NOTICE'].each { name -> require(archive.getEntry("META-INF/${name}") != null,
+                "The local runtime JAR is missing META-INF/${name}") }
+        }
+        def pom = new groovy.xml.XmlSlurper().parse(
+            layout.buildDirectory.file('publications/mavenJava/pom-default.xml').get().asFile)
+        require([pom.groupId.text(), pom.artifactId.text(), pom.version.text()]
+            == ['com.webjetcms', 'webjet-ai-local', releaseVersion], 'Unexpected webjet-ai-local Maven coordinates')
+        def core = pom.dependencies.dependency.find { it.artifactId.text() == 'webjet-ai' }
+        require(core != null && core.version.text() == releaseVersion, 'The local POM must depend on the matching webjet-ai version')
+        ['onnxruntime': '1.29.0', 'llama': '3.4.1', 'tokenizers': '0.36.0', 'jackson-databind': '2.22.1']
+            .each { artifactId, expectedVersion ->
+                def dependency = pom.dependencies.dependency.find { it.artifactId.text() == artifactId }
+                require(dependency != null && dependency.version.text() == expectedVersion
+                    && dependency.scope.text() == 'runtime',
+                    "Unexpected local runtime dependency: ${artifactId}")
+            }
+    }
+}
+tasks.named('check') { dependsOn checkStandaloneBoundary, verifyPublicationArtifacts, jacocoTestReport }
+tasks.named('jar') { dependsOn checkStandaloneBoundary }
+tasks.named('publishMavenJavaPublicationToGitHubPackagesRepository') { dependsOn rootProject.tasks.named('validateGitHubPackagesConfiguration') }
+tasks.named('publishMavenJavaPublicationToCentralStagingRepository') { def staging = rootProject.tasks.named('prepareCentralStaging'); dependsOn rootProject.tasks.named('validateReleaseConfiguration'), staging; mustRunAfter staging }

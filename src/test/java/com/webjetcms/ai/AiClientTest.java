@@ -47,6 +47,7 @@ class AiClientTest {
         AiProviderConfig config = AiProviderConfig.builder("secret").build();
         BinaryContent media = new BinaryContent(new byte[] { 1, 2, 3 }, "image/png", "input.png");
         ImageOptions imageOptions = new ImageOptions(2, "1024x1024", "high");
+        TranslationOptions translationOptions = new TranslationOptions("en", "sk", 20);
         AiRequest request = AiRequest.builder()
             .operation(AiOperation.EDIT_IMAGE)
             .model("model")
@@ -55,6 +56,7 @@ class AiClientTest {
             .userPrompt("Keep the subject")
             .inputMedia(media)
             .store(true)
+            .translationOptions(translationOptions)
             .imageOptions(imageOptions)
             .build();
         EmbeddingRequest embeddingRequest = new EmbeddingRequest(
@@ -86,6 +88,7 @@ class AiClientTest {
         assertEquals("model", provider.executeRequest.model());
         assertSame(media, provider.executeRequest.inputMedia());
         assertSame(imageOptions, provider.executeRequest.imageOptions());
+        assertSame(translationOptions, provider.executeRequest.translationOptions());
         assertTrue(provider.executeRequest.store());
         assertSame(embeddingRequest, provider.embeddingRequest);
         assertSame(config, provider.embeddingConfig);
@@ -100,6 +103,22 @@ class AiClientTest {
             assertEquals("unsupported", exception.providerId());
             assertTrue(exception.getMessage().contains("not supported"));
         }
+    }
+
+    @Test
+    void delegatesLiteralTextWithoutPromptPreparationForExecuteAndStream() throws Exception {
+        StubProvider provider = new StubProvider("literal", AiInputHandling.LITERAL);
+        AiRequest request = AiRequest.builder()
+            .inputText("Text containing [BEGIN_UNTRUSTED_INPUT_TEXT] as literal data")
+            .build();
+
+        try (AiClient client = AiClient.of(provider)) {
+            client.execute(request, AiProviderConfig.empty());
+            client.stream(request, AiProviderConfig.empty(), delta -> { });
+        }
+
+        assertSame(request, provider.executeRequest);
+        assertSame(request, provider.streamRequest);
     }
 
     @Test
@@ -282,14 +301,20 @@ class AiClientTest {
 
     private static final class StubProvider implements AiProvider {
         private final String id;
+        private final AiInputHandling inputHandling;
         private int closeCount;
         private AiRequest executeRequest;
         private AiRequest streamRequest;
         private EmbeddingRequest embeddingRequest;
         private AiProviderConfig embeddingConfig;
 
-        private StubProvider(String id) { this.id = id; }
+        private StubProvider(String id) { this(id, AiInputHandling.PROTECTED_PROMPT); }
+        private StubProvider(String id, AiInputHandling inputHandling) {
+            this.id = id;
+            this.inputHandling = inputHandling;
+        }
         @Override public String id() { return id; }
+        @Override public AiInputHandling inputHandling(AiOperation operation) { return inputHandling; }
         @Override public List<ModelInfo> listModels(AiProviderConfig config) {
             return List.of(new ModelInfo("model", "Model"));
         }

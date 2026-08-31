@@ -335,7 +335,7 @@ public final class AiClient implements AutoCloseable {
         throws AiProviderException {
         AiProvider selectedProvider = provider(providerId);
         try {
-            return selectedProvider.execute(prepareRequest(request), config);
+            return selectedProvider.execute(prepareRequest(selectedProvider, request), config);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
@@ -345,8 +345,9 @@ public final class AiClient implements AutoCloseable {
 
     /**
      * Creates embeddings using the only registered provider.
-     * Embedding inputs are forwarded unchanged because prompt-defense markers would
-     * alter the resulting vectors.
+     * Prompt-defense markers are not added because they would alter the resulting
+     * vectors. The selected provider may apply model-required preprocessing chosen
+     * through {@link EmbeddingOptions}.
      *
      * @param request model, inputs, and provider-neutral embedding options
      * @param config provider credentials and connection settings
@@ -361,8 +362,9 @@ public final class AiClient implements AutoCloseable {
 
     /**
      * Creates embeddings using a registered provider.
-     * Embedding inputs are forwarded unchanged because prompt-defense markers would
-     * alter the resulting vectors.
+     * Prompt-defense markers are not added because they would alter the resulting
+     * vectors. The selected provider may apply model-required preprocessing chosen
+     * through {@link EmbeddingOptions}.
      *
      * @param providerId registered provider identifier
      * @param request model, inputs, and provider-neutral embedding options
@@ -425,7 +427,7 @@ public final class AiClient implements AutoCloseable {
     ) throws AiProviderException {
         AiProvider selectedProvider = provider(providerId);
         try {
-            return selectedProvider.stream(prepareRequest(request), config, listener);
+            return selectedProvider.stream(prepareRequest(selectedProvider, request), config, listener);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
@@ -442,8 +444,15 @@ public final class AiClient implements AutoCloseable {
             .redactSecrets(config);
     }
 
-    private static AiRequest prepareRequest(AiRequest request) {
-        return request == null ? null : AiRequestPreparer.prepare(request);
+    private static AiRequest prepareRequest(AiProvider provider, AiRequest request) {
+        if (request == null) return null;
+        AiInputHandling handling = Objects.requireNonNull(
+            provider.inputHandling(request.operation()),
+            "provider.inputHandling"
+        );
+        return handling == AiInputHandling.LITERAL
+            ? request
+            : AiRequestPreparer.prepare(request);
     }
 
     private String soleProviderId() {

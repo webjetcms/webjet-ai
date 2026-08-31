@@ -48,5 +48,7 @@ jobs:
           path: |
             build/reports/tests/
             build/reports/jacoco/
+            webjet-ai-local/build/reports/tests/
+            webjet-ai-local/build/reports/jacoco/
           if-no-files-found: ignore
           retention-days: 7
