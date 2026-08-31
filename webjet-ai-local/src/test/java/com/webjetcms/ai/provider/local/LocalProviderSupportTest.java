@@ -3,6 +3,7 @@ package com.webjetcms.ai.provider.local;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -66,6 +67,14 @@ class LocalProviderSupportTest {
             LocalTranslationModelProvider.builder(bundle).sourceLanguage(" "));
         assertThrows(IllegalArgumentException.class, () ->
             LocalTranslationModelProvider.builder(bundle).maximumOutputTokens(0));
+        var preparedTranslation = new Seq2SeqBundleValidator.PreparedBundle(
+            temporaryDirectory,
+            new Seq2SeqBundleManifest(translation, translation.variant(translation.defaultVariant()))
+        );
+        assertNull(LocalTranslationModelProvider.builder(bundle)
+            .outputLimit(preparedTranslation, false));
+        assertEquals(translation.maximumOutputLength(), LocalTranslationModelProvider.builder(bundle)
+            .outputLimit(preparedTranslation, true));
         assertThrows(IllegalArgumentException.class, () ->
             LocalGenerationModelProvider.builder(bundle).intraOpThreads(0));
     }

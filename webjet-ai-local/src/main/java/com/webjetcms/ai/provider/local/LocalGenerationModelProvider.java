@@ -409,7 +409,10 @@ abstract class Seq2SeqProviderBuilder<B extends Seq2SeqProviderBuilder<B>>
         if (maximumOutputTokens != null && maximumOutputTokens > maximum) {
             throw new IllegalArgumentException("maximumOutputTokens must not exceed " + maximum);
         }
-        return maximumOutputTokens == null && useModelDefault ? maximum : maximumOutputTokens;
+        if (maximumOutputTokens == null) {
+            return useModelDefault ? maximum : null;
+        }
+        return maximumOutputTokens;
     }
 
     final <T extends AutoCloseable, C, P> P initialize(String resource, String description,
