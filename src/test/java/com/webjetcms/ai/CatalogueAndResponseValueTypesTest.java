@@ -26,7 +26,9 @@ class CatalogueAndResponseValueTypesTest {
     @Test
     void embeddingValueTypesValidateDefaultsAndRemainImmutable() {
         assertNull(new EmbeddingOptions().dimensions());
+        assertEquals(EmbeddingInputType.DOCUMENT, new EmbeddingOptions().inputType());
         assertEquals(Integer.valueOf(768), new EmbeddingOptions(768).dimensions());
+        assertEquals(EmbeddingInputType.QUERY, new EmbeddingOptions(768, EmbeddingInputType.QUERY).inputType());
         assertThrows(IllegalArgumentException.class, () -> new EmbeddingOptions(0));
 
         String sensitiveInput = "secret-input-must-not-be-logged";
@@ -67,6 +69,15 @@ class CatalogueAndResponseValueTypesTest {
         assertEquals(List.of(vector), response.embeddings());
         assertSame(TokenUsage.EMPTY, response.usage());
         assertThrows(UnsupportedOperationException.class, () -> response.embeddings().clear());
+    }
+
+    @Test
+    void translationOptionsValidateOnlyExplicitValues() {
+        assertEquals(new TranslationOptions(null, null, null), new TranslationOptions());
+        assertEquals("sk", new TranslationOptions("en", "sk", 20).targetLanguage());
+        assertThrows(IllegalArgumentException.class, () -> new TranslationOptions(" ", "sk", 20));
+        assertThrows(IllegalArgumentException.class, () -> new TranslationOptions("en", " ", 20));
+        assertThrows(IllegalArgumentException.class, () -> new TranslationOptions("en", "sk", 0));
     }
 
     @Test

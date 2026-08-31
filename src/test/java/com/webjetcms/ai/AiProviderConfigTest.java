@@ -2,6 +2,8 @@ package com.webjetcms.ai;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.net.URI;
@@ -11,6 +13,13 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class AiProviderConfigTest {
+
+    @Test
+    void exposesOneCredentialFreeDefaultConfiguration() {
+        assertSame(AiProviderConfig.empty(), AiProviderConfig.empty());
+        assertNull(AiProviderConfig.empty().apiKey());
+        assertEquals(Map.of(), AiProviderConfig.empty().trustedHeaders());
+    }
 
     @Test
     void validatesTrustedHeadersAndReplacesNamesCaseInsensitively() {
