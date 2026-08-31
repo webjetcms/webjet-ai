@@ -90,21 +90,23 @@ public final class LocalTranslationModelProvider extends Seq2SeqProvider<NativeT
      */
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return read(() -> {
-            ResolvedRequest resolved = validateAndResolve(request);
-            try {
-                NativeTokenizerBatch source = tokenizer.encode(
-                    request.inputText(), resolved.sourceLanguage());
-                long targetLanguageTokenId = tokenizer.languageTokenId(resolved.targetLanguage());
-                long[] generated = generator.generate(
-                    source.inputIds(), source.attentionMask(),
-                    new long[]{model.decoderStartTokenId(), targetLanguageTokenId},
-                    resolved.maximumOutputTokens());
-                return AiResponse.text(tokenizer.decode(generated));
-            } catch (Exception exception) {
-                throw new AiProviderException(PROVIDER_ID, "Local translation inference failed", exception);
-            }
-        });
+        return LocalProviderBoundary.invoke(config, () ->
+            read(() -> {
+                ResolvedRequest resolved = validateAndResolve(request);
+                try {
+                    NativeTokenizerBatch source = tokenizer.encode(
+                        request.inputText(), resolved.sourceLanguage());
+                    long targetLanguageTokenId = tokenizer.languageTokenId(resolved.targetLanguage());
+                    long[] generated = generator.generate(
+                        source.inputIds(), source.attentionMask(),
+                        new long[]{model.decoderStartTokenId(), targetLanguageTokenId},
+                        resolved.maximumOutputTokens());
+                    return AiResponse.text(tokenizer.decode(generated));
+                } catch (Exception exception) {
+                    throw new AiProviderException(PROVIDER_ID, "Local translation inference failed", exception);
+                }
+            })
+        );
     }
 
     /** Rejects streaming because the local sequence-to-sequence runtime returns completed text.
@@ -117,7 +119,10 @@ public final class LocalTranslationModelProvider extends Seq2SeqProvider<NativeT
     @Override
     public AiResponse stream(AiRequest request, AiProviderConfig config, AiStreamListener listener)
         throws AiProviderException {
-        throw new AiProviderException(PROVIDER_ID, "Streaming is not supported by the local translation model provider");
+        return LocalProviderBoundary.invoke(config, () -> {
+            throw new AiProviderException(PROVIDER_ID,
+                "Streaming is not supported by the local translation model provider");
+        });
     }
 
     private ResolvedRequest validateAndResolve(AiRequest request) throws AiProviderException {

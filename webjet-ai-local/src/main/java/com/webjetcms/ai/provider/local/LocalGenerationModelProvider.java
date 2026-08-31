@@ -16,6 +16,8 @@ import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiStreamListener;
+import com.webjetcms.ai.EmbeddingRequest;
+import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.provider.local.ApprovedSeq2SeqModelCatalog.ModelDefinition;
 import com.webjetcms.ai.provider.local.NativeSeq2SeqRuntimeFactory.Resources;
@@ -89,9 +91,11 @@ public final class LocalGenerationModelProvider implements AiProvider {
 
     @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
-        return read(() -> List.of(new ModelInfo(model.required("model.canonical-id"),
-            model.required("model.display-name") + " ("
-                + variant(model).replace('-', ' ').toUpperCase(Locale.ROOT) + ")")));
+        return LocalProviderBoundary.invoke(config, () ->
+            read(() -> List.of(new ModelInfo(model.required("model.canonical-id"),
+                model.required("model.display-name") + " ("
+                    + variant(model).replace('-', ' ').toUpperCase(Locale.ROOT) + ")")))
+        );
     }
 
     /** Generates text from a normal string prompt without provider connection settings.
@@ -118,27 +122,35 @@ public final class LocalGenerationModelProvider implements AiProvider {
      */
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return read(() -> {
-            validate(request);
-            String prompt = chatPrompt(request);
-            try {
-                synchronized (generator) {
-                    if (generator.encode(prompt).length >= model.positiveInteger("model.maximum-length") - maximumOutputTokens)
-                        throw invalid("Local generation prompt exceeds the model context length");
-                    InferenceParameters parameters = new InferenceParameters(prompt)
-                        .setNPredict(maximumOutputTokens)
-                        .setTemperature(0)
-                        .setStopStrings(CHAT_END);
-                    StringBuilder generated = new StringBuilder();
-                    for (LlamaOutput output : generator.generate(parameters)) generated.append(output.text);
-                    return AiResponse.text(generated.toString().trim());
+        return LocalProviderBoundary.invoke(config, () ->
+            read(() -> {
+                validate(request);
+                String prompt = chatPrompt(request);
+                try {
+                    synchronized (generator) {
+                        if (generator.encode(prompt).length >= model.positiveInteger("model.maximum-length") - maximumOutputTokens)
+                            throw invalid("Local generation prompt exceeds the model context length");
+                        InferenceParameters parameters = new InferenceParameters(prompt)
+                            .setNPredict(maximumOutputTokens)
+                            .setTemperature(0)
+                            .setStopStrings(CHAT_END);
+                        StringBuilder generated = new StringBuilder();
+                        for (LlamaOutput output : generator.generate(parameters)) generated.append(output.text);
+                        return AiResponse.text(generated.toString().trim());
+                    }
+                } catch (AiProviderException exception) {
+                    throw exception;
+                } catch (Exception exception) {
+                    throw new AiProviderException(PROVIDER_ID, "Local text generation failed", exception);
                 }
-            } catch (AiProviderException exception) {
-                throw exception;
-            } catch (Exception exception) {
-                throw new AiProviderException(PROVIDER_ID, "Local text generation failed", exception);
-            }
-        });
+            })
+        );
+    }
+
+    @Override
+    public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
+        throws AiProviderException {
+        return LocalProviderBoundary.invoke(config, () -> AiProvider.super.embed(request, config));
     }
 
     /** Rejects streaming because the local runtime returns completed text.
@@ -151,7 +163,10 @@ public final class LocalGenerationModelProvider implements AiProvider {
     @Override
     public AiResponse stream(AiRequest request, AiProviderConfig config, AiStreamListener listener)
         throws AiProviderException {
-        throw new AiProviderException(PROVIDER_ID, "Streaming is not supported by the local generation provider");
+        return LocalProviderBoundary.invoke(config, () -> {
+            throw new AiProviderException(PROVIDER_ID,
+                "Streaming is not supported by the local generation provider");
+        });
     }
 
     private void validate(AiRequest request) throws AiProviderException {
@@ -372,10 +387,18 @@ abstract class Seq2SeqProvider<T extends AutoCloseable> implements AiProvider {
 
     @Override
     public final List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
-        return read(() -> {
-            String variant = bundle.manifest().variant().name().replace('-', ' ').toUpperCase(Locale.ROOT);
-            return List.of(new ModelInfo(model.canonicalId(), model.displayName() + " (" + variant + ")"));
-        });
+        return LocalProviderBoundary.invoke(config, () ->
+            read(() -> {
+                String variant = bundle.manifest().variant().name().replace('-', ' ').toUpperCase(Locale.ROOT);
+                return List.of(new ModelInfo(model.canonicalId(), model.displayName() + " (" + variant + ")"));
+            })
+        );
+    }
+
+    @Override
+    public final EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
+        throws AiProviderException {
+        return LocalProviderBoundary.invoke(config, () -> AiProvider.super.embed(request, config));
     }
 
     @Override

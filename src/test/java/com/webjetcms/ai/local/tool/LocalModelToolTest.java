@@ -3,6 +3,7 @@ package com.webjetcms.ai.local.tool;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
@@ -14,6 +15,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -119,6 +121,43 @@ class LocalModelToolTest {
         } finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void bundleWriterDoesNotReplaceADanglingSymbolicLink() throws Exception {
+        Path output = temporaryDirectory.resolve("dangling.zip");
+        Path missingTarget = temporaryDirectory.resolve("missing.zip");
+        try {
+            Files.createSymbolicLink(output, missingTarget);
+        } catch (UnsupportedOperationException | IOException exception) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(false,
+                "Symbolic links are unavailable: " + exception.getMessage());
+        }
+
+        assertFalse(Files.exists(output));
+        assertTrue(Files.exists(output, LinkOption.NOFOLLOW_LINKS));
+        LocalModelRecipe recipe = new FixtureRecipe(
+            URI.create("https://example.invalid/model.onnx"), 1, "0".repeat(64)
+        );
+        assertThrows(IOException.class, () -> new LocalModelBundleWriter().write(
+            output, false, recipe, ModelVariant.FP32, List.of(), List.of()
+        ));
+
+        assertTrue(Files.isSymbolicLink(output));
+        assertEquals(missingTarget, Files.readSymbolicLink(output));
+    }
+
+    @Test
+    void bundlePublicationDoesNotReplaceAnExistingDestination() throws Exception {
+        Path source = temporaryDirectory.resolve("bundle.tmp");
+        Path output = temporaryDirectory.resolve("late.zip");
+        Files.writeString(source, "new bundle", StandardCharsets.UTF_8);
+        Files.writeString(output, "existing output", StandardCharsets.UTF_8);
+
+        assertThrows(IOException.class, () -> LocalModelBundleWriter.move(source, output, false));
+
+        assertEquals("existing output", Files.readString(output, StandardCharsets.UTF_8));
+        assertTrue(Files.exists(source));
     }
 
     private static int run(LocalModelRecipe recipe, HttpDownloader downloader, Path output,

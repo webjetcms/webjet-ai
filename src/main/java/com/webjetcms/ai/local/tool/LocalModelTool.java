@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -56,7 +57,7 @@ public final class LocalModelTool {
 
     private static int prepare(Options options, PrintStream out, PrintStream error, HttpDownloader downloader) {
         Path output = options.output.toAbsolutePath().normalize();
-        if (Files.exists(output) && options.overwrite == false) {
+        if (Files.exists(output, LinkOption.NOFOLLOW_LINKS) && options.overwrite == false) {
             error.println("Error: Output already exists; use --overwrite to replace it: " + output);
             return OPERATIONAL_FAILURE;
         }

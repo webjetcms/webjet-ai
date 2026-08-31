@@ -89,7 +89,8 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
      */
     @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
-        return lifecycle.read(() -> List.of(modelInfo));
+        return LocalProviderBoundary.invoke(config,
+            () -> lifecycle.read(() -> List.of(modelInfo)));
     }
 
     /**
@@ -114,13 +115,18 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
     @Override
     public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
         throws AiProviderException {
-        lifecycle.requireOpen();
-        return lifecycle.read(() -> embedOpen(request));
+        return LocalProviderBoundary.invoke(config, () -> {
+            lifecycle.requireOpen();
+            return lifecycle.read(() -> embedOpen(request));
+        });
     }
 
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        throw new AiProviderException(PROVIDER_ID, "Generation is not supported by the local embedding model provider");
+        return LocalProviderBoundary.invoke(config, () -> {
+            throw new AiProviderException(PROVIDER_ID,
+                "Generation is not supported by the local embedding model provider");
+        });
     }
 
     @Override
@@ -129,7 +135,10 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
         AiProviderConfig config,
         AiStreamListener listener
     ) throws AiProviderException {
-        throw new AiProviderException(PROVIDER_ID, "Streaming is not supported by the local embedding model provider");
+        return LocalProviderBoundary.invoke(config, () -> {
+            throw new AiProviderException(PROVIDER_ID,
+                "Streaming is not supported by the local embedding model provider");
+        });
     }
 
     /**

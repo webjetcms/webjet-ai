@@ -20,11 +20,26 @@ tasks.register('localModelSmokeTest', Test) {
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath
     useJUnitPlatform { includeTags 'local-model-smoke' }
+    filter {
+        includeTestsMatching 'com.webjetcms.ai.provider.local.LocalEmbeddingModelSmokeTest'
+        failOnNoMatchingTests = true
+    }
+    outputs.upToDateWhen { false }
     shouldRunAfter test
     doFirst {
         String bundle = providers.gradleProperty('localModelBundle').orNull
-        if (bundle == null || bundle.isBlank()) throw new GradleException('localModelSmokeTest requires -PlocalModelBundle=/path/model.zip')
-        systemProperty 'localModelBundle', bundle
+        if (bundle == null || bundle.isBlank()) {
+            throw new GradleException(
+                'localModelSmokeTest requires -PlocalModelBundle=/path/model.zip'
+            )
+        }
+        File bundleFile = rootProject.file(bundle)
+        if (bundleFile.isFile() == false) {
+            throw new GradleException(
+                "localModelSmokeTest bundle does not exist or is not a file: ${bundleFile}"
+            )
+        }
+        systemProperty 'localModelBundle', bundleFile.absolutePath
     }
 }
 rootProject.ext.configurePublication(project, 'webjet-ai-local', 'WebJET AI Local', 'info@interway.sk', false)

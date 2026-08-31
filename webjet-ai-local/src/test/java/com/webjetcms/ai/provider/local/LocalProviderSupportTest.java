@@ -31,6 +31,7 @@ import java.util.zip.ZipOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.security.PromptInjectionDefense;
@@ -40,6 +41,29 @@ class LocalProviderSupportTest {
 
     @TempDir
     Path temporaryDirectory;
+
+    @Test
+    void publicBoundaryRedactsConfiguredSecrets() {
+        String apiKey = "api-key-that-must-not-escape";
+        String headerValue = "trusted-header-that-must-not-escape";
+        AiProviderConfig config = AiProviderConfig.builder(apiKey)
+            .trustedHeader("X-Local-Secret", headerValue)
+            .build();
+        AiProviderException failure = new AiProviderException(
+            apiKey, 500, apiKey + headerValue, apiKey + headerValue, false
+        );
+
+        AiProviderException redacted = assertThrows(AiProviderException.class, () ->
+            LocalProviderBoundary.invoke(config, () -> { throw failure; })
+        );
+
+        assertEquals(500, redacted.statusCode());
+        for (String secret : List.of(apiKey, headerValue)) {
+            assertFalse(redacted.getMessage().contains(secret));
+            assertFalse(redacted.rawResponse().contains(secret));
+            assertFalse(redacted.providerId().contains(secret));
+        }
+    }
 
     @Test
     void approvedCataloguesAndPublicBuildersEnforceTheirBoundaries() throws Exception {

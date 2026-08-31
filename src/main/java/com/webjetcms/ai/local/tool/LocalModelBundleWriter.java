@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
@@ -26,7 +27,7 @@ final class LocalModelBundleWriter {
         Path parent = target.getParent();
         if (parent == null) throw new IOException("Output path has no parent directory: " + destination);
         Files.createDirectories(parent);
-        if (Files.exists(target) && overwrite == false) {
+        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && overwrite == false) {
             throw new IOException("Output already exists; use --overwrite to replace it: " + target);
         }
         if (artifacts.size() != downloads.size()) throw new IllegalArgumentException("Artifact and download counts do not match");
@@ -71,13 +72,15 @@ final class LocalModelBundleWriter {
         }
     }
 
-    private static void move(Path source, Path target, boolean overwrite) throws IOException {
+    static void move(Path source, Path target, boolean overwrite) throws IOException {
+        if (overwrite == false) {
+            Files.move(source, target);
+            return;
+        }
         try {
-            if (overwrite) Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            else Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
+            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (AtomicMoveNotSupportedException exception) {
-            if (overwrite) Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
-            else Files.move(source, target);
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 
