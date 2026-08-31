@@ -126,7 +126,7 @@ jobs:
         run: ./gradlew --no-daemon clean centralBundle -PreleaseVersion="${RELEASE_VERSION}"
 
       - name: Preserve Central bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: central-bundle-${{ needs.validate.outputs.version }}
           path: build/central/central-bundle.zip
