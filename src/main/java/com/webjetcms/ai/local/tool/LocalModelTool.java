@@ -150,6 +150,7 @@ public final class LocalModelTool {
         return ("webjet-ai-local-model-tool\n\nPrepare a verified local-model ZIP without loading or executing the model.\n\n"
             + "Usage:\n  java -jar webjet-ai-VERSION.jar prepare --model MODEL [options]\n"
             + "  java -jar webjet-ai-VERSION.jar --help\n  java -jar webjet-ai-VERSION.jar --version\n\n"
+            + "Source checkout:\n  ./gradlew localModelTool --args='prepare --model MODEL [options]'\n\n"
             + "Required:\n  --model MODEL       %s\n\nOptions:\n"
             + "  --variant VARIANT   Model-specific quantization variant\n"
             + "  --dimensions SIZE   Validate an embedding model's fixed dimensions\n"

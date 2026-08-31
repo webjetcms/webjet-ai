@@ -80,6 +80,13 @@ jar {
     }
 }
 
+tasks.register('localModelTool', JavaExec) {
+    group = 'application'
+    description = 'Runs the local-model preparation tool directly from compiled classes.'
+    classpath = sourceSets.main.output
+    mainClass = 'com.webjetcms.ai.local.tool.LocalModelTool'
+}
+
 test {
     useJUnitPlatform()
     finalizedBy jacocoTestReport

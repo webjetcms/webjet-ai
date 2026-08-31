@@ -1,5 +1,5 @@
 rootProject.ext.configureJavaArtifact(project, 'com.webjetcms.ai.local')
-description = 'Local ONNX embedding and text runtime for WebJET AI model bundles'
+description = 'Local embedding, translation, and text-generation runtime for WebJET AI model bundles'
 def releaseVersion = version.toString()
 dependencies {
     api project(':')
