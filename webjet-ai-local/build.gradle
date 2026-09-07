@@ -4,7 +4,7 @@ def releaseVersion = version.toString()
 dependencies {
     api project(':')
     implementation 'com.microsoft.onnxruntime:onnxruntime:1.29.0'
-    implementation 'de.kherud:llama:3.4.1'
+    implementation 'de.kherud:llama:4.2.0'
     implementation 'ai.djl.huggingface:tokenizers:0.36.0'
     implementation 'ai.djl.sentencepiece:sentencepiece:0.36.0'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.1'
@@ -69,7 +69,7 @@ def verifyPublicationArtifacts = tasks.register('verifyPublicationArtifacts') {
             == ['com.webjetcms', 'webjet-ai-local', releaseVersion], 'Unexpected webjet-ai-local Maven coordinates')
         def core = pom.dependencies.dependency.find { it.artifactId.text() == 'webjet-ai' }
         require(core != null && core.version.text() == releaseVersion, 'The local POM must depend on the matching webjet-ai version')
-        ['onnxruntime': '1.29.0', 'llama': '3.4.1', 'tokenizers': '0.36.0', 'jackson-databind': '2.22.1']
+        ['onnxruntime': '1.29.0', 'llama': '4.2.0', 'tokenizers': '0.36.0', 'jackson-databind': '2.22.1']
             .each { artifactId, expectedVersion ->
                 def dependency = pom.dependencies.dependency.find { it.artifactId.text() == artifactId }
                 require(dependency != null && dependency.version.text() == expectedVersion
