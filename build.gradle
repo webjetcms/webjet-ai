@@ -470,11 +470,13 @@ def generateCentralChecksums = tasks.register('generateCentralChecksums') {
         def stagedFiles = []
         stagingDirectory.eachFileRecurse(groovy.io.FileType.FILES) { stagedFiles.add(it) }
         stagedFiles.findAll { file ->
-            file.name.startsWith('maven-metadata')
+            (
+                file.name.startsWith('maven-metadata')
                 || file.name.endsWith('.md5')
                 || file.name.endsWith('.sha1')
                 || file.name.endsWith('.sha256')
                 || file.name.endsWith('.sha512')
+            )
         }.each { generatedFile ->
             if (generatedFile.delete() == false) {
                 throw new GradleException("Unable to remove generated file: ${generatedFile}")
