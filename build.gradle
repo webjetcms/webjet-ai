@@ -68,7 +68,6 @@ jar {
     manifest {
         attributes(
             'Automatic-Module-Name': 'com.webjetcms.ai',
-            'Main-Class': 'com.webjetcms.ai.local.tool.LocalModelTool',
             'Implementation-Version': version
         )
     }
@@ -78,13 +77,6 @@ jar {
     from(project.file('NOTICE')) {
         into 'META-INF'
     }
-}
-
-tasks.register('localModelTool', JavaExec) {
-    group = 'application'
-    description = 'Runs the local-model preparation tool directly from compiled classes.'
-    classpath = sourceSets.main.output
-    mainClass = 'com.webjetcms.ai.local.tool.LocalModelTool'
 }
 
 test {
@@ -270,9 +262,8 @@ def verifyPublicationArtifacts = tasks.register('verifyPublicationArtifacts') {
             if ('com.webjetcms.ai'.equals(moduleName) == false) {
                 throw new GradleException("Unexpected Automatic-Module-Name: ${moduleName}")
             }
-            String mainClass = archive.manifest.mainAttributes.getValue('Main-Class')
-            if ('com.webjetcms.ai.local.tool.LocalModelTool'.equals(mainClass) == false) {
-                throw new GradleException("Unexpected Main-Class: ${mainClass}")
+            if (archive.manifest.mainAttributes.getValue('Main-Class') != null) {
+                throw new GradleException('The core library JAR must not declare Main-Class')
             }
             String implementationVersion = archive.manifest.mainAttributes.getValue('Implementation-Version')
             if (releaseVersion.equals(implementationVersion) == false) {
@@ -282,21 +273,6 @@ def verifyPublicationArtifacts = tasks.register('verifyPublicationArtifacts') {
                 if (archive.getEntry(entry) == null) {
                     throw new GradleException("The main JAR is missing ${entry}")
                 }
-            }
-        }
-
-        [['--help', 'webjet-ai-local-model-tool'], ['--version', releaseVersion]].each { cliCheck ->
-            Process process = new ProcessBuilder(
-                new File(System.getProperty('java.home'), 'bin/java').absolutePath,
-                '-jar', mainJar.absolutePath, cliCheck[0]
-            ).redirectErrorStream(true).start()
-            String output = process.inputStream.getText('UTF-8')
-            int exitCode = process.waitFor()
-            boolean expectedOutput = '--version'.equals(cliCheck[0])
-                ? cliCheck[1].equals(output.trim())
-                : output.contains(cliCheck[1])
-            if (exitCode != 0 || expectedOutput == false) {
-                throw new GradleException("JAR ${cliCheck[0]} check failed with exit ${exitCode}: ${output.trim()}")
             }
         }
 

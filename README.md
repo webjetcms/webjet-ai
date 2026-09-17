@@ -235,7 +235,7 @@ options, never the input text.
 
 ## Preparing local models
 
-The published `webjet-ai` JAR also contains a JDK-only preparation tool for the
+The published `webjet-ai-local` JAR also contains a JDK-only preparation tool for the
 approved E5 embedding, M2M100 translation, and EuroLLM generation models. The tool
 downloads a pinned, verified set of model and tokenizer files and writes one
 reproducible ZIP for later use. It does not load or execute the model; runtime ZIP
@@ -246,18 +246,18 @@ project has `includeBuild('../webjet-ai')`, run the included build's task from t
 consuming project:
 
 ```shell
-./gradlew :webjet-ai:localModelTool \
+./gradlew :webjet-ai:webjet-ai-local:localModelTool \
   --args='prepare --model multilingual-e5-base --output /path/to/multilingual-e5-base-fp32.zip'
 ```
 
 The task compiles the required classes and uses the same catalogue and command-line
 options as the packaged JAR. From the `webjet-ai` checkout itself, omit the included
-build prefix and run `./gradlew localModelTool --args='...'`.
+build prefix and run `./gradlew :webjet-ai-local:localModelTool --args='...'`.
 
 Prepare the portable FP32 bundle:
 
 ```shell
-java -jar webjet-ai-2.0.0.jar prepare \
+java -jar webjet-ai-local-2.0.1.jar prepare \
   --model multilingual-e5-base \
   --output /path/to/multilingual-e5-base-fp32.zip
 ```
@@ -270,7 +270,7 @@ unless `--overwrite` is specified.
 Use the same command for the smaller 384-value model:
 
 ```shell
-java -jar webjet-ai-2.0.0.jar prepare \
+java -jar webjet-ai-local-2.0.1.jar prepare \
   --model multilingual-e5-small
 ```
 
@@ -280,7 +280,7 @@ Its default FP32 output is `multilingual-e5-small-fp32.zip`; the canonical
 An explicitly selected quantized bundle is available for CPUs with AVX-512 VNNI:
 
 ```shell
-java -jar webjet-ai-2.0.0.jar prepare \
+java -jar webjet-ai-local-2.0.1.jar prepare \
   --model multilingual-e5-base \
   --variant int8-avx512-vnni
 ```
@@ -317,7 +317,7 @@ JAR version.
 Prepare the portable quantized M2M100 translation bundle in the same way:
 
 ```shell
-java -jar webjet-ai-2.0.0.jar prepare \
+java -jar webjet-ai-local-2.0.1.jar prepare \
   --model facebook/m2m100_418M \
   --variant int8
 ```
@@ -332,7 +332,7 @@ read from that tokenizer rather than hardcoded by the library.
 Prepare EuroLLM-1.7B-Instruct for local multilingual text generation:
 
 ```shell
-java -jar webjet-ai-2.0.0.jar prepare \
+java -jar webjet-ai-local-2.0.1.jar prepare \
   --model utter-project/EuroLLM-1.7B-Instruct
 ```
 
@@ -343,9 +343,10 @@ model, its model card, a schema-v1 manifest, and checksums from the pinned
 `QuantFactory/EuroLLM-1.7B-Instruct-GGUF` conversion. Tokenizer data is embedded
 in the GGUF model.
 
-`webjet-ai-local-model-tool` only prepares local model bundles. Model execution is
-provided by the separate `webjet-ai-local` artifact, so ordinary cloud-provider
-users do not receive ONNX Runtime, llama.cpp, or tokenizer native dependencies.
+`webjet-ai-local-model-tool` only prepares local model bundles and can run from the
+`webjet-ai-local` JAR with only a JDK. Model execution through the same artifact
+requires its runtime dependencies. Ordinary cloud-provider users only need
+`webjet-ai` and do not receive ONNX Runtime, llama.cpp, or tokenizer native dependencies.
 
 ## Running a local embedding model
 

@@ -1,6 +1,18 @@
 rootProject.ext.configureJavaArtifact(project, 'com.webjetcms.ai.local')
 description = 'Local embedding, translation, and text-generation runtime for WebJET AI model bundles'
 def releaseVersion = version.toString()
+
+tasks.named('jar') {
+    manifest { attributes('Main-Class': 'com.webjetcms.ai.local.tool.LocalModelTool') }
+}
+
+tasks.register('localModelTool', JavaExec) {
+    group = 'application'
+    description = 'Runs the local-model preparation tool directly from compiled classes.'
+    classpath = sourceSets.main.output
+    mainClass = 'com.webjetcms.ai.local.tool.LocalModelTool'
+}
+
 dependencies {
     api project(':')
     implementation 'com.microsoft.onnxruntime:onnxruntime:1.29.0'
@@ -58,10 +70,23 @@ def verifyPublicationArtifacts = tasks.register('verifyPublicationArtifacts') {
         new java.util.jar.JarFile(mainJar).withCloseable { archive ->
             def attributes = archive.manifest.mainAttributes
             require(attributes.getValue('Automatic-Module-Name') == 'com.webjetcms.ai.local', 'Unexpected local Automatic-Module-Name')
-            require(attributes.getValue('Main-Class') == null, 'The local runtime JAR must not declare Main-Class')
+            require(attributes.getValue('Main-Class') == 'com.webjetcms.ai.local.tool.LocalModelTool', 'Unexpected local Main-Class')
             require(attributes.getValue('Implementation-Version') == releaseVersion, 'Unexpected local Implementation-Version')
             ['LICENSE', 'NOTICE'].each { name -> require(archive.getEntry("META-INF/${name}") != null,
                 "The local runtime JAR is missing META-INF/${name}") }
+        }
+        [['--help', 'webjet-ai-local-model-tool'], ['--version', releaseVersion]].each { cliCheck ->
+            Process process = new ProcessBuilder(
+                new File(System.getProperty('java.home'), 'bin/java').absolutePath,
+                '-jar', mainJar.absolutePath, cliCheck[0]
+            ).redirectErrorStream(true).start()
+            String output = process.inputStream.getText('UTF-8')
+            int exitCode = process.waitFor()
+            boolean expectedOutput = '--version'.equals(cliCheck[0])
+                ? cliCheck[1].equals(output.trim())
+                : output.contains(cliCheck[1])
+            require(exitCode == 0 && expectedOutput,
+                "Local JAR ${cliCheck[0]} check failed with exit ${exitCode}: ${output.trim()}")
         }
         def pom = new groovy.xml.XmlSlurper().parse(
             layout.buildDirectory.file('publications/mavenJava/pom-default.xml').get().asFile)
