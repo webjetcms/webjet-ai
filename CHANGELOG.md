@@ -11,6 +11,12 @@ uses [Semantic Versioning](https://semver.org/).
   safety markers, including Markdown-escaped tags, instead of returning leaked
   instructions or a tagged answer.
 
+## [2.0.1]
+
+### Fixed
+
+- Move `LocalModelTool` into `webjet-ai-local` project.
+
 ## [2.0.0]
 
 ### Added
