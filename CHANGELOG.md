@@ -3,7 +3,15 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.0.4]
+
+### Added
+
+- Windows x64 support for portable local E5 FP32 embedding, M2M100 FP32/INT8
+  translation, and EuroLLM Q4_K_M generation bundles using the existing native
+  dependencies and model ZIPs. E5 INT8 AVX-512 VNNI remains Linux x86-64 only.
+
+## [2.0.3]
 
 ### Fixed
 

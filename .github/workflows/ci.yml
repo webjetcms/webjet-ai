@@ -17,8 +17,12 @@ concurrency:
 
 jobs:
   build:
-    name: Java 17 build
-    runs-on: ubuntu-latest
+    name: Java 17 build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     timeout-minutes: 20
 
     steps:
@@ -35,7 +39,22 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
 
       - name: Test and verify artifacts
+        shell: bash
         run: ./gradlew --no-daemon clean check javadoc
+
+      - name: Prepare portable embedding bundle on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: >-
+          ./gradlew --no-daemon :webjet-ai-local:localModelTool
+          --args='prepare --model multilingual-e5-small --output build/local-smoke/model.zip'
+
+      - name: Run native embedding inference on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: >-
+          ./gradlew --no-daemon :webjet-ai-local:localModelSmokeTest
+          -PlocalModelBundle=webjet-ai-local/build/local-smoke/model.zip
 
       - name: Confirm the build did not modify sources
         run: git diff --exit-code
@@ -44,7 +63,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-reports
+          name: test-reports-${{ matrix.os }}
           path: |
             build/reports/tests/
             build/reports/jacoco/

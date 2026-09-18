@@ -348,6 +348,11 @@ in the GGUF model.
 requires its runtime dependencies. Ordinary cloud-provider users only need
 `webjet-ai` and do not receive ONNX Runtime, llama.cpp, or tokenizer native dependencies.
 
+Portable model ZIPs can be prepared on one operating system and used on another
+supported platform without downloading or rebuilding them. Windows x64 uses the
+native libraries already included in the runtime dependencies and requires a
+64-bit x86 Java 17 or newer JVM. Intel macOS and Windows ARM64 are not supported.
+
 ## Running a local embedding model
 
 Add the runtime artifact through Maven or Gradle so its pinned native dependency
@@ -411,7 +416,7 @@ lifecycle must be explicit. Advanced initialization supports `intraOpThreads`,
 `maximumBatchSize`, and an existing writable temporary-directory parent through
 `LocalEmbeddingModelProvider.builder(path)`.
 
-FP32 bundles are supported on Linux x86-64 and macOS ARM64. The INT8 variant is
+FP32 bundles are supported on Linux x86-64, Windows x64, and macOS ARM64. The INT8 variant is
 accepted only on Linux x86-64 when `/proc/cpuinfo` proves AVX-512 VNNI support;
 there is no automatic fallback. Opening a provider temporarily requires enough
 free disk space to extract the model in addition to the original ZIP: about 1.11
@@ -424,6 +429,9 @@ JVM-wide `ai.djl.offline=true` policy and disables ONNX Runtime telemetry. It ne
 downloads a model or tokenizer and accepts no model URL.
 
 ## Running local translation
+
+Both FP32 and INT8 M2M100 bundles are supported on Linux x86-64, Windows x64,
+and macOS ARM64. Unlike the E5 INT8 variant, M2M100 INT8 does not require AVX-512 VNNI.
 
 M2M100 uses the normal `TEXT` request and text-only response. Supply the text
 literally through `inputText` and the language pair through `TranslationOptions`:
@@ -523,7 +531,7 @@ The model has a 4,096-token context. Requests that do not leave room for the con
 output limit are rejected rather than truncated. Generation uses deterministic greedy
 decoding, defaults to at most 200 output tokens, and does not support streaming. Calls
 on one provider instance are serialized by the native runtime. The Q4_K_M bundle is
-accepted on Linux x86-64 and macOS ARM64. The provider retains the default
+accepted on Linux x86-64, Windows x64, and macOS ARM64. The provider retains the default
 protected-prompt handling, rejects requests whose immutable `suspiciousSources()`
 metadata indicates prompt injection, and rejects reserved chat control tokens. Apply
 any additional host content policy before inference.
