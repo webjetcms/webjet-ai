@@ -150,7 +150,9 @@ public final class LocalGenerationModelProvider implements AiProvider {
 
     static AiResponse generationResponse(String generated) {
         if (PromptInjectionDefense.containsSafetyMarker(generated)) return AiResponse.text("");
-        return AiResponse.text(generated.trim());
+        String text = generated.trim();
+        if (text.isEmpty() == false && text.endsWith(".") == false) text += "...";
+        return AiResponse.text(text);
     }
 
     @Override
