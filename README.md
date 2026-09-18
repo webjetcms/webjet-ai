@@ -528,6 +528,11 @@ protected-prompt handling, rejects requests whose immutable `suspiciousSources()
 metadata indicates prompt injection, and rejects reserved chat control tokens. Apply
 any additional host content policy before inference.
 
+If generated output contains a library safety marker such as
+`[BEGIN_UNTRUSTED_INPUT_TEXT]`, the provider discards the entire completion and returns
+an empty string through both `AiResponse.text()` and `generate(...)`. This also covers
+closing markers, security/task markers, and Markdown-escaped forms of the tags.
+
 ## Provider guides
 
 Each provider guide shows how to build requests for text, streaming, multimodal

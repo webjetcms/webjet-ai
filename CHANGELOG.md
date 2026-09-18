@@ -3,6 +3,14 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Local EuroLLM text generation returns empty text when a completion echoes library
+  safety markers, including Markdown-escaped tags, instead of returning leaked
+  instructions or a tagged answer.
+
 ## [2.0.0]
 
 ### Added

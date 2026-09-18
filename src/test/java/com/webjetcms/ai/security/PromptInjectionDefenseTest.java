@@ -11,11 +11,34 @@ import java.nio.charset.StandardCharsets;
 import java.util.HexFormat;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import com.webjetcms.ai.security.PromptInjectionDefense.ProtectionResult;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 
 class PromptInjectionDefenseTest {
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "[BEGIN_UNTRUSTED_INPUT_TEXT]",
+        "[BEGIN\\_UNTRUSTED\\_INPUT\\_TEXT]",
+        "&#91;BEGIN_UNTRUSTED_INPUT_TEXT&#93;",
+        "%5BBEGIN_UNTRUSTED_INPUT_TEXT%5D",
+        "[BEGIN_UNTRUSTED_\u200BINPUT_TEXT]",
+        "RESERVED_MARKER(BEGIN_UNTRUSTED_INPUT_TEXT)"
+    })
+    void detectsSafetyMarkersInGeneratedText(String marker) {
+        assertTrue(PromptInjectionDefense.containsSafetyMarker("Answer " + marker + " more text"));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" \n\t ", "A normal summary.", "[1] A reference.", "Use input_text as data."})
+    void ignoresOutputWithoutSafetyMarkers(String text) {
+        assertFalse(PromptInjectionDefense.containsSafetyMarker(text));
+    }
 
     @Test
     void wrapsUntrustedInputAndReportsInjectionWithoutSideEffects() {

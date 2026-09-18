@@ -100,7 +100,7 @@ public final class LocalGenerationModelProvider implements AiProvider {
 
     /** Generates text from a normal string prompt without provider connection settings.
      * @param prompt non-blank end-user prompt
-     * @return generated string
+     * @return generated string, or an empty string when output contains a safety marker
      * @throws AiProviderException when validation or local inference fails
      */
     public String generate(String prompt) throws AiProviderException {
@@ -117,7 +117,8 @@ public final class LocalGenerationModelProvider implements AiProvider {
     /** Executes protected, non-streaming local text generation.
      * @param request normal text request containing instructions, input text, or a user prompt
      * @param config ignored because local execution requires no credentials or endpoint
-     * @return text-only response containing the generated string
+     * @return text-only response containing the generated string, or empty text when
+     *         output contains a safety marker
      * @throws AiProviderException when validation or local inference fails
      */
     @Override
@@ -136,7 +137,7 @@ public final class LocalGenerationModelProvider implements AiProvider {
                             .setStopStrings(CHAT_END);
                         StringBuilder generated = new StringBuilder();
                         for (LlamaOutput output : generator.generate(parameters)) generated.append(output.text);
-                        return AiResponse.text(generated.toString().trim());
+                        return generationResponse(generated.toString());
                     }
                 } catch (AiProviderException exception) {
                     throw exception;
@@ -145,6 +146,11 @@ public final class LocalGenerationModelProvider implements AiProvider {
                 }
             })
         );
+    }
+
+    static AiResponse generationResponse(String generated) {
+        if (PromptInjectionDefense.containsSafetyMarker(generated)) return AiResponse.text("");
+        return AiResponse.text(generated.trim());
     }
 
     @Override

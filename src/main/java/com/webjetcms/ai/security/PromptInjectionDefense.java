@@ -258,6 +258,17 @@ public final class PromptInjectionDefense {
     }
 
     /**
+     * Detects library safety markers echoed in generated output, including neutralized
+     * markers, HTML/URL-encoded forms, and Markdown-escaped underscores.
+     *
+     * @param value generated text to inspect, possibly {@code null}
+     * @return {@code true} when a reserved safety marker is present
+     */
+    public static boolean containsSafetyMarker(String value) {
+        return containsReservedMarker(normalizeForInspection(value).replace("\\_", "_"));
+    }
+
+    /**
      * Reconstructs the canonical wrapper from its data payload before trusting it.
      * This rejects duplicate/forged boundary markers and also rescans an idempotent
      * value instead of trusting a caller-supplied security note.
