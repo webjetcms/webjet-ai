@@ -7,6 +7,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Local EuroLLM text generation appends `...` to non-empty answers that do not end
+  with `.` after trimming whitespace.
 - Local EuroLLM text generation returns empty text when a completion echoes library
   safety markers, including Markdown-escaped tags, instead of returning leaked
   instructions or a tagged answer.

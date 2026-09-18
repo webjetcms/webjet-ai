@@ -533,6 +533,9 @@ If generated output contains a library safety marker such as
 an empty string through both `AiResponse.text()` and `generate(...)`. This also covers
 closing markers, security/task markers, and Markdown-escaped forms of the tags.
 
+The provider trims generated text and appends `...` to non-empty answers that do not
+end with `.` to indicate a potentially unfinished sentence.
+
 ## Provider guides
 
 Each provider guide shows how to build requests for text, streaming, multimodal
