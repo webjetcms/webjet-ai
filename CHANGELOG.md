@@ -3,6 +3,13 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Maven Central releases now wait for manual publication in Central Portal after
+  validation, while the GitHub Release is still created automatically.
+
 ## [2.0.4]
 
 ### Added

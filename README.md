@@ -659,9 +659,11 @@ The opt-in production-bundle smoke test performs no download:
 Releases follow semantic versioning and are published to Maven Central from a
 protected GitHub environment. A maintainer creates a `vX.Y.Z` tag on `main`;
 the tag must be annotated and cryptographically verified by GitHub. After
-approval, CI builds a signed Maven bundle, waits for Central publication,
-verifies anonymous resolution, and then creates the GitHub Release. Snapshot
-artifacts are not published.
+approval, CI builds a signed Maven bundle, waits for Central validation,
+and automatically creates the GitHub Release. The deployment uses
+`publishingType=USER_MANAGED` and waits for you to click **Publish** in
+[Central Portal](https://central.sonatype.com/publishing). Snapshot artifacts
+are not published.
 
 Local release builds accept either an ASCII-armored private key in the
 `signingKey` Gradle property or a local GPG key selection via

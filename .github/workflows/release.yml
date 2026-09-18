@@ -83,7 +83,7 @@ jobs:
         run: ./gradlew --no-daemon clean check javadoc -PreleaseVersion="${RELEASE_VERSION}"
 
   publish:
-    name: Publish to Maven Central
+    name: Stage Maven Central deployment
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -148,7 +148,7 @@ jobs:
             curl --request POST --silent --show-error --fail-with-body \
               --header "Authorization: Bearer ${central_token}" \
               --form "bundle=@build/central/central-bundle.zip;type=application/octet-stream" \
-              "https://central.sonatype.com/api/v1/publisher/upload?name=com.webjetcms%3Awebjet-ai%3A${RELEASE_VERSION}&publishingType=AUTOMATIC"
+              "https://central.sonatype.com/api/v1/publisher/upload?name=com.webjetcms%3Awebjet-ai%3A${RELEASE_VERSION}&publishingType=USER_MANAGED"
           )"
           deployment_id="$(printf '%s' "${deployment_id}" | tr -d '\r\n')"
           if [[ ! "${deployment_id}" =~ ^[0-9a-fA-F-]{36}$ ]]; then
@@ -158,7 +158,8 @@ jobs:
           echo "deployment-id=${deployment_id}" >> "${GITHUB_OUTPUT}"
           echo "Central deployment: ${deployment_id}"
 
-      - name: Wait for Maven Central publication
+      - name: Wait for Maven Central validation
+        id: central-validation
         shell: bash
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
@@ -168,7 +169,7 @@ jobs:
           set -euo pipefail
           central_token="$(printf '%s:%s' "${CENTRAL_USERNAME}" "${CENTRAL_PASSWORD}" | base64 | tr -d '\r\n')"
           echo "::add-mask::${central_token}"
-          published=false
+          validated=false
           for attempt in $(seq 1 120); do
             status_json="$(
               curl --request POST --silent --show-error --fail-with-body \
@@ -178,15 +179,15 @@ jobs:
             state="$(printf '%s' "${status_json}" | jq -er '.deploymentState')"
             echo "Central state (${attempt}/120): ${state}"
             case "${state}" in
-              PUBLISHED)
-                published=true
+              VALIDATED|PUBLISHING|PUBLISHED)
+                validated=true
                 break
                 ;;
               FAILED)
                 printf '%s' "${status_json}" | jq -r '.errors // []'
                 exit 1
                 ;;
-              PENDING|VALIDATING|VALIDATED|PUBLISHING)
+              PENDING|VALIDATING)
                 sleep 15
                 ;;
               *)
@@ -195,12 +196,15 @@ jobs:
                 ;;
             esac
           done
-          if [[ "${published}" != true ]]; then
-            echo "Timed out waiting for Maven Central publication." >&2
+          if [[ "${validated}" != true ]]; then
+            echo "Timed out waiting for Maven Central validation." >&2
             exit 1
           fi
+          echo "state=${state}" >> "${GITHUB_OUTPUT}"
+          echo 'Review the deployment and publish it manually at https://central.sonatype.com/publishing'
 
       - name: Verify anonymous Maven Central resolution
+        if: steps.central-validation.outputs.state == 'PUBLISHED'
         shell: bash
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
