@@ -22,7 +22,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.webjetcms:webjet-ai:2.0.0'
+    implementation 'com.webjetcms:webjet-ai:2.0.4'
 }
 ```
 
@@ -32,12 +32,12 @@ Maven:
 <dependency>
     <groupId>com.webjetcms</groupId>
     <artifactId>webjet-ai</artifactId>
-    <version>2.0.0</version>
+    <version>2.0.4</version>
 </dependency>
 ```
 
-Version `2.0.0` also publishes the optional local runtime as the separate
-`com.webjetcms:webjet-ai-local:2.0.0` artifact. Cloud-provider applications only
+Version `2.0.4` also publishes the optional local runtime as the separate
+`com.webjetcms:webjet-ai-local:2.0.4` artifact. Cloud-provider applications only
 need the core `webjet-ai` dependency shown above.
 
 ## Minimal usage
@@ -360,7 +360,7 @@ graph is resolved. Copying only `webjet-ai-local.jar` is not sufficient.
 
 ```gradle
 dependencies {
-    implementation 'com.webjetcms:webjet-ai-local:2.0.0'
+    implementation 'com.webjetcms:webjet-ai-local:2.0.4'
 }
 ```
 
@@ -637,15 +637,15 @@ composite build instead of publishing to `mavenLocal()`:
 ./gradlew --include-build ../webjet-ai test
 ```
 
-To test the `2.0.0` release candidate through a normal Maven dependency graph
+To test the `2.0.4` release candidate through a normal Maven dependency graph
 instead:
 
 ```shell
-./gradlew -PreleaseVersion=2.0.0 publishToMavenLocal
+./gradlew -PreleaseVersion=2.0.4 publishToMavenLocal
 ```
 
 Then add `mavenLocal()` and depend on
-`com.webjetcms:webjet-ai-local:2.0.0` in the consuming project.
+`com.webjetcms:webjet-ai-local:2.0.4` in the consuming project.
 
 The opt-in production-bundle smoke test performs no download:
 
@@ -671,7 +671,7 @@ keyring, matching traditional Maven `gpg:sign-and-deploy-file` usage. Keep
 these properties in `~/.gradle/gradle.properties` or CI secrets, for example:
 
 ```properties
-releaseVersion=2.0.0
+releaseVersion=2.0.4
 signingKeyId=0x36F2327F
 ```
 
@@ -679,7 +679,7 @@ If you sign with an in-memory exported private key instead, also provide
 `signingPassword`. To create the Central bundle locally, run:
 
 ```shell
-./gradlew centralBundle -PreleaseVersion=2.0.0 -PsigningKeyId=0x36F2327F
+./gradlew centralBundle -PreleaseVersion=2.0.4 -PsigningKeyId=0x36F2327F
 ```
 
 During a local interactive run, Gradle prints the resolved `releaseVersion` and
@@ -692,7 +692,7 @@ both stable and `-SNAPSHOT` semantic versions. Configure `githubUsername` and
 `GITHUB_TOKEN`, then run:
 
 ```shell
-./gradlew publishAllPublicationsToGitHubPackagesRepository -PreleaseVersion=2.0.0-SNAPSHOT
+./gradlew publishAllPublicationsToGitHubPackagesRepository -PreleaseVersion=2.0.4-SNAPSHOT
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development rules,
