@@ -33,6 +33,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import com.webjetcms.ai.AiOperation;
+import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
@@ -43,6 +45,48 @@ class LocalProviderSupportTest {
 
     @TempDir
     Path temporaryDirectory;
+
+    @Test
+    void rejectsChatAndContinuationWithoutNativeResources() throws Exception {
+        for (AiProvider provider : providersWithoutNativeResources()) {
+            try (provider) {
+                for (AiOperation operation : List.of(AiOperation.CHAT, AiOperation.TEXT)) {
+                    AiRequest request = AiRequest.builder().operation(operation).userPrompt("Question")
+                        .store(true).previousResponseId("previous").build();
+                    String message = operation == AiOperation.CHAT
+                        ? "CHAT is not supported by this provider" : "previousResponseId is supported only for CHAT requests";
+                    assertEquals(message, assertThrows(AiProviderException.class,
+                        () -> provider.execute(request, AiProviderConfig.empty())).getMessage(), provider.id());
+                    assertEquals(message, assertThrows(AiProviderException.class,
+                        () -> provider.stream(request, AiProviderConfig.empty(), delta -> { })).getMessage(), provider.id());
+                }
+            }
+        }
+    }
+
+    private static List<AiProvider> providersWithoutNativeResources() throws Exception {
+        var translation = ApprovedSeq2SeqModelCatalog.load(
+            ApprovedSeq2SeqModelCatalog.TRANSLATION_RESOURCE, "translation model");
+        var translationBundle = new Seq2SeqBundleValidator.PreparedBundle(null,
+            new Seq2SeqBundleManifest(translation, translation.variant(translation.defaultVariant())));
+        var embedding = ApprovedEmbeddingModelCatalog.load().model("multilingual-e5-small");
+        var embeddingBundle = new VerifiedBundleExtractor.Result<>(null,
+            new EmbeddingBundleManifest(embedding, embedding.variants().get(0)));
+        return List.of(
+            constructProvider(LocalGenerationModelProvider.class, new VerifiedBundleExtractor.Result<>(null, null), null, 200),
+            constructProvider(LocalTranslationModelProvider.class, translationBundle,
+                new NativeSeq2SeqRuntimeFactory.Resources<>(null, null), null, null, null),
+            constructProvider(LocalEmbeddingModelProvider.class, embeddingBundle,
+                new NativeEmbeddingRuntimeFactory.Resources(null, null), 8));
+    }
+
+    private static AiProvider constructProvider(Class<? extends AiProvider> type, Object... arguments) throws Exception {
+        var constructors = type.getDeclaredConstructors();
+        assertEquals(1, constructors.length);
+        var constructor = constructors[0];
+        constructor.setAccessible(true);
+        return type.cast(constructor.newInstance(arguments));
+    }
 
     @Test
     void publicBoundaryRedactsConfiguredSecrets() {

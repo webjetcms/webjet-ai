@@ -47,6 +47,7 @@ import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.internal.ImageOptionValidator;
 import com.webjetcms.ai.security.PromptInjectionDefense;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
@@ -808,6 +809,7 @@ public final class OpenRouterProvider implements AiProvider {
         if (request == null) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter request is required.");
         }
+        ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
         if (isBlank(request.model())) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter model is required.");
         }

@@ -11,6 +11,7 @@ import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.TranslationOptions;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.provider.local.NativeSeq2SeqRuntimeFactory.Resources;
 import com.webjetcms.ai.provider.local.Seq2SeqBundleValidator.PreparedBundle;
 
@@ -90,8 +91,9 @@ public final class LocalTranslationModelProvider extends Seq2SeqProvider<NativeT
      */
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return LocalProviderBoundary.invoke(config, () ->
-            read(() -> {
+        return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
+            return read(() -> {
                 ResolvedRequest resolved = validateAndResolve(request);
                 try {
                     NativeTokenizerBatch source = tokenizer.encode(
@@ -105,8 +107,8 @@ public final class LocalTranslationModelProvider extends Seq2SeqProvider<NativeT
                 } catch (Exception exception) {
                     throw new AiProviderException(PROVIDER_ID, "Local translation inference failed", exception);
                 }
-            })
-        );
+            });
+        });
     }
 
     /** Rejects streaming because the local sequence-to-sequence runtime returns completed text.
@@ -120,6 +122,7 @@ public final class LocalTranslationModelProvider extends Seq2SeqProvider<NativeT
     public AiResponse stream(AiRequest request, AiProviderConfig config, AiStreamListener listener)
         throws AiProviderException {
         return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
             throw new AiProviderException(PROVIDER_ID,
                 "Streaming is not supported by the local translation model provider");
         });

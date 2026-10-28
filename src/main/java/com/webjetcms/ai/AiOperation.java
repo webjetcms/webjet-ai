@@ -9,5 +9,8 @@ public enum AiOperation {
     GENERATE_IMAGE,
 
     /** Edits an input image according to a text prompt. */
-    EDIT_IMAGE
+    EDIT_IMAGE,
+
+    /** Produces a conversational text response with provider-managed context and explicit storage opt-in. */
+    CHAT
 }

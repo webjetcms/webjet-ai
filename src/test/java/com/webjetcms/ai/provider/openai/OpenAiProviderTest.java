@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpRequest;
 import org.apache.http.HttpEntity;
@@ -62,6 +63,111 @@ import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 class OpenAiProviderTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void handlesChatContinuationAndFreshRequests(boolean streaming) throws Exception {
+        String completion = completedChat("resp_completed", "Hello");
+        RecordingHttpClient transport = new RecordingHttpClient(200,
+            streaming ? chatStream("Hello", completion) : completion);
+        try (AiClient client = AiClient.of(new OpenAiProvider(transport))) {
+            for (String previousId : new String[] {null, "resp_previous", null}) {
+                AiRequest request = chatRequest(previousId);
+                List<String> deltas = new ArrayList<>();
+                AiResponse response = streaming
+                    ? client.stream(request, embeddingConfig("key", "trusted"), deltas::add)
+                    : client.execute(request, embeddingConfig("key", "trusted"));
+                assertEquals("resp_completed", response.responseId());
+                assertEquals("Hello", response.text());
+                assertEquals(7, response.usage().totalTokens());
+                assertEquals(streaming ? List.of("Hello") : List.of(), deltas);
+                JsonNode body = MAPPER.readTree(transport.requestBody);
+                assertEquals(previousId, body.path("previous_response_id").textValue());
+                assertEquals(previousId != null, body.has("previous_response_id"));
+                assertTrue(body.path("store").asBoolean());
+                assertEquals(streaming, body.path("stream").asBoolean());
+                assertEquals(PromptInjectionDefense.hardenChatInstructions(request.instructions()), body.path("instructions").asText());
+                assertEquals(1, body.path("input").size());
+                assertEquals("user", body.path("input").get(0).path("role").asText());
+            }
+        }
+        assertEquals("https://example.test/custom/v1/responses", transport.uri);
+        assertEquals(3, transport.calls);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "{not-json", "null", "{\"status\":\"completed\",\"output_text\":\"Hello\"}",
+        "{\"id\":\"resp_bad\",\"status\":\"incomplete\",\"output_text\":\"Hello\"}",
+        "{\"id\":\"resp_bad\",\"status\":\"completed\",\"output_text\":\" \"}",
+        "{\"id\":\"resp_bad\",\"status\":\"completed\",\"output_text\":\"Hello\",\"output\":[{\"type\":\"function_call\"}]}"
+    })
+    void rejectsUnusableChatResponsesWithoutRetrying(String payload) throws Exception {
+        for (boolean streaming : List.of(false, true)) {
+            RecordingHttpClient transport = new RecordingHttpClient(200, streaming ? chatStream("Hello", payload) : payload);
+            try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+                AiProviderException exception = assertThrows(AiProviderException.class, () -> {
+                    if (streaming) provider.stream(chatRequest("previous"), embeddingConfig("key", "trusted"), ignored -> { });
+                    else provider.execute(chatRequest("previous"), embeddingConfig("key", "trusted"));
+                });
+                assertFalse(exception.retryable());
+            }
+            assertEquals(1, transport.calls);
+        }
+    }
+
+    @Test
+    void rejectsMalformedOrMismatchedChatStreams() throws Exception {
+        for (String stream : List.of(
+            chatStream("partial", completedChat("resp_done", "complete")),
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: [DONE]\n\n",
+            "data: null\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.completed\",\"delta\":\"text\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":42}\n\n"
+        )) {
+            RecordingHttpClient transport = new RecordingHttpClient(200, stream);
+            try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+                assertThrows(AiProviderException.class, () -> provider.stream(
+                    chatRequest("previous"), embeddingConfig("key", "trusted"), ignored -> { }));
+            }
+            assertEquals(1, transport.calls);
+        }
+    }
+
+    @Test
+    void validatesDirectChatRequestsBeforeTransport() throws Exception {
+        RecordingHttpClient transport = new RecordingHttpClient(200, "{}");
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            for (AiRequest request : List.of(
+                AiRequest.builder().operation(AiOperation.CHAT).model("gpt-test").userPrompt("Hello").build(),
+                chatRequest(" "),
+                AiRequest.builder().model("gpt-test").userPrompt("Hello").previousResponseId("previous").build()
+            )) {
+                assertThrows(AiProviderException.class, () -> provider.execute(request, embeddingConfig("key", "trusted")));
+                assertThrows(AiProviderException.class, () -> provider.stream(request, embeddingConfig("key", "trusted"), ignored -> { }));
+            }
+        }
+        assertEquals(0, transport.calls);
+    }
+
+    private static AiRequest chatRequest(String previousId) {
+        return AiRequest.builder().operation(AiOperation.CHAT).model("gpt-test").store(true)
+            .instructions("Answer follow-up questions.").userPrompt("Hello").previousResponseId(previousId).build();
+    }
+
+    private static String completedChat(String id, String text) {
+        return """
+            {"id":"%s","status":"completed","output":[{"type":"message","role":"assistant",
+            "status":"completed","content":[{"type":"output_text","text":"%s"}]}],
+            "usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}
+            """.formatted(id, text).replace("\n", "");
+    }
+
+    private static String chatStream(String delta, String completion) {
+        return "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_created\"}}\n\n"
+            + "data: " + MAPPER.createObjectNode().put("type", "response.output_text.delta").put("delta", delta)
+            + "\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + completion + "}\n\n";
+    }
 
     @Test
     void exposesModelAndOperationSpecificImageOptions() throws Exception {

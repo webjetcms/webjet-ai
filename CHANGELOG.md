@@ -5,6 +5,22 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.0]
+
+### Added
+
+- Text-only `AiOperation.CHAT` with provider-managed conversation history through
+  OpenAI Responses and Gemini Interactions, supporting both completed responses
+  and streamed text. OpenRouter and local providers do not support `CHAT`.
+- Conversation continuation through `AiRequest.Builder.previousResponseId(...)`
+  using the same provider's `AiResponse.responseId()`, without replaying prior
+  messages. Continuation IDs are accepted only for `CHAT` requests.
+- Explicit `store(true)` opt-in for every `CHAT` request; provider-side storage
+  remains disabled by default. Chat requests reject binary input, image options,
+  translation options, and blank text.
+- Chat-specific prompt defenses that allow conversational questions while keeping
+  untrusted content subordinate to security rules and trusted task instructions.
+
 ### Changed
 
 - Maven Central releases now wait for manual publication in Central Portal after

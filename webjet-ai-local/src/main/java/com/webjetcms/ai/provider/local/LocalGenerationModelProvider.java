@@ -19,6 +19,7 @@ import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.ModelInfo;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.provider.local.ApprovedSeq2SeqModelCatalog.ModelDefinition;
 import com.webjetcms.ai.provider.local.NativeSeq2SeqRuntimeFactory.Resources;
 import com.webjetcms.ai.provider.local.Seq2SeqBundleValidator.PreparedBundle;
@@ -123,8 +124,9 @@ public final class LocalGenerationModelProvider implements AiProvider {
      */
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return LocalProviderBoundary.invoke(config, () ->
-            read(() -> {
+        return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
+            return read(() -> {
                 validate(request);
                 String prompt = chatPrompt(request);
                 try {
@@ -144,8 +146,8 @@ public final class LocalGenerationModelProvider implements AiProvider {
                 } catch (Exception exception) {
                     throw new AiProviderException(PROVIDER_ID, "Local text generation failed", exception);
                 }
-            })
-        );
+            });
+        });
     }
 
     static AiResponse generationResponse(String generated) {
@@ -172,6 +174,7 @@ public final class LocalGenerationModelProvider implements AiProvider {
     public AiResponse stream(AiRequest request, AiProviderConfig config, AiStreamListener listener)
         throws AiProviderException {
         return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
             throw new AiProviderException(PROVIDER_ID,
                 "Streaming is not supported by the local generation provider");
         });

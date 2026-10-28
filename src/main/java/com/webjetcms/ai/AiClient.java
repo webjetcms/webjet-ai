@@ -10,6 +10,7 @@ import java.util.Objects;
 import java.util.Set;
 
 import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 
 /**
  * Owns a fixed set of AI provider instances and selects them by exact identifier.
@@ -444,8 +445,9 @@ public final class AiClient implements AutoCloseable {
             .redactSecrets(config);
     }
 
-    private static AiRequest prepareRequest(AiProvider provider, AiRequest request) {
+    private static AiRequest prepareRequest(AiProvider provider, AiRequest request) throws AiProviderException {
         if (request == null) return null;
+        ChatRequestValidator.validate(provider.id(), request);
         AiInputHandling handling = Objects.requireNonNull(
             provider.inputHandling(request.operation()),
             "provider.inputHandling"

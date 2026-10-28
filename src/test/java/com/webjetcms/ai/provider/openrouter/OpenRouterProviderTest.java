@@ -55,6 +55,24 @@ class OpenRouterProviderTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
+    void rejectsChatAndContinuationBeforeTransport() throws Exception {
+        RecordingHttpClient transport = new RecordingHttpClient(200, "{}");
+        try (OpenRouterProvider provider = new OpenRouterProvider(transport, MAPPER)) {
+            for (AiOperation operation : List.of(AiOperation.CHAT, AiOperation.TEXT)) {
+                AiRequest request = AiRequest.builder().operation(operation).model("model")
+                    .userPrompt("Current question").store(true).previousResponseId("previous").build();
+                String message = operation == AiOperation.CHAT
+                    ? "CHAT is not supported by this provider" : "previousResponseId is supported only for CHAT requests";
+                assertEquals(message, assertThrows(AiProviderException.class,
+                    () -> provider.execute(request, testConfig())).getMessage());
+                assertEquals(message, assertThrows(AiProviderException.class,
+                    () -> provider.stream(request, testConfig(), delta -> { })).getMessage());
+            }
+        }
+        assertEquals(0, transport.calls);
+    }
+
+    @Test
     void exposesImmutableSnapshotOptionsForKnownImageModels() throws Exception {
         try (OpenRouterProvider provider = new OpenRouterProvider()) {
             Map<String, ImageOptionDefinition> openAi = provider.imageOptions(

@@ -18,6 +18,7 @@ import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.provider.local.ApprovedEmbeddingModelCatalog.EmbeddingModelDefinition;
 import com.webjetcms.ai.provider.local.NativeEmbeddingInferenceSession.PoolingResult;
 import com.webjetcms.ai.provider.local.NativeEmbeddingRuntimeFactory.Resources;
@@ -124,6 +125,7 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
         return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
             throw new AiProviderException(PROVIDER_ID,
                 "Generation is not supported by the local embedding model provider");
         });
@@ -136,6 +138,7 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
         AiStreamListener listener
     ) throws AiProviderException {
         return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
             throw new AiProviderException(PROVIDER_ID,
                 "Streaming is not supported by the local embedding model provider");
         });

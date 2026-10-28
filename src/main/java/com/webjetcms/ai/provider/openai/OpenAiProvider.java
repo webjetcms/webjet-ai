@@ -49,6 +49,7 @@ import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.image.ImageOptions;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
 import com.webjetcms.ai.security.PromptInjectionDefense;
@@ -133,12 +134,13 @@ public final class OpenAiProvider implements AiProvider {
 
     private AiResponse executeInternal(AiRequest request, AiProviderConfig config) throws AiProviderException {
         requireRequest(request);
+        ChatRequestValidator.validate(PROVIDER_ID, request);
         requireConfigured(config);
         requireModel(request);
 
         try {
             return switch (request.operation()) {
-                case TEXT -> executeText(request, config);
+                case TEXT, CHAT -> executeText(request, config);
                 case GENERATE_IMAGE -> generateImage(request, config);
                 case EDIT_IMAGE -> editImage(request, config);
             };
@@ -205,12 +207,13 @@ public final class OpenAiProvider implements AiProvider {
     ) throws AiProviderException {
 
         requireRequest(request);
+        ChatRequestValidator.validate(PROVIDER_ID, request);
         if (listener == null) {
             throw new AiProviderException(PROVIDER_ID, "OpenAI stream listener is required");
         }
         requireConfigured(config);
         requireModel(request);
-        if (request.operation() != AiOperation.TEXT) {
+        if (request.operation() != AiOperation.TEXT && request.operation() != AiOperation.CHAT) {
             throw new AiProviderException(PROVIDER_ID, "OpenAI streaming is supported only for text requests");
         }
 
@@ -234,8 +237,14 @@ public final class OpenAiProvider implements AiProvider {
             Charset charset = responseCharset(entity);
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(entity.getContent(), charset))) {
-                OpenAiStreamParser.StreamResult result = OpenAiStreamParser.parse(reader, listener);
-                return new AiResponse(result.text(), List.of(), result.usage(), result.finishReason());
+                OpenAiStreamParser.StreamResult result = OpenAiStreamParser.parse(
+                    reader,
+                    listener,
+                    request.operation() == AiOperation.CHAT
+                );
+                return new AiResponse(
+                    result.text(), List.of(), result.usage(), result.finishReason(), result.responseId()
+                );
             }
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
@@ -255,7 +264,9 @@ public final class OpenAiProvider implements AiProvider {
         String response = executeForString(post, config);
 
         try {
-            return parseTextResponse(response);
+            return request.operation() == AiOperation.CHAT
+                ? parseChatResponse(MAPPER.readTree(response), response)
+                : parseTextResponse(response);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (IOException | RuntimeException exception) {
@@ -392,11 +403,18 @@ public final class OpenAiProvider implements AiProvider {
         body.put("store", request.store());
 
         ArrayNode inputs = body.putArray("input");
-        addTextInput(
-            inputs,
-            "system",
-            PromptInjectionDefense.hardenSystemInstructions(request.instructions())
-        );
+        if (request.operation() == AiOperation.CHAT) {
+            body.put("instructions", PromptInjectionDefense.hardenChatInstructions(request.instructions()));
+            if (request.previousResponseId() != null) {
+                body.put("previous_response_id", request.previousResponseId());
+            }
+        } else {
+            addTextInput(
+                inputs,
+                "system",
+                PromptInjectionDefense.hardenSystemInstructions(request.instructions())
+            );
+        }
         addProtectedInput(inputs, request.inputText(), UntrustedSource.INPUT_TEXT);
         addProtectedInput(inputs, request.userPrompt(), UntrustedSource.USER_PROMPT);
 
@@ -472,6 +490,61 @@ public final class OpenAiProvider implements AiProvider {
         }
 
         return new AiResponse(text, List.of(), parseUsage(root.path("usage")), responseStatus(root));
+    }
+
+    static AiResponse parseChatResponse(JsonNode root, String response) throws AiProviderException {
+        ensureSuccessfulResponse(root, response);
+        if ("completed".equals(textOrNull(root.get("status"))) == false || root.hasNonNull("error")) {
+            throw invalidResponse("OpenAI chat response is not completed", response, null);
+        }
+        JsonNode id = root.get("id");
+        if (id == null || id.isTextual() == false || id.textValue().isBlank()) {
+            throw invalidResponse("OpenAI chat response does not contain a response ID", response, null);
+        }
+
+        JsonNode outputs = root.path("output");
+        if (root.hasNonNull("output") && outputs.isArray() == false) {
+            throw invalidResponse("OpenAI chat response contains invalid output", response, null);
+        }
+        for (JsonNode output : outputs) {
+            String type = textOrNull(output.get("type"));
+            if ("message".equals(type) == false && "reasoning".equals(type) == false) {
+                throw invalidResponse("OpenAI chat response contains an unsupported output action", response, null);
+            }
+            if (output.hasNonNull("status")
+                && "completed".equals(textOrNull(output.get("status"))) == false) {
+                throw invalidResponse("OpenAI chat output is not completed", response, null);
+            }
+        }
+
+        StringBuilder text = new StringBuilder();
+        JsonNode outputText = root.get("output_text");
+        if (outputText != null && outputText.isTextual()) {
+            text.append(outputText.textValue());
+        } else {
+            if (outputs.isArray()) {
+                for (JsonNode output : outputs) {
+                    if ("message".equals(textOrNull(output.get("type"))) == false) {
+                        continue;
+                    }
+                    JsonNode content = output.path("content");
+                    if (content.isArray() == false) {
+                        continue;
+                    }
+                    for (JsonNode part : content) {
+                        JsonNode partText = part.get("text");
+                        if ("output_text".equals(textOrNull(part.get("type")))
+                            && partText != null && partText.isTextual()) {
+                            text.append(partText.textValue());
+                        }
+                    }
+                }
+            }
+        }
+        if (text.toString().isBlank()) {
+            throw invalidResponse("OpenAI chat response does not contain usable output text", response, null);
+        }
+        return new AiResponse(text.toString(), List.of(), parseUsage(root.path("usage")), "completed", id.textValue());
     }
 
     static AiResponse parseImageResponse(String response) throws IOException, AiProviderException {
