@@ -34,6 +34,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.webjetcms.ai.AiCancellationToken;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
@@ -49,6 +50,7 @@ import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.image.ImageOptions;
+import com.webjetcms.ai.internal.CancellationSupport;
 import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
@@ -129,10 +131,22 @@ public final class OpenAiProvider implements AiProvider {
 
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return invokeAtBoundary(config, () -> executeInternal(request, config));
+        return execute(request, config, AiCancellationToken.none());
     }
 
-    private AiResponse executeInternal(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    @Override
+    public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
+        return invokeAtBoundary(config, () -> CancellationSupport.call(
+            PROVIDER_ID, token, () -> executeInternal(request, config, token)
+        ));
+    }
+
+    private AiResponse executeInternal(
+        AiRequest request,
+        AiProviderConfig config,
+        AiCancellationToken token
+    ) throws AiProviderException {
         requireRequest(request);
         ChatRequestValidator.validate(PROVIDER_ID, request);
         requireConfigured(config);
@@ -140,9 +154,9 @@ public final class OpenAiProvider implements AiProvider {
 
         try {
             return switch (request.operation()) {
-                case TEXT, CHAT -> executeText(request, config);
-                case GENERATE_IMAGE -> generateImage(request, config);
-                case EDIT_IMAGE -> editImage(request, config);
+                case TEXT, CHAT -> executeText(request, config, token);
+                case GENERATE_IMAGE -> generateImage(request, config, token);
+                case EDIT_IMAGE -> editImage(request, config, token);
             };
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
@@ -197,13 +211,28 @@ public final class OpenAiProvider implements AiProvider {
     public AiResponse stream(AiRequest request, AiProviderConfig config, AiStreamListener listener)
         throws AiProviderException {
 
-        return invokeAtBoundary(config, () -> streamInternal(request, config, listener));
+        return stream(request, config, listener, AiCancellationToken.none());
+    }
+
+    @Override
+    public AiResponse stream(
+        AiRequest request,
+        AiProviderConfig config,
+        AiStreamListener listener,
+        AiCancellationToken token
+    ) throws AiProviderException {
+        return invokeAtBoundary(config, () -> CancellationSupport.call(
+            PROVIDER_ID, token, () -> streamInternal(
+                request, config, CancellationSupport.listener(PROVIDER_ID, token, listener), token
+            )
+        ));
     }
 
     private AiResponse streamInternal(
         AiRequest request,
         AiProviderConfig config,
-        AiStreamListener listener
+        AiStreamListener listener,
+        AiCancellationToken token
     ) throws AiProviderException {
 
         requireRequest(request);
@@ -223,7 +252,8 @@ public final class OpenAiProvider implements AiProvider {
         HttpPost post = jsonPost(endpoint(config, RESPONSES_PATH), body);
         prepare(post, config, "text/event-stream");
 
-        try (CloseableHttpResponse response = httpClient.execute(post)) {
+        try (AiCancellationToken.Registration cancellation = token.onCancel(post::abort);
+             CloseableHttpResponse response = httpClient.execute(post)) {
             int statusCode = response.getStatusLine().getStatusCode();
             if (isSuccessful(statusCode) == false) {
                 String bodyText = readEntity(response.getEntity());
@@ -258,10 +288,11 @@ public final class OpenAiProvider implements AiProvider {
         httpClient.close();
     }
 
-    private AiResponse executeText(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    private AiResponse executeText(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
         HttpPost post = jsonPost(endpoint(config, RESPONSES_PATH), buildTextBody(request));
         prepare(post, config, "application/json");
-        String response = executeForString(post, config);
+        String response = executeForString(post, config, token);
 
         try {
             return request.operation() == AiOperation.CHAT
@@ -275,7 +306,8 @@ public final class OpenAiProvider implements AiProvider {
         }
     }
 
-    private AiResponse generateImage(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    private AiResponse generateImage(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
         if (hasMeaningfulImagePrompt(request) == false) {
             throw new AiProviderException(PROVIDER_ID, "An image prompt is required");
         }
@@ -292,10 +324,11 @@ public final class OpenAiProvider implements AiProvider {
 
         HttpPost post = jsonPost(endpoint(config, IMAGE_GENERATIONS_PATH), body);
         prepare(post, config, "application/json");
-        return executeImage(post, config, (String) imageOptions.get("output_format"));
+        return executeImage(post, config, (String) imageOptions.get("output_format"), token);
     }
 
-    private AiResponse editImage(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    private AiResponse editImage(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
         if ("dall-e-3".equals(request.model())) {
             throw new AiProviderException(PROVIDER_ID,
                 "Image editing with " + request.model() + " is not supported by this provider adapter");
@@ -315,7 +348,7 @@ public final class OpenAiProvider implements AiProvider {
         HttpPost post = new HttpPost(endpoint(config, IMAGE_EDITS_PATH));
         post.setEntity(buildImageEditEntity(request, input, prompt, imageOptions));
         prepare(post, config, "application/json");
-        return executeImage(post, config, (String) imageOptions.get("output_format"));
+        return executeImage(post, config, (String) imageOptions.get("output_format"), token);
     }
 
     static HttpEntity buildImageEditEntity(
@@ -384,9 +417,10 @@ public final class OpenAiProvider implements AiProvider {
     private AiResponse executeImage(
         HttpPost post,
         AiProviderConfig config,
-        String requestedFormat
+        String requestedFormat,
+        AiCancellationToken token
     ) throws AiProviderException {
-        String response = executeForString(post, config);
+        String response = executeForString(post, config, token);
         try {
             return parseImageResponse(response, requestedFormat);
         } catch (AiProviderException exception) {
@@ -738,10 +772,27 @@ public final class OpenAiProvider implements AiProvider {
         return executeForResult(request, config).body();
     }
 
+    private String executeForString(
+        HttpRequestBase request,
+        AiProviderConfig config,
+        AiCancellationToken token
+    ) throws AiProviderException {
+        return executeForResult(request, config, token).body();
+    }
+
     private HttpResult executeForResult(HttpRequestBase request, AiProviderConfig config)
         throws AiProviderException {
+        return executeForResult(request, config, AiCancellationToken.none());
+    }
+
+    private HttpResult executeForResult(
+        HttpRequestBase request,
+        AiProviderConfig config,
+        AiCancellationToken token
+    ) throws AiProviderException {
         prepare(request, config, "application/json");
-        try (CloseableHttpResponse response = httpClient.execute(request)) {
+        try (AiCancellationToken.Registration cancellation = token.onCancel(request::abort);
+             CloseableHttpResponse response = httpClient.execute(request)) {
             int statusCode = response.getStatusLine().getStatusCode();
             String body = readEntity(response.getEntity());
             if (isSuccessful(statusCode) == false) {

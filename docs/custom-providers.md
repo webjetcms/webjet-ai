@@ -84,6 +84,28 @@ The default `AiProvider.embed(...)` implementation reports that embeddings are n
 supported. Override it only when the backend supports embeddings. Override `close()`
 when the provider owns an HTTP client, executor, or another closeable resource.
 
+The `execute(request, config, token)` and `stream(request, config, listener, token)`
+overloads have compatibility defaults. They check the `AiCancellationToken` before
+and after execution and around streamed callbacks, but cannot interrupt the old
+blocking implementation. Override them when your transport or runtime supports
+active cancellation. Keep the token separate from shared configuration and request
+values; never keep the current request or token in a provider instance field.
+
+Call `token.throwIfCancelled(id())` before starting work. Register only that call's
+abort action with `token.onCancel(...)` and close the returned `Registration` in a
+`finally` block or try-with-resources after response cleanup. Registration handles
+tokens cancelled before or during registration. Hooks must be short and must not
+close a shared client, pool, or native runtime. Runtime failures from hooks are
+ignored so other registered abort actions can run.
+
+Check the token before returning success and before delivering further fragments.
+On failure, check cancellation before classifying transport errors, and preserve
+`AiErrorCategory.CANCELLED` through `redactSecrets(config)`. Do not interpret every
+`InterruptedIOException` as cancellation: that hierarchy also includes timeouts.
+Keep redaction and normal error handling for failures unrelated to cancellation.
+An already dispatched callback may finish; the host remains responsible for
+rejecting results belonging to an obsolete chat or editor.
+
 A provider instance is reused for calls made by its owning client and may receive
 concurrent calls. Keep mutable state thread-safe and reuse a pooled transport instead
 of creating a new HTTP client for every request. Treat the provider ID as a public

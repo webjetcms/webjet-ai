@@ -38,6 +38,13 @@ public final class AiProviderException extends Exception {
     private final boolean retryable;
 
     /**
+     * Stable failure classification, independent of provider message text.
+     *
+     * @serial failure category, or {@code null} in older serialized exceptions
+     */
+    private final AiErrorCategory category;
+
+    /**
      * Creates a non-retryable provider failure without an HTTP response.
      *
      * @param providerId stable identifier of the provider that failed
@@ -82,11 +89,31 @@ public final class AiProviderException extends Exception {
      * @param cause underlying validation, transport, parsing, or callback failure
      */
     public AiProviderException(String providerId, int statusCode, String message, String rawResponse, boolean retryable, Throwable cause) {
+        this(providerId, statusCode, message, rawResponse, retryable, cause, AiErrorCategory.UNKNOWN);
+    }
+
+    /**
+     * Creates a categorized provider failure while preserving HTTP diagnostics.
+     * Cancellation failures are always non-retryable.
+     *
+     * @param providerId stable identifier of the provider that failed
+     * @param statusCode HTTP status code, or {@code -1} if unavailable
+     * @param message human-readable failure description
+     * @param rawResponse unparsed provider response, or {@code null} if unavailable
+     * @param retryable whether retrying the same operation may succeed
+     * @param cause underlying failure
+     * @param category stable category, or {@code null} for {@link AiErrorCategory#UNKNOWN}
+     */
+    public AiProviderException(
+        String providerId, int statusCode, String message, String rawResponse,
+        boolean retryable, Throwable cause, AiErrorCategory category
+    ) {
         super(message, cause);
         this.providerId = providerId;
         this.statusCode = statusCode;
         this.rawResponse = rawResponse;
-        this.retryable = retryable;
+        this.category = category == null ? AiErrorCategory.UNKNOWN : category;
+        this.retryable = this.category != AiErrorCategory.CANCELLED && retryable;
     }
 
     /**
@@ -120,6 +147,13 @@ public final class AiProviderException extends Exception {
     public boolean retryable() { return retryable; }
 
     /**
+     * Returns the stable failure category, including for older serialized exceptions.
+     *
+     * @return category, or {@link AiErrorCategory#UNKNOWN} when no classification is available
+     */
+    public AiErrorCategory category() { return category == null ? AiErrorCategory.UNKNOWN : category; }
+
+    /**
      * Returns an equivalent failure with configured credentials removed from every
      * exposed text field, cause, suppressed exception, and stack-trace element.
      * Provider implementations should call this before a failure crosses their
@@ -139,7 +173,8 @@ public final class AiProviderException extends Exception {
             config.redactSensitiveValue(getMessage()),
             config.redactSensitiveValue(rawResponse),
             retryable,
-            redactThrowable(getCause(), config, visited)
+            redactThrowable(getCause(), config, visited),
+            category()
         );
         redacted.setStackTrace(redactStackTrace(getStackTrace(), config));
         for (Throwable suppressed : getSuppressed()) {

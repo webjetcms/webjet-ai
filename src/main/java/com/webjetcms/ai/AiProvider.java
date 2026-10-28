@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.internal.CancellationSupport;
 
 /**
  * Provider contract implemented by each supported AI backend.
@@ -88,6 +89,28 @@ public interface AiProvider extends AutoCloseable {
     AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException;
 
     /**
+     * Executes a request with a per-call cancellation token.
+     *
+     * <p>The compatibility default checks before and after the existing blocking call.
+     * Override this method to abort transport or cooperatively stop computation.
+     * Cancellation observed at the final check takes precedence over a result or failure.</p>
+     *
+     * @param request provider-neutral operation and input data
+     * @param config credentials, endpoint, and transport settings
+     * @param token non-null token created for this call
+     * @return the completed response
+     * @throws AiProviderException if cancelled or the request fails
+     */
+    default AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
+        try {
+            return CancellationSupport.call(id(), token, () -> execute(request, config));
+        } catch (AiProviderException exception) {
+            throw exception.redactSecrets(config);
+        }
+    }
+
+    /**
      * Creates embedding vectors for one or more text inputs.
      *
      * <p>The default implementation preserves compatibility for providers that do not
@@ -118,6 +141,31 @@ public interface AiProvider extends AutoCloseable {
      */
     AiResponse stream(AiRequest request, AiProviderConfig config, AiStreamListener listener)
         throws AiProviderException;
+
+    /**
+     * Streams a request with a per-call cancellation token.
+     *
+     * <p>The compatibility default checks around the existing call and each listener
+     * delivery. It cannot interrupt a blocked legacy provider. An already-dispatched
+     * callback may finish; providers must never close shared resources to cancel one call.</p>
+     *
+     * @param request provider-neutral operation and input data
+     * @param config credentials, endpoint, and transport settings
+     * @param listener callback receiving text fragments
+     * @param token non-null token created for this call
+     * @return the completed response
+     * @throws AiProviderException if cancelled or the stream fails
+     */
+    default AiResponse stream(
+        AiRequest request, AiProviderConfig config, AiStreamListener listener, AiCancellationToken token
+    ) throws AiProviderException {
+        try {
+            return CancellationSupport.call(id(), token,
+                () -> stream(request, config, CancellationSupport.listener(id(), token, listener)));
+        } catch (AiProviderException exception) {
+            throw exception.redactSecrets(config);
+        }
+    }
 
     /**
      * Releases resources owned by this provider when its client is closed.

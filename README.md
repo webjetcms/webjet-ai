@@ -588,6 +588,60 @@ Expansion is single-pass and repeat-safe: placeholders introduced inside an
 untrusted value remain literal, canonical untrusted-data blocks are not scanned
 again, and consumed or suspicious fields are reported to the host.
 
+## Cancelling a request
+
+Create one `AiCancellationToken` per call and pass it to the `execute` or `stream`
+overload. Both remain synchronous; the host owns its executor and task registry.
+The overloads are also available with an explicit provider ID.
+
+```java
+AiCancellationToken cancellation = new AiCancellationToken();
+Future<AiResponse> future = executor.submit(
+    () -> client.execute(request, config, cancellation)
+);
+
+// In the Stop, New chat, or editor-close handler for this task:
+cancellation.cancel(); // Abort the AI request through its provider
+future.cancel(true);   // Cancel the task and request thread interruption
+```
+
+For streaming, pass the token after the listener:
+
+```java
+AiResponse response = client.stream(request, config, listener, cancellation);
+```
+
+Use `com.webjetcms.ai.AiCancellationToken` and `java.util.concurrent.Future` in the
+first example. Create the token before submitting the task so Stop can also cancel
+work that has not started yet. The token is thread-safe and cannot be reset;
+repeated `cancel()` calls are harmless. Sharing a token intentionally cancels all
+calls using it, so use a fresh token for every independent task.
+
+OpenAI, Gemini, and OpenRouter abort the individual HTTP request, including blocked
+reads and streaming responses. Text, chat, and image requests use the same mechanism
+where supported by the adapter. Other concurrent calls and the shared client remain
+usable. Cancellation does not close the provider, create threads, or change storage
+consent. `embed` and `listModels` retain their existing APIs without token overloads.
+
+When observed before the final result check, cancellation throws
+`AiProviderException` with `category() == AiErrorCategory.CANCELLED` and
+`retryable() == false`, including after credential redaction. A cancelled call does
+not return a successful partial response. Existing exception constructors default
+to `AiErrorCategory.UNKNOWN`; ordinary timeouts are not classified as cancellation.
+If the host also cancels its `Future`, `Future.get()` reports Java's
+`CancellationException` instead of exposing the worker's provider exception.
+
+Cancellation after the final check cannot retract a successful result. An already
+dispatched listener callback may finish, so the host must discard stale callbacks
+and results when a chat or editor has changed. Aborting HTTP cannot guarantee that
+the remote provider stops generation, avoids charges, or deletes stored context.
+
+Existing custom and local providers remain compatible through default methods that
+check cancellation before and after blocking execution and around listener calls.
+These defaults cannot interrupt blocked transport or native inference; a provider
+must override the token overloads to implement active cancellation. Existing
+token-free methods retain their signatures and behavior.
+
 ## Media and response values
 
 Additional immutable value helpers include `BinaryContent.from(path, mediaType)`,

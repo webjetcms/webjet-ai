@@ -32,6 +32,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.webjetcms.ai.AiCancellationToken;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
@@ -48,6 +49,7 @@ import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
+import com.webjetcms.ai.internal.CancellationSupport;
 import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.internal.ImageOptionValidator;
 import com.webjetcms.ai.security.PromptInjectionDefense;
@@ -164,10 +166,24 @@ public final class GeminiProvider implements AiProvider {
 
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return invokeAtBoundary(config, () -> executeInternal(request, config));
+        return execute(request, config, AiCancellationToken.none());
     }
 
-    private AiResponse executeInternal(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    @Override
+    public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
+        return invokeAtBoundary(config, () -> CancellationSupport.call(
+            PROVIDER_ID,
+            token,
+            () -> executeInternal(request, config, token)
+        ));
+    }
+
+    private AiResponse executeInternal(
+        AiRequest request,
+        AiProviderConfig config,
+        AiCancellationToken token
+    ) throws AiProviderException {
         requireConfigured(config);
         validateRequest(request);
 
@@ -180,7 +196,8 @@ public final class GeminiProvider implements AiProvider {
             ? buildChatRequestBody(request, false)
             : buildRequestBody(request)).toString(), JSON_UTF_8));
 
-        try (CloseableHttpResponse response = httpClient.execute(post)) {
+        try (AiCancellationToken.Registration cancellation = token.onCancel(post::abort);
+            CloseableHttpResponse response = httpClient.execute(post)) {
             String payload = entityAsString(response.getEntity());
             int statusCode = response.getStatusLine().getStatusCode();
             if (isSuccessful(statusCode) == false) {
@@ -211,13 +228,33 @@ public final class GeminiProvider implements AiProvider {
         AiProviderConfig config,
         AiStreamListener listener
     ) throws AiProviderException {
-        return invokeAtBoundary(config, () -> streamInternal(request, config, listener));
+        return stream(request, config, listener, AiCancellationToken.none());
+    }
+
+    @Override
+    public AiResponse stream(
+        AiRequest request,
+        AiProviderConfig config,
+        AiStreamListener listener,
+        AiCancellationToken token
+    ) throws AiProviderException {
+        return invokeAtBoundary(config, () -> CancellationSupport.call(
+            PROVIDER_ID,
+            token,
+            () -> streamInternal(
+                request,
+                config,
+                CancellationSupport.listener(PROVIDER_ID, token, listener),
+                token
+            )
+        ));
     }
 
     private AiResponse streamInternal(
         AiRequest request,
         AiProviderConfig config,
-        AiStreamListener listener
+        AiStreamListener listener,
+        AiCancellationToken token
     ) throws AiProviderException {
         requireConfigured(config);
         validateRequest(request);
@@ -236,7 +273,8 @@ public final class GeminiProvider implements AiProvider {
             ? buildChatRequestBody(request, true)
             : buildRequestBody(request)).toString(), JSON_UTF_8));
 
-        try (CloseableHttpResponse response = httpClient.execute(post)) {
+        try (AiCancellationToken.Registration cancellation = token.onCancel(post::abort);
+            CloseableHttpResponse response = httpClient.execute(post)) {
             int statusCode = response.getStatusLine().getStatusCode();
             if (isSuccessful(statusCode) == false) {
                 String payload = entityAsString(response.getEntity());

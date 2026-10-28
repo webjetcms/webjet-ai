@@ -3,11 +3,17 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
 ## [2.1.0]
 
 ### Added
+
+- Per-call `AiCancellationToken` overloads for synchronous `execute` and `stream`,
+  aborting only the active HTTP request in OpenAI, Gemini, and OpenRouter while
+  retaining existing signatures and shared transport resources.
+- Non-retryable `AiErrorCategory.CANCELLED` failures preserved through credential
+  redaction. Existing exception constructors use `UNKNOWN`.
+- Compatibility defaults for custom and local providers that check cancellation
+  around blocking execution and streamed callbacks without closing shared resources.
 
 - Text-only `AiOperation.CHAT` with provider-managed conversation history through
   OpenAI Responses and Gemini Interactions, supporting both completed responses

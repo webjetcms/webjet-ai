@@ -22,6 +22,7 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.apache.http.HttpHost;
@@ -31,6 +32,7 @@ import org.apache.http.HttpEntityEnclosingRequest;
 import org.apache.http.HttpHeaders;
 import org.apache.http.HttpVersion;
 import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpRequestBase;
 import org.apache.http.conn.ClientConnectionManager;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
@@ -43,7 +45,9 @@ import org.apache.http.util.EntityUtils;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.webjetcms.ai.AiCancellationToken;
 import com.webjetcms.ai.AiClient;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -63,6 +67,60 @@ import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 class OpenAiProviderTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @ParameterizedTest
+    @EnumSource(value = AiOperation.class, names = {"GENERATE_IMAGE", "EDIT_IMAGE"})
+    void cancellationAbortsImageOperations(AiOperation operation) throws Exception {
+        AiCancellationToken token = new AiCancellationToken();
+        RecordingHttpClient transport = new RecordingHttpClient(new IOException("Request aborted"));
+        transport.onExecute = token::cancel;
+        AiRequest.Builder request = AiRequest.builder()
+            .operation(operation)
+            .model("gpt-image-1.5")
+            .userPrompt("A mountain at sunrise");
+        if (operation == AiOperation.EDIT_IMAGE) {
+            request.inputMedia(new BinaryContent(new byte[] {1, 2, 3}, "image/png", "source.png"));
+        }
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            AiProviderException exception = assertThrows(AiProviderException.class,
+                () -> provider.execute(request.build(), embeddingConfig("key", "trusted"), token));
+            assertEquals(AiErrorCategory.CANCELLED, exception.category());
+            assertFalse(exception.retryable());
+            assertEquals(1, transport.calls);
+            assertTrue(transport.capturedRequest.isAborted());
+        }
+    }
+
+    @Test
+    void cancellationInsideStreamListenerAbortsRequestAndStopsBufferedDeltas() throws Exception {
+        AiCancellationToken token = new AiCancellationToken();
+        String stream = """
+            event: response.output_text.delta
+            data: {"delta":"Hello"}
+
+            event: response.output_text.delta
+            data: {"delta":" again"}
+
+            event: response.completed
+            data: {"response":{"status":"completed"}}
+
+            """;
+        RecordingHttpClient transport = new RecordingHttpClient(200, stream);
+        List<String> deltas = new ArrayList<>();
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            AiProviderException exception = assertThrows(AiProviderException.class, () -> provider.stream(
+                AiRequest.builder().model("gpt-test").userPrompt("Hello").build(),
+                embeddingConfig("key", "trusted"), delta -> {
+                    deltas.add(delta);
+                    token.cancel();
+                }, token
+            ));
+            assertEquals(AiErrorCategory.CANCELLED, exception.category());
+            assertFalse(exception.retryable());
+            assertEquals(List.of("Hello"), deltas);
+            assertTrue(transport.capturedRequest.isAborted());
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -885,6 +943,8 @@ class OpenAiProviderTest {
         private String method;
         private String uri;
         private String requestBody;
+        private HttpRequestBase capturedRequest;
+        private Runnable onExecute;
 
         private RecordingHttpClient(int responseStatus, String responseBody) {
             this.responseStatus = responseStatus;
@@ -905,12 +965,16 @@ class OpenAiProviderTest {
             HttpContext context
         ) throws IOException {
             calls++;
+            capturedRequest = (HttpRequestBase) request;
             method = request.getRequestLine().getMethod();
             uri = request.getRequestLine().getUri();
             headers.clear();
             headers.addAll(List.of(request.getAllHeaders()));
             if (request instanceof HttpEntityEnclosingRequest enclosingRequest) {
                 requestBody = EntityUtils.toString(enclosingRequest.getEntity(), StandardCharsets.UTF_8);
+            }
+            if (onExecute != null) {
+                onExecute.run();
             }
             if (failure != null) {
                 throw failure;
