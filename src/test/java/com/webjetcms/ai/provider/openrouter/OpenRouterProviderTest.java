@@ -38,6 +38,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.webjetcms.ai.AiClient;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -63,11 +64,27 @@ class OpenRouterProviderTest {
                     .userPrompt("Current question").store(true).previousResponseId("previous").build();
                 String message = operation == AiOperation.CHAT
                     ? "CHAT is not supported by this provider" : "previousResponseId is supported only for CHAT requests";
-                assertEquals(message, assertThrows(AiProviderException.class,
-                    () -> provider.execute(request, testConfig())).getMessage());
-                assertEquals(message, assertThrows(AiProviderException.class,
-                    () -> provider.stream(request, testConfig(), delta -> { })).getMessage());
+                for (AiProviderException failure : List.of(
+                    assertThrows(AiProviderException.class, () -> provider.execute(request, testConfig())),
+                    assertThrows(AiProviderException.class, () -> provider.stream(request, testConfig(), delta -> { })))) {
+                    assertEquals(message, failure.getMessage());
+                    assertEquals(operation == AiOperation.CHAT ? AiErrorCategory.UNSUPPORTED_OPERATION
+                        : AiErrorCategory.UNKNOWN, failure.category());
+                }
             }
+        }
+        assertEquals(0, transport.calls);
+    }
+
+    @Test
+    void classifiesUnsupportedImageStreamingBeforeTransport() throws Exception {
+        RecordingHttpClient transport = new RecordingHttpClient(200, "{}");
+        try (OpenRouterProvider provider = new OpenRouterProvider(transport, MAPPER)) {
+            AiProviderException exception = assertThrows(AiProviderException.class,
+                () -> provider.stream(imageRequest("openai/gpt-image-2"), testConfig(), delta -> { }));
+
+            assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, exception.category());
+            assertFalse(exception.retryable());
         }
         assertEquals(0, transport.calls);
     }
@@ -198,6 +215,7 @@ class OpenRouterProviderTest {
             );
 
             assertTrue(exception.getMessage().contains("return SVG"));
+            assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, exception.category());
         }
         assertEquals(0, transport.calls);
     }

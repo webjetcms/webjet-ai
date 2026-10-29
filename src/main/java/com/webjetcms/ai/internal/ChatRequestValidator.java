@@ -1,5 +1,6 @@
 package com.webjetcms.ai.internal;
 
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
@@ -29,7 +30,8 @@ public final class ChatRequestValidator {
                 throw new AiProviderException(providerId, "previousResponseId is supported only for CHAT requests");
             }
             if (previousResponseId.isBlank()) {
-                throw new AiProviderException(providerId, "previousResponseId must not be blank");
+                throw new AiProviderException(providerId, "previousResponseId must not be blank")
+                    .withCategory(AiErrorCategory.INVALID_CONTINUATION);
             }
         }
         if (request.operation() != AiOperation.CHAT) return;
@@ -54,7 +56,8 @@ public final class ChatRequestValidator {
      */
     public static void rejectUnsupported(String providerId, AiRequest request) throws AiProviderException {
         if (request != null && request.operation() == AiOperation.CHAT) {
-            throw new AiProviderException(providerId, "CHAT is not supported by this provider");
+            throw new AiProviderException(providerId, "CHAT is not supported by this provider")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         }
         validate(providerId, request);
     }

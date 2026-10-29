@@ -6,5 +6,11 @@ public enum AiErrorCategory {
     UNKNOWN,
 
     /** The caller explicitly cancelled this operation; it must not be automatically retried. */
-    CANCELLED
+    CANCELLED,
+
+    /** A supplied chat continuation ID is invalid or cannot be continued. */
+    INVALID_CONTINUATION,
+
+    /** The provider adapter or selected model does not support the requested operation. */
+    UNSUPPORTED_OPERATION
 }

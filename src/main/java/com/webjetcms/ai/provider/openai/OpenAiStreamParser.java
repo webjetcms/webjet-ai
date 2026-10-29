@@ -21,14 +21,14 @@ final class OpenAiStreamParser {
     static StreamResult parse(BufferedReader reader, AiStreamListener listener)
         throws IOException, AiProviderException {
 
-        return parse(reader, listener, false);
+        return parse(reader, listener, false, false);
     }
 
-    static StreamResult parse(BufferedReader reader, AiStreamListener listener, boolean chat)
+    static StreamResult parse(BufferedReader reader, AiStreamListener listener, boolean chat, boolean continuation)
         throws IOException, AiProviderException {
 
         StringBuilder fullText = new StringBuilder();
-        StreamState state = new StreamState(chat);
+        StreamState state = new StreamState(chat, continuation);
         String event = null;
         StringBuilder data = new StringBuilder();
 
@@ -116,7 +116,7 @@ final class OpenAiStreamParser {
         } else if ("response.completed".equals(type)) {
             JsonNode response = chunk.path("response");
             if (state.chat) {
-                AiResponse completed = OpenAiProvider.parseChatResponse(response, data);
+                AiResponse completed = OpenAiProvider.parseChatResponse(response, data, state.continuation);
                 if (state.completed || completed.text().equals(fullText.toString()) == false) {
                     throw streamError("OpenAI chat stream does not match its completed response", data, null);
                 }
@@ -127,19 +127,19 @@ final class OpenAiStreamParser {
             state.completed = true;
         } else if ("response.incomplete".equals(type) || "response.failed".equals(type)
                 || "error".equals(type)) {
-            throw failure(type, chunk, data);
+            throw failure(type, chunk, data, state.continuation);
         }
 
         JsonNode response = chunk.path("response");
         String status = textOrNull(response.get("status"));
         if ("incomplete".equalsIgnoreCase(status) || "failed".equalsIgnoreCase(status)
                 || "cancelled".equalsIgnoreCase(status)) {
-            throw failure(status, chunk, data);
+            throw failure(status, chunk, data, state.continuation);
         }
         return false;
     }
 
-    private static AiProviderException failure(String type, JsonNode chunk, String raw) {
+    private static AiProviderException failure(String type, JsonNode chunk, String raw, boolean continuation) {
         JsonNode response = chunk.path("response");
         String reason = textOrNull(response.path("incomplete_details").get("reason"));
         if (isBlank(reason)) {
@@ -155,7 +155,12 @@ final class OpenAiStreamParser {
         if (isBlank(reason) == false) {
             message += ": " + reason;
         }
-        return new AiProviderException(OpenAiProvider.PROVIDER_ID, 200, message, raw, false);
+        JsonNode error = response.path("error");
+        if (error.isObject() == false) error = chunk.path("error");
+        if (error.isObject() == false && "error".equals(type)) error = chunk;
+        return OpenAiProvider.classifyContinuationError(
+            new AiProviderException(OpenAiProvider.PROVIDER_ID, 200, message, raw, false), error, continuation
+        );
     }
 
     private static AiProviderException streamError(String message, String raw, Throwable cause) {
@@ -181,13 +186,15 @@ final class OpenAiStreamParser {
 
     private static final class StreamState {
         private final boolean chat;
+        private final boolean continuation;
         private TokenUsage usage = TokenUsage.EMPTY;
         private String finishReason;
         private String responseId;
         private boolean completed;
 
-        private StreamState(boolean chat) {
+        private StreamState(boolean chat, boolean continuation) {
             this.chat = chat;
+            this.continuation = chat && continuation;
         }
     }
 

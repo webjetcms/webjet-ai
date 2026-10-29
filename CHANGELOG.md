@@ -34,6 +34,13 @@ uses [Semantic Versioning](https://semver.org/).
 - Compatibility defaults for custom and local providers that check cancellation
   around blocking execution and streamed callbacks without closing shared resources.
 
+  - Stable `INVALID_CONTINUATION` and `UNSUPPORTED_OPERATION` error categories,
+  including conservative OpenAI HTTP and SSE continuation classification and
+  explicit unsupported-operation failures across bundled providers.
+- `AiProviderException.withCategory(...)` preserves diagnostics and credential
+  redaction behavior. Ambiguous provider errors retain `UNKNOWN`; categories
+  do not trigger retries, conversation resets, or storage changes.
+
 ### Changed
 
 - Maven Central releases now wait for manual publication in Central Portal after

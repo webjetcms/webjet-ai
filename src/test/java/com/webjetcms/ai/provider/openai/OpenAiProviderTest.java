@@ -68,6 +68,67 @@ class OpenAiProviderTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    @Test
+    void classifiesOnlyStructuredErrorsForContinuingChat() throws Exception {
+        record Failure(int status, boolean streaming, String body, String raw, AiErrorCategory category) { }
+        String codeError = "{\"code\":\"previous_response_not_found\",\"message\":\"Missing continuation\"}";
+        String httpError = "{\"error\":" + codeError + "}";
+        String failedResponse = "{\"status\":\"failed\",\"error\":" + codeError + "}";
+        String failedEvent = "{\"type\":\"response.failed\",\"response\":" + failedResponse + "}";
+        String parameterEvent = "{\"type\":\"error\",\"code\":null,\"param\":\"previous_response_id\",\"message\":\"Invalid continuation\"}";
+        String otherError = "{\"error\":{\"code\":\"model_not_found\",\"param\":\"model\",\"message\":\"previous_response_id not found\"}}";
+        String echoedError = "data: " + MAPPER.createObjectNode().put("type", "response.output_text.delta")
+            .put("delta", httpError) + "\n\n";
+        List<Failure> failures = List.of(
+            new Failure(404, false, httpError, httpError, AiErrorCategory.INVALID_CONTINUATION),
+            new Failure(200, true, "data: " + parameterEvent + "\n\n", parameterEvent, AiErrorCategory.INVALID_CONTINUATION),
+            new Failure(200, false, failedResponse, failedResponse, AiErrorCategory.INVALID_CONTINUATION),
+            new Failure(200, true, "data: " + failedEvent + "\n\n", failedEvent, AiErrorCategory.INVALID_CONTINUATION),
+            new Failure(404, false, otherError, otherError, AiErrorCategory.UNKNOWN),
+            new Failure(200, true, echoedError, httpError, AiErrorCategory.UNKNOWN)
+        );
+        for (Failure failure : failures) {
+            for (String previousId : new String[] {null, "resp_previous"}) {
+                RecordingHttpClient transport = new RecordingHttpClient(failure.status(), failure.body());
+                try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+                    AiProviderException exception = assertThrows(AiProviderException.class, () -> {
+                        if (failure.streaming()) {
+                            provider.stream(chatRequest(previousId), embeddingConfig("key", "trusted"), ignored -> { });
+                        } else {
+                            provider.execute(chatRequest(previousId), embeddingConfig("key", "trusted"));
+                        }
+                    });
+                    assertEquals(previousId == null ? AiErrorCategory.UNKNOWN : failure.category(), exception.category());
+                    assertEquals(failure.status(), exception.statusCode());
+                    assertEquals(failure.raw(), exception.rawResponse());
+                    assertFalse(exception.retryable());
+                    assertEquals(1, transport.calls);
+                    assertEquals(previousId, MAPPER.readTree(transport.requestBody).path("previous_response_id").textValue());
+                }
+            }
+        }
+    }
+
+    @Test
+    void classifiesUnsupportedStreamingAndImageEditingBeforeHttp() throws Exception {
+        RecordingHttpClient transport = new RecordingHttpClient(200, "{}");
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            AiProviderException streaming = assertThrows(AiProviderException.class, () -> provider.stream(
+                AiRequest.builder().operation(AiOperation.GENERATE_IMAGE).model("gpt-image-1.5").build(),
+                embeddingConfig("key", "trusted"), ignored -> { }
+            ));
+            AiProviderException editing = assertThrows(AiProviderException.class, () -> provider.execute(
+                AiRequest.builder().operation(AiOperation.EDIT_IMAGE).model("dall-e-3").build(),
+                embeddingConfig("key", "trusted")
+            ));
+            assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, streaming.category());
+            assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, editing.category());
+            assertFalse(streaming.retryable());
+            assertFalse(editing.retryable());
+            assertEquals(0, transport.calls);
+        }
+    }
+
     @ParameterizedTest
     @EnumSource(value = AiOperation.class, names = {"GENERATE_IMAGE", "EDIT_IMAGE"})
     void cancellationAbortsImageOperations(AiOperation operation) throws Exception {

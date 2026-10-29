@@ -22,6 +22,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import com.webjetcms.ai.AiClient;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -113,6 +114,51 @@ class GeminiChatTest {
             stream().replace("event: interaction.completed", "event: interaction.created"))) {
             assertThrows(IOException.class, () -> GeminiInteractionsParser.parseStream(
                 new BufferedReader(new StringReader(payload)), delta -> { }), payload);
+        }
+    }
+
+    @Test
+    void genericHttpAndStreamErrorsDoNotImplyInvalidContinuation() throws Exception {
+        List<Integer> statuses = List.of(404, 400, 200);
+        List<JsonNode> bodies = new CopyOnWriteArrayList<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/interactions", exchange -> {
+            int status = statuses.get(bodies.size());
+            bodies.add(new ObjectMapper().readTree(exchange.getRequestBody()));
+            String fields = "\"error\":{\"code\":\"" + (status == 400 ? "invalid_request" : "not_found")
+                + "\",\"message\":\"previous_interaction_id missing: test-gemini-key and trusted-secret\"}";
+            byte[] payload = (status == 200 ? event("error", fields) : "{" + fields + "}")
+                .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(status, payload.length);
+            try (var output = exchange.getResponseBody()) {
+                output.write(payload);
+            }
+        });
+        server.start();
+        try (AiClient client = AiClient.of(new GeminiProvider())) {
+            AiProviderConfig config = AiProviderConfig.builder("test-gemini-key")
+                .trustedHeader("X-Test-Secret", "trusted-secret").allowInsecureHttpForLocalTesting()
+                .baseUri(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/")).build();
+            AiRequest request = chat().previousResponseId("missing-turn").build();
+            for (int status : statuses) {
+                AiProviderException failure = assertThrows(AiProviderException.class, () -> {
+                    if (status == 200) client.stream(request, config, ignored -> { });
+                    else client.execute(request, config);
+                });
+                assertEquals(AiErrorCategory.UNKNOWN, failure.category());
+                assertEquals(status, failure.statusCode());
+                assertFalse(failure.retryable());
+                assertFalse(failure.getMessage().contains("test-gemini-key"));
+                assertFalse(failure.getMessage().contains("trusted-secret"));
+            }
+            assertEquals(statuses.size(), bodies.size());
+            for (JsonNode body : bodies) {
+                assertEquals("missing-turn", body.path("previous_interaction_id").asText());
+                assertTrue(body.path("store").asBoolean());
+            }
+            assertEquals("missing-turn", request.previousResponseId());
+        } finally {
+            server.stop(0);
         }
     }
 

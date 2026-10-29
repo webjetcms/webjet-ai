@@ -9,6 +9,7 @@ import java.util.Map;
 import com.webjetcms.ai.AiCapabilities;
 import com.webjetcms.ai.AiCapabilities.Operation;
 import com.webjetcms.ai.AiCapabilities.Support;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
@@ -143,7 +144,8 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
         return LocalProviderBoundary.invoke(config, () -> {
             ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
             throw new AiProviderException(PROVIDER_ID,
-                "Generation is not supported by the local embedding model provider");
+                "Generation is not supported by the local embedding model provider")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         });
     }
 
@@ -156,7 +158,8 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
         return LocalProviderBoundary.invoke(config, () -> {
             ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
             throw new AiProviderException(PROVIDER_ID,
-                "Streaming is not supported by the local embedding model provider");
+                "Streaming is not supported by the local embedding model provider")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         });
     }
 

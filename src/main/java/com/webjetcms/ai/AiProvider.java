@@ -145,7 +145,8 @@ public interface AiProvider extends AutoCloseable {
      */
     default EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
         throws AiProviderException {
-        throw new AiProviderException(id(), "Embedding is not supported by this provider");
+        throw new AiProviderException(id(), "Embedding is not supported by this provider")
+            .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
     }
 
     /**

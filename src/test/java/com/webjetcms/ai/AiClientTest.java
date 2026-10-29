@@ -68,16 +68,29 @@ class AiClientTest {
     }
 
     @Test
-    void cancellationCategorySurvivesCredentialRedaction() {
+    void categoriesPreserveDiagnosticsThroughCopyAndCredentialRedaction() {
         AiProviderConfig config = AiProviderConfig.builder("private-key").trustedHeader("X-Private", "header-secret").build();
-        AiProviderException original = new AiProviderException("provider-private-key", 200,
-            "cancelled private-key", "header-secret", true, new Exception("private-key"), AiErrorCategory.CANCELLED);
+        AiProviderException original = new AiProviderException("provider-private-key", 400,
+            "failure private-key", "header-secret", true, new Exception("private-key"));
         original.addSuppressed(new Exception("header-secret"));
-        AiProviderException redacted = original.redactSecrets(config).redactSecrets(config);
-        assertEquals(AiErrorCategory.CANCELLED, redacted.category());
-        assertFalse(redacted.retryable());
-        assertRedacted(redacted, "private-key", "header-secret");
-        assertEquals(AiErrorCategory.UNKNOWN, new AiProviderException("legacy", "failure").category());
+        for (AiErrorCategory category : AiErrorCategory.values()) {
+            AiProviderException categorized = original.withCategory(category);
+            assertEquals(category, categorized.category());
+            assertSame(categorized, categorized.withCategory(category));
+            assertEquals(original.providerId(), categorized.providerId());
+            assertEquals(original.getMessage(), categorized.getMessage());
+            assertEquals(original.rawResponse(), categorized.rawResponse());
+            assertSame(original.getCause(), categorized.getCause());
+            assertArrayEquals(original.getSuppressed(), categorized.getSuppressed());
+            assertArrayEquals(original.getStackTrace(), categorized.getStackTrace());
+            AiProviderException redacted = categorized.redactSecrets(config).redactSecrets(config);
+            assertEquals(category, redacted.category());
+            assertEquals(400, redacted.statusCode());
+            assertEquals(category != AiErrorCategory.CANCELLED, redacted.retryable());
+            assertRedacted(redacted, "private-key", "header-secret");
+        }
+        assertEquals(AiErrorCategory.UNKNOWN, original.category());
+        assertSame(original, original.withCategory(null));
     }
 
     @Test
@@ -124,8 +137,12 @@ class AiClientTest {
 
         try (AiClient client = AiClient.of(provider)) {
             for (AiRequest request : invalidRequests) {
-                assertThrows(AiProviderException.class, () -> client.execute(request, AiProviderConfig.empty()));
-                assertThrows(AiProviderException.class, () -> client.stream(request, AiProviderConfig.empty(), delta -> { }));
+                AiErrorCategory expected = " ".equals(request.previousResponseId())
+                    ? AiErrorCategory.INVALID_CONTINUATION : AiErrorCategory.UNKNOWN;
+                assertEquals(expected, assertThrows(AiProviderException.class,
+                    () -> client.execute(request, AiProviderConfig.empty())).category());
+                assertEquals(expected, assertThrows(AiProviderException.class,
+                    () -> client.stream(request, AiProviderConfig.empty(), delta -> { })).category());
             }
         }
         assertNull(provider.executeRequest);
@@ -213,6 +230,7 @@ class AiClientTest {
             );
 
             assertEquals("unsupported", exception.providerId());
+            assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, exception.category());
             assertTrue(exception.getMessage().contains("not supported"));
         }
     }

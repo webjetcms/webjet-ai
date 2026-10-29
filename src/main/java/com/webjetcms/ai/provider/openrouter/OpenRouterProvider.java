@@ -32,6 +32,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.webjetcms.ai.AiCancellationToken;
 import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiCapabilities.Continuation;
 import com.webjetcms.ai.AiCapabilities.Operation;
 import com.webjetcms.ai.AiCapabilities.Support;
@@ -308,7 +309,7 @@ public final class OpenRouterProvider implements AiProvider {
             throw new AiProviderException(
                 PROVIDER_ID,
                 "OpenRouter streaming is supported only for text requests."
-            );
+            ).withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         }
         if (listener == null) {
             throw new AiProviderException(PROVIDER_ID, "A stream listener is required.");
@@ -882,7 +883,7 @@ public final class OpenRouterProvider implements AiProvider {
             throw new AiProviderException(
                 PROVIDER_ID,
                 "OpenRouter Recraft vector models return SVG, which is not supported."
-            );
+            ).withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         }
         if (request.operation() == AiOperation.EDIT_IMAGE && request.inputMedia() == null) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter image editing requires input media.");

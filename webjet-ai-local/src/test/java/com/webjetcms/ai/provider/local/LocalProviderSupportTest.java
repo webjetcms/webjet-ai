@@ -37,6 +37,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import com.webjetcms.ai.AiCapabilities;
 import com.webjetcms.ai.AiCapabilities.Continuation;
 import com.webjetcms.ai.AiCapabilities.Support;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
@@ -82,7 +83,7 @@ class LocalProviderSupportTest {
     }
 
     @Test
-    void rejectsChatAndContinuationWithoutNativeResources() throws Exception {
+    void rejectsUnsupportedOperationsAndContinuationWithoutNativeResources() throws Exception {
         for (AiProvider provider : providersWithoutNativeResources()) {
             try (provider) {
                 for (AiOperation operation : List.of(AiOperation.CHAT, AiOperation.TEXT)) {
@@ -90,11 +91,23 @@ class LocalProviderSupportTest {
                         .store(true).previousResponseId("previous").build();
                     String message = operation == AiOperation.CHAT
                         ? "CHAT is not supported by this provider" : "previousResponseId is supported only for CHAT requests";
-                    assertEquals(message, assertThrows(AiProviderException.class,
-                        () -> provider.execute(request, AiProviderConfig.empty())).getMessage(), provider.id());
-                    assertEquals(message, assertThrows(AiProviderException.class,
-                        () -> provider.stream(request, AiProviderConfig.empty(), delta -> { })).getMessage(), provider.id());
+                    AiProviderException execution = assertThrows(AiProviderException.class,
+                        () -> provider.execute(request, AiProviderConfig.empty()));
+                    AiProviderException streaming = assertThrows(AiProviderException.class,
+                        () -> provider.stream(request, AiProviderConfig.empty(), delta -> { }));
+                    AiErrorCategory category = operation == AiOperation.CHAT
+                        ? AiErrorCategory.UNSUPPORTED_OPERATION : AiErrorCategory.UNKNOWN;
+                    assertEquals(message, execution.getMessage(), provider.id());
+                    assertEquals(message, streaming.getMessage(), provider.id());
+                    assertEquals(category, execution.category(), provider.id());
+                    assertEquals(category, streaming.category(), provider.id());
                 }
+                AiRequest image = AiRequest.builder().operation(AiOperation.GENERATE_IMAGE).build();
+                assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, assertThrows(AiProviderException.class,
+                    () -> provider.execute(image, AiProviderConfig.empty())).category(), provider.id());
+                assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, assertThrows(AiProviderException.class,
+                    () -> provider.stream(AiRequest.builder().build(), AiProviderConfig.empty(), delta -> { }))
+                    .category(), provider.id());
             }
         }
     }

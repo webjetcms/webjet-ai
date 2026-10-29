@@ -35,6 +35,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiCapabilities;
 import com.webjetcms.ai.AiCapabilities.Continuation;
 import com.webjetcms.ai.AiCapabilities.Operation;
@@ -267,7 +268,8 @@ public final class OpenAiProvider implements AiProvider {
         requireConfigured(config);
         requireModel(request);
         if (request.operation() != AiOperation.TEXT && request.operation() != AiOperation.CHAT) {
-            throw new AiProviderException(PROVIDER_ID, "OpenAI streaming is supported only for text requests");
+            throw new AiProviderException(PROVIDER_ID, "OpenAI streaming is supported only for text requests")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         }
 
         ObjectNode body = buildTextBody(request);
@@ -281,7 +283,7 @@ public final class OpenAiProvider implements AiProvider {
             int statusCode = response.getStatusLine().getStatusCode();
             if (isSuccessful(statusCode) == false) {
                 String bodyText = readEntity(response.getEntity());
-                throw httpError(statusCode, bodyText);
+                throw httpError(statusCode, bodyText, isContinuation(request));
             }
 
             HttpEntity entity = response.getEntity();
@@ -294,7 +296,8 @@ public final class OpenAiProvider implements AiProvider {
                 OpenAiStreamParser.StreamResult result = OpenAiStreamParser.parse(
                     reader,
                     listener,
-                    request.operation() == AiOperation.CHAT
+                    request.operation() == AiOperation.CHAT,
+                    isContinuation(request)
                 );
                 return new AiResponse(
                     result.text(), List.of(), result.usage(), result.finishReason(), result.responseId()
@@ -316,11 +319,11 @@ public final class OpenAiProvider implements AiProvider {
         throws AiProviderException {
         HttpPost post = jsonPost(endpoint(config, RESPONSES_PATH), buildTextBody(request));
         prepare(post, config, "application/json");
-        String response = executeForString(post, config, token);
+        String response = executeForResult(post, config, token, isContinuation(request)).body();
 
         try {
             return request.operation() == AiOperation.CHAT
-                ? parseChatResponse(MAPPER.readTree(response), response)
+                ? parseChatResponse(MAPPER.readTree(response), response, isContinuation(request))
                 : parseTextResponse(response);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
@@ -355,7 +358,8 @@ public final class OpenAiProvider implements AiProvider {
         throws AiProviderException {
         if ("dall-e-3".equals(request.model())) {
             throw new AiProviderException(PROVIDER_ID,
-                "Image editing with " + request.model() + " is not supported by this provider adapter");
+                "Image editing with " + request.model() + " is not supported by this provider adapter")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         }
 
         BinaryContent input = request.inputMedia();
@@ -515,7 +519,7 @@ public final class OpenAiProvider implements AiProvider {
 
     static AiResponse parseTextResponse(String response) throws IOException, AiProviderException {
         JsonNode root = MAPPER.readTree(response);
-        ensureSuccessfulResponse(root, response);
+        ensureSuccessfulResponse(root, response, false);
 
         String text = textOrNull(root.get("output_text"));
         boolean textFound = text != null;
@@ -550,10 +554,12 @@ public final class OpenAiProvider implements AiProvider {
         return new AiResponse(text, List.of(), parseUsage(root.path("usage")), responseStatus(root));
     }
 
-    static AiResponse parseChatResponse(JsonNode root, String response) throws AiProviderException {
-        ensureSuccessfulResponse(root, response);
+    static AiResponse parseChatResponse(JsonNode root, String response, boolean continuation) throws AiProviderException {
+        ensureSuccessfulResponse(root, response, continuation);
         if ("completed".equals(textOrNull(root.get("status"))) == false || root.hasNonNull("error")) {
-            throw invalidResponse("OpenAI chat response is not completed", response, null);
+            throw classifyContinuationError(
+                invalidResponse("OpenAI chat response is not completed", response, null), root.path("error"), continuation
+            );
         }
         JsonNode id = root.get("id");
         if (id == null || id.isTextual() == false || id.textValue().isBlank()) {
@@ -612,7 +618,7 @@ public final class OpenAiProvider implements AiProvider {
     static AiResponse parseImageResponse(String response, String requestedFormat)
         throws IOException, AiProviderException {
         JsonNode root = MAPPER.readTree(response);
-        ensureSuccessfulResponse(root, response);
+        ensureSuccessfulResponse(root, response, false);
         JsonNode data = root.path("data");
         if (data.isArray() == false) {
             throw invalidResponse("OpenAI image response does not contain a data array", response, null);
@@ -814,13 +820,22 @@ public final class OpenAiProvider implements AiProvider {
         AiProviderConfig config,
         AiCancellationToken token
     ) throws AiProviderException {
+        return executeForResult(request, config, token, false);
+    }
+
+    private HttpResult executeForResult(
+        HttpRequestBase request,
+        AiProviderConfig config,
+        AiCancellationToken token,
+        boolean continuation
+    ) throws AiProviderException {
         prepare(request, config, "application/json");
         try (AiCancellationToken.Registration cancellation = token.onCancel(request::abort);
              CloseableHttpResponse response = httpClient.execute(request)) {
             int statusCode = response.getStatusLine().getStatusCode();
             String body = readEntity(response.getEntity());
             if (isSuccessful(statusCode) == false) {
-                throw httpError(statusCode, body);
+                throw httpError(statusCode, body, continuation);
             }
             return new HttpResult(statusCode, body);
         } catch (AiProviderException exception) {
@@ -1037,14 +1052,45 @@ public final class OpenAiProvider implements AiProvider {
         };
     }
 
-    private AiProviderException httpError(int statusCode, String response) {
+    private AiProviderException httpError(int statusCode, String response, boolean continuation) {
         String detail = errorMessage(response);
         String message = "OpenAI request failed (" + statusCode + ")";
         if (isBlank(detail) == false) {
             message += ": " + detail;
         }
         boolean retryable = statusCode == 408 || statusCode == 409 || statusCode == 429 || statusCode >= 500;
-        return new AiProviderException(PROVIDER_ID, statusCode, message, response, retryable);
+        AiProviderException exception = new AiProviderException(PROVIDER_ID, statusCode, message, response, retryable);
+        if (continuation == false) return exception;
+        try {
+            return classifyContinuationError(exception, MAPPER.readTree(response).path("error"), true);
+        } catch (IOException | RuntimeException ignored) {
+            return exception;
+        }
+    }
+
+    private static boolean isContinuation(AiRequest request) {
+        return request.operation() == AiOperation.CHAT && isBlank(request.previousResponseId()) == false;
+    }
+
+    /**
+     * Classifies a continuation failure from a protocol error object, never model output.
+     *
+     * @param exception failure whose diagnostics must be retained
+     * @param error structured error from an HTTP response or explicit response/SSE failure
+     * @param continuation whether the request is a chat with a supplied continuation ID
+     * @return categorized failure when an exact code or parameter identifies the continuation
+     */
+    static AiProviderException classifyContinuationError(
+        AiProviderException exception,
+        JsonNode error,
+        boolean continuation
+    ) {
+        if (continuation && error.isObject()
+            && ("previous_response_not_found".equals(error.path("code").textValue())
+                || "previous_response_id".equals(error.path("param").textValue()))) {
+            return exception.withCategory(AiErrorCategory.INVALID_CONTINUATION);
+        }
+        return exception;
     }
 
     private static String errorMessage(String response) {
@@ -1060,7 +1106,8 @@ public final class OpenAiProvider implements AiProvider {
         }
     }
 
-    private static void ensureSuccessfulResponse(JsonNode root, String rawResponse) throws AiProviderException {
+    private static void ensureSuccessfulResponse(JsonNode root, String rawResponse, boolean continuation)
+        throws AiProviderException {
         if (root == null || root.isObject() == false) {
             throw invalidResponse("OpenAI returned an empty or invalid response", rawResponse, null);
         }
@@ -1071,13 +1118,13 @@ public final class OpenAiProvider implements AiProvider {
             if (isBlank(reason)) {
                 reason = textOrNull(root.path("error").get("message"));
             }
-            throw new AiProviderException(
+            throw classifyContinuationError(new AiProviderException(
                 PROVIDER_ID,
                 200,
                 "OpenAI response " + status + (isBlank(reason) ? "" : ": " + reason),
                 rawResponse,
                 false
-            );
+            ), root.path("error"), continuation);
         }
     }
 

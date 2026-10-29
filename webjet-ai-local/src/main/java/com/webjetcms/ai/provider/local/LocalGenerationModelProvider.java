@@ -13,6 +13,7 @@ import com.webjetcms.ai.AiCapabilities;
 import com.webjetcms.ai.AiCapabilities.Continuation;
 import com.webjetcms.ai.AiCapabilities.Operation;
 import com.webjetcms.ai.AiCapabilities.Support;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiInputHandling;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
@@ -194,13 +195,17 @@ public final class LocalGenerationModelProvider implements AiProvider {
         return LocalProviderBoundary.invoke(config, () -> {
             ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
             throw new AiProviderException(PROVIDER_ID,
-                "Streaming is not supported by the local generation provider");
+                "Streaming is not supported by the local generation provider")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         });
     }
 
     private void validate(AiRequest request) throws AiProviderException {
         if (request == null) throw invalid("Text request must not be null");
-        if (request.operation() != AiOperation.TEXT) throw invalid("Local generation models require a TEXT request");
+        if (request.operation() != AiOperation.TEXT) {
+            throw invalid("Local generation models require a TEXT request")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
+        }
         if (PromptInjectionDefense.hasTaskInstructions(request.instructions()) == false
             && PromptInjectionDefense.hasUntrustedText(request.inputText(), UntrustedSource.INPUT_TEXT) == false
             && PromptInjectionDefense.hasUntrustedText(request.userPrompt(), UntrustedSource.USER_PROMPT) == false) {

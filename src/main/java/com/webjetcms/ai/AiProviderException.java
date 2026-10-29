@@ -154,6 +154,28 @@ public final class AiProviderException extends Exception {
     public AiErrorCategory category() { return category == null ? AiErrorCategory.UNKNOWN : category; }
 
     /**
+     * Returns a categorized failure without changing its HTTP or exception diagnostics.
+     * The original failure is unchanged. Selecting {@link AiErrorCategory#CANCELLED}
+     * makes the returned failure non-retryable.
+     *
+     * @param category stable category, or {@code null} for {@link AiErrorCategory#UNKNOWN}
+     * @return this exception when the category matches, otherwise a copy retaining
+     *         its cause, suppressed exceptions, and stack trace
+     */
+    public AiProviderException withCategory(AiErrorCategory category) {
+        AiErrorCategory resolved = category == null ? AiErrorCategory.UNKNOWN : category;
+        if (category() == resolved) return this;
+        AiProviderException categorized = new AiProviderException(
+            providerId, statusCode, getMessage(), rawResponse, retryable, getCause(), resolved
+        );
+        categorized.setStackTrace(getStackTrace());
+        for (Throwable suppressed : getSuppressed()) {
+            categorized.addSuppressed(suppressed);
+        }
+        return categorized;
+    }
+
+    /**
      * Returns an equivalent failure with configured credentials removed from every
      * exposed text field, cause, suppressed exception, and stack-trace element.
      * Provider implementations should call this before a failure crosses their

@@ -15,6 +15,7 @@ package com.example.ai;
 import java.util.List;
 
 import com.webjetcms.ai.AiOperation;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -71,7 +72,8 @@ public final class ExampleProvider implements AiProvider {
             throw new AiProviderException(PROVIDER_ID, "Request is required");
         }
         if (request.operation() != AiOperation.TEXT) {
-            throw new AiProviderException(PROVIDER_ID, "Only text requests are supported");
+            throw new AiProviderException(PROVIDER_ID, "Only text requests are supported")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         }
         if (request.model() == null || request.model().isBlank()) {
             throw new AiProviderException(PROVIDER_ID, "Model is required");
@@ -309,6 +311,21 @@ before delegating. `store` defaults to `false`.
 Throw `AiProviderException` with the stable provider ID for validation, transport,
 protocol, and parsing failures. `AiClient` applies credential redaction at the provider
 boundary, but providers must still avoid logging secrets themselves.
+
+Use `AiErrorCategory.UNSUPPORTED_OPERATION` for a known adapter or model operation
+restriction. Use `INVALID_CONTINUATION` only when a supplied chat continuation ID
+is invalid, established by local validation or a reliable structured provider
+error code/parameter. Classify at the protocol error boundary before credential
+redaction; never interpret model-generated text as a provider error object.
+Do not infer continuation failures from human-readable messages or generic HTTP
+400/404 responses. Leave ambiguous errors as `UNKNOWN`.
+
+`exception.withCategory(category)` copies the existing status, raw response,
+cause, suppressed exceptions, and stack trace. Retryability is preserved except
+that `CANCELLED` is always non-retryable. Apply the same classification rules to
+normal responses and streaming failures, and pass the result through
+`redactSecrets(config)`. Existing exception constructors remain compatible and
+default to `UNKNOWN`; categories do not trigger automatic recovery or storage.
 
 Embedding inputs are intentionally delegated without prompt-protection markers because
 changing their text would change the generated vectors. Apply host privacy and content

@@ -692,6 +692,38 @@ These defaults cannot interrupt blocked transport or native inference; a provide
 must override the token overloads to implement active cancellation. Existing
 token-free methods retain their signatures and behavior.
 
+## Stable error categories
+
+Use `AiProviderException.category()` for recovery decisions, together with
+`statusCode()` and `retryable()`. Message text remains diagnostic and is not a
+stable API.
+
+| Category | Meaning |
+| --- | --- |
+| `CANCELLED` | Explicit caller cancellation; never automatically retry. |
+| `INVALID_CONTINUATION` | A supplied chat continuation ID is blank or a structured provider error identifies it as unusable. The host can offer to start a new conversation. |
+| `UNSUPPORTED_OPERATION` | A known provider adapter or model limitation, including unsupported streaming or embeddings. The host can offer a supported operation or provider. |
+| `UNKNOWN` | No reliable specific classification; use the existing status and retryability information. |
+
+OpenAI classifies continuation failures only for a continuing `CHAT` request and
+an explicit error code or parameter identifying `previous_response_id`. This
+applies to HTTP errors, failed response payloads, and SSE error events. Arbitrary
+model output, message text, and generic HTTP 400/404 responses are not used for
+classification. Gemini's documented error schema currently provides no reliable
+continuation-specific discriminator, so its remote continuation failures remain
+`UNKNOWN`.
+
+Existing constructors still default to `UNKNOWN`. Custom adapters can use the
+categorized constructor or `exception.withCategory(category)`, which preserves
+the original diagnostics. Credential redaction preserves all categories. Missing
+storage consent and unrelated input validation remain `UNKNOWN`; the library
+does not reset conversations, retry requests, or enable storage in response to
+these categories.
+
+Hosts can expose `category().name()`, `statusCode()`, and `retryable()` in their
+error DTOs while keeping `rawResponse()` and exception causes out of frontend
+responses. Treat unknown future category names as the generic recovery path.
+
 ## Media and response values
 
 Additional immutable value helpers include `BinaryContent.from(path, mediaType)`,
