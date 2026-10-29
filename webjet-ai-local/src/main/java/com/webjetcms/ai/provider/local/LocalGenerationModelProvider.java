@@ -4,10 +4,15 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
 import com.webjetcms.ai.AiInputHandling;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
@@ -89,6 +94,19 @@ public final class LocalGenerationModelProvider implements AiProvider {
      */
     @Override
     public String id() { return PROVIDER_ID; }
+
+    @Override
+    public AiCapabilities capabilities(String modelId) {
+        AiProvider.super.capabilities(modelId);
+        Support modelSupport = model.uniqueSet("model.aliases").contains(modelId)
+            ? Support.SUPPORTED : Support.UNSUPPORTED;
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, new Operation(Support.SUPPORTED, modelSupport, Support.UNSUPPORTED, Continuation.NONE),
+            AiOperation.CHAT, Operation.unsupported(),
+            AiOperation.GENERATE_IMAGE, Operation.unsupported(),
+            AiOperation.EDIT_IMAGE, Operation.unsupported()
+        ), Support.UNSUPPORTED, Support.UNSUPPORTED);
+    }
 
     @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {

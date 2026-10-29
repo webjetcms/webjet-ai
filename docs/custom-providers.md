@@ -84,6 +84,22 @@ The default `AiProvider.embed(...)` implementation reports that embeddings are n
 supported. Override it only when the backend supports embeddings. Override `close()`
 when the provider owns an HTTP client, executor, or another closeable resource.
 
+Override `capabilities(String model)` to publish an immutable `AiCapabilities`
+descriptor. The default validates the non-blank model ID and returns unknown
+metadata, preserving existing providers. Supply an `Operation` for each known
+`AiOperation` and separate embedding support; omitted operations remain unknown.
+Each operation separates adapter support, model support, adapter streaming, and
+continuation. Call `AiProvider.super.capabilities(model)` to reuse model-ID
+validation before returning your descriptor.
+
+Read only local metadata or aliases already loaded into the provider. Do not call
+`listModels`, perform network or file I/O, initialize native models, or require
+credentials during lookup. Report `UNKNOWN` when support is not established;
+model-name prefixes alone are insufficient evidence. Metadata must agree with
+existing execution restrictions and must not introduce new runtime rejection of
+unknown remote models. `PROVIDER_STORAGE_REQUIRED` reports a requirement, not
+permission to set `store(true)`.
+
 The `execute(request, config, token)` and `stream(request, config, listener, token)`
 overloads have compatibility defaults. They check the `AiCancellationToken` before
 and after execution and around streamed callbacks, but cannot interrupt the old

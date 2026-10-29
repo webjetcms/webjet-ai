@@ -56,7 +56,11 @@ public final class CancellationSupport {
         };
     }
 
-    /** Blocking operation that may fail with a structured provider exception. */
+    /**
+     * Blocking operation that may fail with a structured provider exception.
+     *
+     * @param <T> operation result type
+     */
     @FunctionalInterface
     public interface Call<T> {
         /**

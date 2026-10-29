@@ -54,6 +54,24 @@ public interface AiProvider extends AutoCloseable {
     List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException;
 
     /**
+     * Describes locally known adapter and model capabilities without credentials or I/O.
+     *
+     * <p>The default preserves custom-provider compatibility by returning unknown
+     * metadata. Implementations must not load models, invoke inference, or make network
+     * requests. Unknown model support does not prohibit execution.</p>
+     *
+     * @param model non-blank provider-specific model identifier
+     * @return immutable advisory capability metadata; never {@code null}
+     * @throws IllegalArgumentException if the model is null or blank
+     */
+    default AiCapabilities capabilities(String model) {
+        if (model == null || model.isBlank()) {
+            throw new IllegalArgumentException("Capability model must not be blank");
+        }
+        return AiCapabilities.unknown();
+    }
+
+    /**
      * Returns the static image rendering options supported by a model and operation.
      *
      * <p>The default preserves compatibility for custom providers that do not publish

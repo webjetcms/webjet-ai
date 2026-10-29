@@ -4,7 +4,12 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
+import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -80,6 +85,17 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
 
     @Override
     public String id() { return PROVIDER_ID; }
+
+    @Override
+    public AiCapabilities capabilities(String modelId) {
+        AiProvider.super.capabilities(modelId);
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, Operation.unsupported(),
+            AiOperation.CHAT, Operation.unsupported(),
+            AiOperation.GENERATE_IMAGE, Operation.unsupported(),
+            AiOperation.EDIT_IMAGE, Operation.unsupported()
+        ), Support.SUPPORTED, model.aliases().contains(modelId) ? Support.SUPPORTED : Support.UNSUPPORTED);
+    }
 
     /**
      * Returns the single model loaded from the validated bundle.

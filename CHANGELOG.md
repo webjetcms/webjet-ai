@@ -7,14 +7,6 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Per-call `AiCancellationToken` overloads for synchronous `execute` and `stream`,
-  aborting only the active HTTP request in OpenAI, Gemini, and OpenRouter while
-  retaining existing signatures and shared transport resources.
-- Non-retryable `AiErrorCategory.CANCELLED` failures preserved through credential
-  redaction. Existing exception constructors use `UNKNOWN`.
-- Compatibility defaults for custom and local providers that check cancellation
-  around blocking execution and streamed callbacks without closing shared resources.
-
 - Text-only `AiOperation.CHAT` with provider-managed conversation history through
   OpenAI Responses and Gemini Interactions, supporting both completed responses
   and streamed text. OpenRouter and local providers do not support `CHAT`.
@@ -26,6 +18,21 @@ uses [Semantic Versioning](https://semver.org/).
   translation options, and blank text.
 - Chat-specific prompt defenses that allow conversational questions while keeping
   untrusted content subordinate to security rules and trusted task instructions.
+
+- Immutable `AiCapabilities` metadata through `AiClient.capabilities(...)` and
+  backward-compatible provider defaults, without credentials, network access, or
+  inference during lookup.
+- Separate adapter and model support, per-operation streaming, continuation storage
+  requirements, and embedding capabilities for remote and local providers. Unknown
+  remote models retain their existing execution behavior.
+
+- Per-call `AiCancellationToken` overloads for synchronous `execute` and `stream`,
+  aborting only the active HTTP request in OpenAI, Gemini, and OpenRouter while
+  retaining existing signatures and shared transport resources.
+- Non-retryable `AiErrorCategory.CANCELLED` failures preserved through credential
+  redaction. Existing exception constructors use `UNKNOWN`.
+- Compatibility defaults for custom and local providers that check cancellation
+  around blocking execution and streamed callbacks without closing shared resources.
 
 ### Changed
 

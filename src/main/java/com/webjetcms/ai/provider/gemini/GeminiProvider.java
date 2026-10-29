@@ -33,6 +33,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
@@ -103,6 +107,26 @@ public final class GeminiProvider implements AiProvider {
     public Map<String, ImageOptionDefinition> imageOptions(String model, AiOperation operation) {
         AiProvider.super.imageOptions(model, operation);
         return GeminiImageOptions.definitions(normalizeModelId(model), operation);
+    }
+
+    @Override
+    public AiCapabilities capabilities(String model) {
+        AiProvider.super.capabilities(model);
+        String normalizedModel = normalizeModelId(model);
+        Support generation = GeminiImageOptions.definitions(normalizedModel, AiOperation.GENERATE_IMAGE).isEmpty()
+            ? Support.UNKNOWN : Support.SUPPORTED;
+        Support editing = GeminiImageOptions.definitions(normalizedModel, AiOperation.EDIT_IMAGE).isEmpty()
+            ? Support.UNKNOWN : Support.SUPPORTED;
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, new Operation(
+                Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED, Continuation.NONE),
+            AiOperation.CHAT, new Operation(
+                Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED, Continuation.PROVIDER_STORAGE_REQUIRED),
+            AiOperation.GENERATE_IMAGE, new Operation(
+                Support.SUPPORTED, generation, Support.SUPPORTED, Continuation.NONE),
+            AiOperation.EDIT_IMAGE, new Operation(
+                Support.SUPPORTED, editing, Support.SUPPORTED, Continuation.NONE)
+        ), Support.SUPPORTED, Support.UNKNOWN);
     }
 
     private List<ModelInfo> listModelsInternal(AiProviderConfig config) throws AiProviderException {

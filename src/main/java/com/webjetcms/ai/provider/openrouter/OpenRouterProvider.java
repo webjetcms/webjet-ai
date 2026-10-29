@@ -31,6 +31,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
@@ -103,6 +107,24 @@ public final class OpenRouterProvider implements AiProvider {
     public Map<String, ImageOptionDefinition> imageOptions(String model, AiOperation operation) {
         AiProvider.super.imageOptions(model, operation);
         return OpenRouterImageOptions.definitions(model);
+    }
+
+    @Override
+    public AiCapabilities capabilities(String model) {
+        AiProvider.super.capabilities(model);
+        boolean vectorModel = OpenRouterImageOptions.isRecraftVectorModel(model);
+        Support generation = vectorModel ? Support.UNSUPPORTED
+            : OpenRouterImageOptions.definitions(model).isEmpty() ? Support.UNKNOWN : Support.SUPPORTED;
+        Support editing = vectorModel ? Support.UNSUPPORTED : Support.UNKNOWN;
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, new Operation(
+                Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED, Continuation.NONE),
+            AiOperation.CHAT, Operation.unsupported(),
+            AiOperation.GENERATE_IMAGE, new Operation(
+                Support.SUPPORTED, generation, Support.UNSUPPORTED, Continuation.NONE),
+            AiOperation.EDIT_IMAGE, new Operation(
+                Support.SUPPORTED, editing, Support.UNSUPPORTED, Continuation.NONE)
+        ), Support.SUPPORTED, Support.UNKNOWN);
     }
 
     private List<ModelInfo> listModelsInternal(AiProviderConfig config) throws AiProviderException {

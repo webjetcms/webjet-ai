@@ -252,6 +252,35 @@ public final class AiClient implements AutoCloseable {
     }
 
     /**
+     * Describes capabilities using the only registered provider, without credentials or I/O.
+     *
+     * @param model non-blank provider-specific model identifier
+     * @return immutable advisory adapter and model capabilities
+     * @throws IllegalStateException if exactly one provider is not registered
+     * @throws IllegalArgumentException if the model is null or blank
+     */
+    public AiCapabilities capabilities(String model) {
+        return capabilities(soleProviderId(), model);
+    }
+
+    /**
+     * Describes locally known capabilities without loading a model catalogue or making requests.
+     * Metadata does not grant storage consent or change request validation. Unknown model
+     * support must not be treated as a definitive rejection.
+     *
+     * @param providerId registered provider identifier
+     * @param model non-blank provider-specific model identifier
+     * @return immutable advisory adapter and model capabilities
+     * @throws IllegalArgumentException if the provider or model is invalid
+     */
+    public AiCapabilities capabilities(String providerId, String model) {
+        if (model == null || model.isBlank()) {
+            throw new IllegalArgumentException("Capability model must not be blank");
+        }
+        return Objects.requireNonNull(provider(providerId).capabilities(model), "AI provider capabilities");
+    }
+
+    /**
      * Returns static image option metadata from the only registered provider.
      * This call does not require credentials or perform network I/O.
      *

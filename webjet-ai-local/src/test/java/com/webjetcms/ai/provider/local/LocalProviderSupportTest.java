@@ -17,6 +17,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -33,6 +34,9 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Support;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
@@ -45,6 +49,37 @@ class LocalProviderSupportTest {
 
     @TempDir
     Path temporaryDirectory;
+
+    @Test
+    void localCapabilitiesUseLoadedAliasesWithoutNativeResources() throws Exception {
+        Map<String, String> models = Map.of(
+            LocalGenerationModelProvider.PROVIDER_ID, "fixture/generation",
+            LocalTranslationModelProvider.PROVIDER_ID, "facebook/m2m100_418M",
+            LocalEmbeddingModelProvider.PROVIDER_ID, "intfloat/multilingual-e5-small"
+        );
+        for (AiProvider provider : providersWithoutNativeResources()) {
+            try (provider) {
+                String model = models.get(provider.id());
+                AiCapabilities capabilities = provider.capabilities(model);
+                assertEquals(capabilities, provider.capabilities(model.substring(model.lastIndexOf('/') + 1)));
+                boolean embedding = provider instanceof LocalEmbeddingModelProvider;
+                assertEquals(embedding ? Support.UNSUPPORTED : Support.SUPPORTED,
+                    capabilities.operation(AiOperation.TEXT).support());
+                assertEquals(embedding ? Support.SUPPORTED : Support.UNSUPPORTED, capabilities.embeddingSupport());
+                assertEquals(capabilities.embeddingSupport(), capabilities.embeddingModelSupport());
+                for (AiOperation operation : AiOperation.values()) {
+                    assertEquals(Support.UNSUPPORTED, capabilities.operation(operation).adapterStreaming());
+                    assertEquals(Continuation.NONE, capabilities.operation(operation).continuation());
+                    if (operation != AiOperation.TEXT) {
+                        assertEquals(Support.UNSUPPORTED, capabilities.operation(operation).support());
+                    }
+                }
+                AiCapabilities unknownModel = provider.capabilities("not-loaded");
+                assertEquals(Support.UNSUPPORTED, unknownModel.operation(AiOperation.TEXT).support());
+                assertEquals(Support.UNSUPPORTED, unknownModel.embeddingModelSupport());
+            }
+        }
+    }
 
     @Test
     void rejectsChatAndContinuationWithoutNativeResources() throws Exception {
@@ -72,8 +107,12 @@ class LocalProviderSupportTest {
         var embedding = ApprovedEmbeddingModelCatalog.load().model("multilingual-e5-small");
         var embeddingBundle = new VerifiedBundleExtractor.Result<>(null,
             new EmbeddingBundleManifest(embedding, embedding.variants().get(0)));
+        Properties generationProperties = new Properties();
+        generationProperties.setProperty("model.aliases", "fixture/generation,generation");
+        var generationBundle = new VerifiedBundleExtractor.Result<>(null,
+            new CatalogValues(generationProperties, "generation fixture"));
         return List.of(
-            constructProvider(LocalGenerationModelProvider.class, new VerifiedBundleExtractor.Result<>(null, null), null, 200),
+            constructProvider(LocalGenerationModelProvider.class, generationBundle, null, 200),
             constructProvider(LocalTranslationModelProvider.class, translationBundle,
                 new NativeSeq2SeqRuntimeFactory.Resources<>(null, null), null, null, null),
             constructProvider(LocalEmbeddingModelProvider.class, embeddingBundle,

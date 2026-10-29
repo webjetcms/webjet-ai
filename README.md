@@ -157,6 +157,56 @@ List<String> bundledProviders = AiProviders.builtIns();
 String openAi = AiProviders.OPENAI;
 ```
 
+### Provider and model capabilities
+
+Query locally known capabilities without credentials or network requests. Use
+`client.capabilities(model)` when the client contains only one provider.
+
+```java
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Support;
+import com.webjetcms.ai.AiOperation;
+
+AiCapabilities capabilities = client.capabilities(providerId, model);
+AiCapabilities.Operation chat = capabilities.operation(AiOperation.CHAT);
+boolean canOfferChat = chat.adapterSupport() == Support.SUPPORTED
+    && chat.modelSupport() != Support.UNSUPPORTED;
+boolean canOfferStreaming = canOfferChat && chat.adapterStreaming() == Support.SUPPORTED;
+boolean requiresStorage = chat.continuation() == Continuation.PROVIDER_STORAGE_REQUIRED;
+```
+
+`adapterSupport()` describes what the library adapter implements. `modelSupport()`
+describes what its metadata knows about the selected model; `UNKNOWN` is not a
+rejection. `support()` combines both: either unsupported value yields
+`UNSUPPORTED`, two supported values yield `SUPPORTED`, and all other combinations
+yield `UNKNOWN`. Thus an uncatalogued text model can still be offered by CMS even
+when combined support is unknown. The returned operation map and values are
+immutable, with operations ordered by `AiOperation`.
+
+`adapterStreaming()` describes the adapter's streaming path for that operation.
+It does not guarantee that the selected model accepts streaming. Listeners receive
+text fragments; image media is returned in the completed response where supported.
+Embeddings have separate `embeddingSupport()` and `embeddingModelSupport()` values
+because they use `EmbeddingRequest` and `embed(...)`, rather than `AiOperation`.
+
+OpenAI and Gemini describe `CHAT` continuation as `PROVIDER_STORAGE_REQUIRED`.
+CMS must still explicitly permit storage before setting `store(true)`; lookup
+never changes the request or grants storage consent. OpenRouter and current local
+providers report `CHAT` as unsupported. Other operations report no continuation.
+
+Remote text/chat and embedding model support remains `UNKNOWN`; model names and
+prefixes are not guessed. Known image capabilities reuse the existing static
+catalogues and adapter restrictions. OpenRouter's image-generation catalogue does
+not establish editing support, so editing remains unknown except for explicitly
+excluded models. Local providers recognize the aliases of their loaded model and
+reject other model IDs in their metadata, without loading or running another model.
+
+Metadata is advisory and does not verify model availability, account access, or
+custom endpoint behavior. Execution retains its existing validation and permits
+unknown remote models. Custom providers inherit unknown metadata until they
+override `capabilities(model)`; `ModelInfo` and existing APIs remain unchanged.
+
 Add an application-owned provider directly during discovery:
 
 ```java

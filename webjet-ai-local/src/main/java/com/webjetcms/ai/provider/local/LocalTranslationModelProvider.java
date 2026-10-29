@@ -1,9 +1,14 @@
 package com.webjetcms.ai.provider.local;
 
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -64,6 +69,18 @@ public final class LocalTranslationModelProvider extends Seq2SeqProvider<NativeT
      */
     @Override
     public String id() { return PROVIDER_ID; }
+
+    @Override
+    public AiCapabilities capabilities(String modelId) {
+        super.capabilities(modelId);
+        Support modelSupport = model.aliases().contains(modelId) ? Support.SUPPORTED : Support.UNSUPPORTED;
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, new Operation(Support.SUPPORTED, modelSupport, Support.UNSUPPORTED, Continuation.NONE),
+            AiOperation.CHAT, Operation.unsupported(),
+            AiOperation.GENERATE_IMAGE, Operation.unsupported(),
+            AiOperation.EDIT_IMAGE, Operation.unsupported()
+        ), Support.UNSUPPORTED, Support.UNSUPPORTED);
+    }
 
     /** Returns language codes discovered from the validated tokenizer metadata.
      * @return immutable set of supported language codes
