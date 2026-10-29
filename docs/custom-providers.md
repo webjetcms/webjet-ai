@@ -15,6 +15,7 @@ package com.example.ai;
 import java.util.List;
 
 import com.webjetcms.ai.AiOperation;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -71,7 +72,8 @@ public final class ExampleProvider implements AiProvider {
             throw new AiProviderException(PROVIDER_ID, "Request is required");
         }
         if (request.operation() != AiOperation.TEXT) {
-            throw new AiProviderException(PROVIDER_ID, "Only text requests are supported");
+            throw new AiProviderException(PROVIDER_ID, "Only text requests are supported")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         }
         if (request.model() == null || request.model().isBlank()) {
             throw new AiProviderException(PROVIDER_ID, "Model is required");
@@ -83,6 +85,44 @@ public final class ExampleProvider implements AiProvider {
 The default `AiProvider.embed(...)` implementation reports that embeddings are not
 supported. Override it only when the backend supports embeddings. Override `close()`
 when the provider owns an HTTP client, executor, or another closeable resource.
+
+Override `capabilities(String model)` to publish an immutable `AiCapabilities`
+descriptor. The default validates the non-blank model ID and returns unknown
+metadata, preserving existing providers. Supply an `Operation` for each known
+`AiOperation` and separate embedding support; omitted operations remain unknown.
+Each operation separates adapter support, model support, adapter streaming, and
+continuation. Call `AiProvider.super.capabilities(model)` to reuse model-ID
+validation before returning your descriptor.
+
+Read only local metadata or aliases already loaded into the provider. Do not call
+`listModels`, perform network or file I/O, initialize native models, or require
+credentials during lookup. Report `UNKNOWN` when support is not established;
+model-name prefixes alone are insufficient evidence. Metadata must agree with
+existing execution restrictions and must not introduce new runtime rejection of
+unknown remote models. `PROVIDER_STORAGE_REQUIRED` reports a requirement, not
+permission to set `store(true)`.
+
+The `execute(request, config, token)` and `stream(request, config, listener, token)`
+overloads have compatibility defaults. They check the `AiCancellationToken` before
+and after execution and around streamed callbacks, but cannot interrupt the old
+blocking implementation. Override them when your transport or runtime supports
+active cancellation. Keep the token separate from shared configuration and request
+values; never keep the current request or token in a provider instance field.
+
+Call `token.throwIfCancelled(id())` before starting work. Register only that call's
+abort action with `token.onCancel(...)` and close the returned `Registration` in a
+`finally` block or try-with-resources after response cleanup. Registration handles
+tokens cancelled before or during registration. Hooks must be short and must not
+close a shared client, pool, or native runtime. Runtime failures from hooks are
+ignored so other registered abort actions can run.
+
+Check the token before returning success and before delivering further fragments.
+On failure, check cancellation before classifying transport errors, and preserve
+`AiErrorCategory.CANCELLED` through `redactSecrets(config)`. Do not interpret every
+`InterruptedIOException` as cancellation: that hierarchy also includes timeouts.
+Keep redaction and normal error handling for failures unrelated to cancellation.
+An already dispatched callback may finish; the host remains responsible for
+rejecting results belonging to an obsolete chat or editor.
 
 A provider instance is reused for calls made by its owning client and may receive
 concurrent calls. Keep mutable state thread-safe and reuse a pooled transport instead
@@ -271,6 +311,21 @@ before delegating. `store` defaults to `false`.
 Throw `AiProviderException` with the stable provider ID for validation, transport,
 protocol, and parsing failures. `AiClient` applies credential redaction at the provider
 boundary, but providers must still avoid logging secrets themselves.
+
+Use `AiErrorCategory.UNSUPPORTED_OPERATION` for a known adapter or model operation
+restriction. Use `INVALID_CONTINUATION` only when a supplied chat continuation ID
+is invalid, established by local validation or a reliable structured provider
+error code/parameter. Classify at the protocol error boundary before credential
+redaction; never interpret model-generated text as a provider error object.
+Do not infer continuation failures from human-readable messages or generic HTTP
+400/404 responses. Leave ambiguous errors as `UNKNOWN`.
+
+`exception.withCategory(category)` copies the existing status, raw response,
+cause, suppressed exceptions, and stack trace. Retryability is preserved except
+that `CANCELLED` is always non-retryable. Apply the same classification rules to
+normal responses and streaming failures, and pass the result through
+`redactSecrets(config)`. Existing exception constructors remain compatible and
+default to `UNKNOWN`; categories do not trigger automatic recovery or storage.
 
 Embedding inputs are intentionally delegated without prompt-protection markers because
 changing their text would change the generated vectors. Apply host privacy and content

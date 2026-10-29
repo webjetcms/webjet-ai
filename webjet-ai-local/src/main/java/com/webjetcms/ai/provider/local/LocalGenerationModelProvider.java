@@ -4,10 +4,16 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiInputHandling;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
@@ -19,6 +25,7 @@ import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.EmbeddingRequest;
 import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.ModelInfo;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.provider.local.ApprovedSeq2SeqModelCatalog.ModelDefinition;
 import com.webjetcms.ai.provider.local.NativeSeq2SeqRuntimeFactory.Resources;
 import com.webjetcms.ai.provider.local.Seq2SeqBundleValidator.PreparedBundle;
@@ -90,6 +97,19 @@ public final class LocalGenerationModelProvider implements AiProvider {
     public String id() { return PROVIDER_ID; }
 
     @Override
+    public AiCapabilities capabilities(String modelId) {
+        AiProvider.super.capabilities(modelId);
+        Support modelSupport = model.uniqueSet("model.aliases").contains(modelId)
+            ? Support.SUPPORTED : Support.UNSUPPORTED;
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, new Operation(Support.SUPPORTED, modelSupport, Support.UNSUPPORTED, Continuation.NONE),
+            AiOperation.CHAT, Operation.unsupported(),
+            AiOperation.GENERATE_IMAGE, Operation.unsupported(),
+            AiOperation.EDIT_IMAGE, Operation.unsupported()
+        ), Support.UNSUPPORTED, Support.UNSUPPORTED);
+    }
+
+    @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
         return LocalProviderBoundary.invoke(config, () ->
             read(() -> List.of(new ModelInfo(model.required("model.canonical-id"),
@@ -123,8 +143,9 @@ public final class LocalGenerationModelProvider implements AiProvider {
      */
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return LocalProviderBoundary.invoke(config, () ->
-            read(() -> {
+        return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
+            return read(() -> {
                 validate(request);
                 String prompt = chatPrompt(request);
                 try {
@@ -144,8 +165,8 @@ public final class LocalGenerationModelProvider implements AiProvider {
                 } catch (Exception exception) {
                     throw new AiProviderException(PROVIDER_ID, "Local text generation failed", exception);
                 }
-            })
-        );
+            });
+        });
     }
 
     static AiResponse generationResponse(String generated) {
@@ -172,14 +193,19 @@ public final class LocalGenerationModelProvider implements AiProvider {
     public AiResponse stream(AiRequest request, AiProviderConfig config, AiStreamListener listener)
         throws AiProviderException {
         return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
             throw new AiProviderException(PROVIDER_ID,
-                "Streaming is not supported by the local generation provider");
+                "Streaming is not supported by the local generation provider")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         });
     }
 
     private void validate(AiRequest request) throws AiProviderException {
         if (request == null) throw invalid("Text request must not be null");
-        if (request.operation() != AiOperation.TEXT) throw invalid("Local generation models require a TEXT request");
+        if (request.operation() != AiOperation.TEXT) {
+            throw invalid("Local generation models require a TEXT request")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
+        }
         if (PromptInjectionDefense.hasTaskInstructions(request.instructions()) == false
             && PromptInjectionDefense.hasUntrustedText(request.inputText(), UntrustedSource.INPUT_TEXT) == false
             && PromptInjectionDefense.hasUntrustedText(request.userPrompt(), UntrustedSource.USER_PROMPT) == false) {

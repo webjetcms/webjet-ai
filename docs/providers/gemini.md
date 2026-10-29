@@ -9,15 +9,23 @@ This guide describes the WebJET AI adapter. The selected Gemini model must
 support the requested input and output modalities. `listModels` does not filter
 models by operation or capability.
 
-Gemini ignores `store`. Supported image resolution and aspect-ratio controls are
+Gemini ignores `store` for `TEXT` and image operations. `CHAT` uses Interactions
+and requires explicit `store(true)` for provider-managed conversation context.
+Supported image resolution and aspect-ratio controls are
 published through `AiClient.imageOptions(...)`; Gemini image models do not
 advertise portable `count` or `quality` controls.
 
 ## Capabilities
 
+`client.capabilities("gemini", model)` describes adapter support without making a
+request and accepts the optional `models/` prefix. Known image support comes from
+the existing image-option catalogue; text/chat and embedding model support remains
+unknown. Adapter streaming support does not establish model streaming support.
+
 | Task | Request | Non-streaming call | `stream` | Important requirements |
 | --- | --- | --- | --- | --- |
 | Text generation or transformation | `AiRequest` with `TEXT` | `execute` | Yes | A non-blank model |
+| Continue a text conversation | `AiRequest` with `CHAT` | `execute` | Yes | Explicit `store(true)`; optional `previousResponseId` from the same provider |
 | Analyze text and media | `AiRequest` with `TEXT` | `execute` | Yes | A model that accepts the supplied media |
 | Generate images | `AiRequest` with `GENERATE_IMAGE` | `execute` | Adapter allows it | A model that produces image output |
 | Edit an image | `AiRequest` with `EDIT_IMAGE` | `execute` | Adapter allows it | A model that edits images and non-empty `inputMedia` |

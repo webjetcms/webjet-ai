@@ -32,6 +32,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
@@ -48,6 +53,8 @@ import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
+import com.webjetcms.ai.internal.CancellationSupport;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.internal.ImageOptionValidator;
 import com.webjetcms.ai.security.PromptInjectionDefense;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
@@ -100,6 +107,26 @@ public final class GeminiProvider implements AiProvider {
     public Map<String, ImageOptionDefinition> imageOptions(String model, AiOperation operation) {
         AiProvider.super.imageOptions(model, operation);
         return GeminiImageOptions.definitions(normalizeModelId(model), operation);
+    }
+
+    @Override
+    public AiCapabilities capabilities(String model) {
+        AiProvider.super.capabilities(model);
+        String normalizedModel = normalizeModelId(model);
+        Support generation = GeminiImageOptions.definitions(normalizedModel, AiOperation.GENERATE_IMAGE).isEmpty()
+            ? Support.UNKNOWN : Support.SUPPORTED;
+        Support editing = GeminiImageOptions.definitions(normalizedModel, AiOperation.EDIT_IMAGE).isEmpty()
+            ? Support.UNKNOWN : Support.SUPPORTED;
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, new Operation(
+                Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED, Continuation.NONE),
+            AiOperation.CHAT, new Operation(
+                Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED, Continuation.PROVIDER_STORAGE_REQUIRED),
+            AiOperation.GENERATE_IMAGE, new Operation(
+                Support.SUPPORTED, generation, Support.SUPPORTED, Continuation.NONE),
+            AiOperation.EDIT_IMAGE, new Operation(
+                Support.SUPPORTED, editing, Support.SUPPORTED, Continuation.NONE)
+        ), Support.SUPPORTED, Support.UNKNOWN);
     }
 
     private List<ModelInfo> listModelsInternal(AiProviderConfig config) throws AiProviderException {
@@ -163,25 +190,45 @@ public final class GeminiProvider implements AiProvider {
 
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return invokeAtBoundary(config, () -> executeInternal(request, config));
+        return execute(request, config, AiCancellationToken.none());
     }
 
-    private AiResponse executeInternal(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    @Override
+    public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
+        return invokeAtBoundary(config, () -> CancellationSupport.call(
+            PROVIDER_ID,
+            token,
+            () -> executeInternal(request, config, token)
+        ));
+    }
+
+    private AiResponse executeInternal(
+        AiRequest request,
+        AiProviderConfig config,
+        AiCancellationToken token
+    ) throws AiProviderException {
         requireConfigured(config);
         validateRequest(request);
 
-        HttpPost post = new HttpPost(operationUri(config, request.model(), "generateContent", false));
+        boolean chat = request.operation() == AiOperation.CHAT;
+        HttpPost post = new HttpPost(chat
+            ? interactionsUri(config)
+            : operationUri(config, request.model(), "generateContent", false));
         configure(post, config, true);
-        post.setEntity(new StringEntity(buildRequestBody(request).toString(), JSON_UTF_8));
+        post.setEntity(new StringEntity((chat
+            ? buildChatRequestBody(request, false)
+            : buildRequestBody(request)).toString(), JSON_UTF_8));
 
-        try (CloseableHttpResponse response = httpClient.execute(post)) {
+        try (AiCancellationToken.Registration cancellation = token.onCancel(post::abort);
+            CloseableHttpResponse response = httpClient.execute(post)) {
             String payload = entityAsString(response.getEntity());
             int statusCode = response.getStatusLine().getStatusCode();
             if (isSuccessful(statusCode) == false) {
                 throw responseFailure(statusCode, payload, "Gemini generation failed.");
             }
             try {
-                return GeminiResponseParser.parse(payload);
+                return chat ? GeminiInteractionsParser.parse(payload) : GeminiResponseParser.parse(payload);
             } catch (IOException exception) {
                 throw new AiProviderException(
                     PROVIDER_ID,
@@ -205,13 +252,33 @@ public final class GeminiProvider implements AiProvider {
         AiProviderConfig config,
         AiStreamListener listener
     ) throws AiProviderException {
-        return invokeAtBoundary(config, () -> streamInternal(request, config, listener));
+        return stream(request, config, listener, AiCancellationToken.none());
+    }
+
+    @Override
+    public AiResponse stream(
+        AiRequest request,
+        AiProviderConfig config,
+        AiStreamListener listener,
+        AiCancellationToken token
+    ) throws AiProviderException {
+        return invokeAtBoundary(config, () -> CancellationSupport.call(
+            PROVIDER_ID,
+            token,
+            () -> streamInternal(
+                request,
+                config,
+                CancellationSupport.listener(PROVIDER_ID, token, listener),
+                token
+            )
+        ));
     }
 
     private AiResponse streamInternal(
         AiRequest request,
         AiProviderConfig config,
-        AiStreamListener listener
+        AiStreamListener listener,
+        AiCancellationToken token
     ) throws AiProviderException {
         requireConfigured(config);
         validateRequest(request);
@@ -219,13 +286,19 @@ public final class GeminiProvider implements AiProvider {
             throw new AiProviderException(PROVIDER_ID, "Gemini stream listener is required.");
         }
 
-        HttpPost post = new HttpPost(operationUri(config, request.model(), "streamGenerateContent", true));
+        boolean chat = request.operation() == AiOperation.CHAT;
+        HttpPost post = new HttpPost(chat
+            ? interactionsUri(config)
+            : operationUri(config, request.model(), "streamGenerateContent", true));
         configure(post, config, true);
         post.setHeader("Accept", "text/event-stream");
         post.setHeader("Accept-Encoding", "identity");
-        post.setEntity(new StringEntity(buildRequestBody(request).toString(), JSON_UTF_8));
+        post.setEntity(new StringEntity((chat
+            ? buildChatRequestBody(request, true)
+            : buildRequestBody(request)).toString(), JSON_UTF_8));
 
-        try (CloseableHttpResponse response = httpClient.execute(post)) {
+        try (AiCancellationToken.Registration cancellation = token.onCancel(post::abort);
+            CloseableHttpResponse response = httpClient.execute(post)) {
             int statusCode = response.getStatusLine().getStatusCode();
             if (isSuccessful(statusCode) == false) {
                 String payload = entityAsString(response.getEntity());
@@ -239,7 +312,9 @@ public final class GeminiProvider implements AiProvider {
             try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(entity.getContent(), StandardCharsets.UTF_8)
             )) {
-                return GeminiResponseParser.parseStream(reader, listener);
+                return chat
+                    ? GeminiInteractionsParser.parseStream(reader, listener)
+                    : GeminiResponseParser.parseStream(reader, listener);
             } catch (IOException exception) {
                 throw new AiProviderException(
                     PROVIDER_ID,
@@ -426,6 +501,29 @@ public final class GeminiProvider implements AiProvider {
         }
     }
 
+    static ObjectNode buildChatRequestBody(AiRequest request, boolean stream) {
+        ObjectNode root = MAPPER.createObjectNode();
+        root.put("model", normalizeModelId(request.model()));
+        root.put("system_instruction", PromptInjectionDefense.hardenChatInstructions(request.instructions()));
+        root.put("store", request.store());
+        root.put("stream", stream);
+        if (request.previousResponseId() != null) {
+            root.put("previous_interaction_id", request.previousResponseId());
+        }
+        ArrayNode input = root.putArray("input");
+        addChatInput(input, request.inputText(), UntrustedSource.INPUT_TEXT);
+        addChatInput(input, request.userPrompt(), UntrustedSource.USER_PROMPT);
+        root.putArray("response_format").addObject().put("type", "text").put("mime_type", "text/plain");
+        return root;
+    }
+
+    private static void addChatInput(ArrayNode input, String value, UntrustedSource source) {
+        if (PromptInjectionDefense.hasUntrustedText(value, source)) {
+            input.addObject().put("type", "text").put("text",
+                PromptInjectionDefense.protectUntrustedText(value, source).protectedText());
+        }
+    }
+
     static ObjectNode buildRequestBody(AiRequest request) {
         ObjectNode root = MAPPER.createObjectNode();
         ArrayNode contents = root.putArray("contents");
@@ -541,6 +639,10 @@ public final class GeminiProvider implements AiProvider {
         return URI.create(value.toString());
     }
 
+    private static URI interactionsUri(AiProviderConfig config) {
+        return modelsBaseUri(config).resolve("../interactions");
+    }
+
     private static URI operationUri(
         AiProviderConfig config,
         String model,
@@ -579,8 +681,12 @@ public final class GeminiProvider implements AiProvider {
         if (request == null) {
             throw new AiProviderException(PROVIDER_ID, "Gemini request is required.");
         }
+        ChatRequestValidator.validate(PROVIDER_ID, request);
         if (isNotBlank(normalizeModelId(request.model())) == false) {
             throw new AiProviderException(PROVIDER_ID, "Gemini model is required.");
+        }
+        if (request.operation() == AiOperation.CHAT) {
+            return;
         }
         if (request.operation() == AiOperation.EDIT_IMAGE
             && (request.inputMedia() == null || request.inputMedia().data().length == 0)) {

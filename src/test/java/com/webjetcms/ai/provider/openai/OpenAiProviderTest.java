@@ -22,7 +22,9 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpRequest;
 import org.apache.http.HttpEntity;
@@ -30,6 +32,7 @@ import org.apache.http.HttpEntityEnclosingRequest;
 import org.apache.http.HttpHeaders;
 import org.apache.http.HttpVersion;
 import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpRequestBase;
 import org.apache.http.conn.ClientConnectionManager;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
@@ -42,7 +45,9 @@ import org.apache.http.util.EntityUtils;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.webjetcms.ai.AiCancellationToken;
 import com.webjetcms.ai.AiClient;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -62,6 +67,226 @@ import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 class OpenAiProviderTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void classifiesOnlyStructuredErrorsForContinuingChat() throws Exception {
+        record Failure(int status, boolean streaming, String body, String raw, AiErrorCategory category) { }
+        String codeError = "{\"code\":\"previous_response_not_found\",\"message\":\"Missing continuation\"}";
+        String httpError = "{\"error\":" + codeError + "}";
+        String failedResponse = "{\"status\":\"failed\",\"error\":" + codeError + "}";
+        String failedEvent = "{\"type\":\"response.failed\",\"response\":" + failedResponse + "}";
+        String parameterEvent = "{\"type\":\"error\",\"code\":null,\"param\":\"previous_response_id\",\"message\":\"Invalid continuation\"}";
+        String otherError = "{\"error\":{\"code\":\"model_not_found\",\"param\":\"model\",\"message\":\"previous_response_id not found\"}}";
+        String echoedError = "data: " + MAPPER.createObjectNode().put("type", "response.output_text.delta")
+            .put("delta", httpError) + "\n\n";
+        List<Failure> failures = List.of(
+            new Failure(404, false, httpError, httpError, AiErrorCategory.INVALID_CONTINUATION),
+            new Failure(200, true, "data: " + parameterEvent + "\n\n", parameterEvent, AiErrorCategory.INVALID_CONTINUATION),
+            new Failure(200, false, failedResponse, failedResponse, AiErrorCategory.INVALID_CONTINUATION),
+            new Failure(200, true, "data: " + failedEvent + "\n\n", failedEvent, AiErrorCategory.INVALID_CONTINUATION),
+            new Failure(404, false, otherError, otherError, AiErrorCategory.UNKNOWN),
+            new Failure(200, true, echoedError, httpError, AiErrorCategory.UNKNOWN)
+        );
+        for (Failure failure : failures) {
+            for (String previousId : new String[] {null, "resp_previous"}) {
+                RecordingHttpClient transport = new RecordingHttpClient(failure.status(), failure.body());
+                try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+                    AiProviderException exception = assertThrows(AiProviderException.class, () -> {
+                        if (failure.streaming()) {
+                            provider.stream(chatRequest(previousId), embeddingConfig("key", "trusted"), ignored -> { });
+                        } else {
+                            provider.execute(chatRequest(previousId), embeddingConfig("key", "trusted"));
+                        }
+                    });
+                    assertEquals(previousId == null ? AiErrorCategory.UNKNOWN : failure.category(), exception.category());
+                    assertEquals(failure.status(), exception.statusCode());
+                    assertEquals(failure.raw(), exception.rawResponse());
+                    assertFalse(exception.retryable());
+                    assertEquals(1, transport.calls);
+                    assertEquals(previousId, MAPPER.readTree(transport.requestBody).path("previous_response_id").textValue());
+                }
+            }
+        }
+    }
+
+    @Test
+    void classifiesUnsupportedStreamingAndImageEditingBeforeHttp() throws Exception {
+        RecordingHttpClient transport = new RecordingHttpClient(200, "{}");
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            AiProviderException streaming = assertThrows(AiProviderException.class, () -> provider.stream(
+                AiRequest.builder().operation(AiOperation.GENERATE_IMAGE).model("gpt-image-1.5").build(),
+                embeddingConfig("key", "trusted"), ignored -> { }
+            ));
+            AiProviderException editing = assertThrows(AiProviderException.class, () -> provider.execute(
+                AiRequest.builder().operation(AiOperation.EDIT_IMAGE).model("dall-e-3").build(),
+                embeddingConfig("key", "trusted")
+            ));
+            assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, streaming.category());
+            assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, editing.category());
+            assertFalse(streaming.retryable());
+            assertFalse(editing.retryable());
+            assertEquals(0, transport.calls);
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = AiOperation.class, names = {"GENERATE_IMAGE", "EDIT_IMAGE"})
+    void cancellationAbortsImageOperations(AiOperation operation) throws Exception {
+        AiCancellationToken token = new AiCancellationToken();
+        RecordingHttpClient transport = new RecordingHttpClient(new IOException("Request aborted"));
+        transport.onExecute = token::cancel;
+        AiRequest.Builder request = AiRequest.builder()
+            .operation(operation)
+            .model("gpt-image-1.5")
+            .userPrompt("A mountain at sunrise");
+        if (operation == AiOperation.EDIT_IMAGE) {
+            request.inputMedia(new BinaryContent(new byte[] {1, 2, 3}, "image/png", "source.png"));
+        }
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            AiProviderException exception = assertThrows(AiProviderException.class,
+                () -> provider.execute(request.build(), embeddingConfig("key", "trusted"), token));
+            assertEquals(AiErrorCategory.CANCELLED, exception.category());
+            assertFalse(exception.retryable());
+            assertEquals(1, transport.calls);
+            assertTrue(transport.capturedRequest.isAborted());
+        }
+    }
+
+    @Test
+    void cancellationInsideStreamListenerAbortsRequestAndStopsBufferedDeltas() throws Exception {
+        AiCancellationToken token = new AiCancellationToken();
+        String stream = """
+            event: response.output_text.delta
+            data: {"delta":"Hello"}
+
+            event: response.output_text.delta
+            data: {"delta":" again"}
+
+            event: response.completed
+            data: {"response":{"status":"completed"}}
+
+            """;
+        RecordingHttpClient transport = new RecordingHttpClient(200, stream);
+        List<String> deltas = new ArrayList<>();
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            AiProviderException exception = assertThrows(AiProviderException.class, () -> provider.stream(
+                AiRequest.builder().model("gpt-test").userPrompt("Hello").build(),
+                embeddingConfig("key", "trusted"), delta -> {
+                    deltas.add(delta);
+                    token.cancel();
+                }, token
+            ));
+            assertEquals(AiErrorCategory.CANCELLED, exception.category());
+            assertFalse(exception.retryable());
+            assertEquals(List.of("Hello"), deltas);
+            assertTrue(transport.capturedRequest.isAborted());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void handlesChatContinuationAndFreshRequests(boolean streaming) throws Exception {
+        String completion = completedChat("resp_completed", "Hello");
+        RecordingHttpClient transport = new RecordingHttpClient(200,
+            streaming ? chatStream("Hello", completion) : completion);
+        try (AiClient client = AiClient.of(new OpenAiProvider(transport))) {
+            for (String previousId : new String[] {null, "resp_previous", null}) {
+                AiRequest request = chatRequest(previousId);
+                List<String> deltas = new ArrayList<>();
+                AiResponse response = streaming
+                    ? client.stream(request, embeddingConfig("key", "trusted"), deltas::add)
+                    : client.execute(request, embeddingConfig("key", "trusted"));
+                assertEquals("resp_completed", response.responseId());
+                assertEquals("Hello", response.text());
+                assertEquals(7, response.usage().totalTokens());
+                assertEquals(streaming ? List.of("Hello") : List.of(), deltas);
+                JsonNode body = MAPPER.readTree(transport.requestBody);
+                assertEquals(previousId, body.path("previous_response_id").textValue());
+                assertEquals(previousId != null, body.has("previous_response_id"));
+                assertTrue(body.path("store").asBoolean());
+                assertEquals(streaming, body.path("stream").asBoolean());
+                assertEquals(PromptInjectionDefense.hardenChatInstructions(request.instructions()), body.path("instructions").asText());
+                assertEquals(1, body.path("input").size());
+                assertEquals("user", body.path("input").get(0).path("role").asText());
+            }
+        }
+        assertEquals("https://example.test/custom/v1/responses", transport.uri);
+        assertEquals(3, transport.calls);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "{not-json", "null", "{\"status\":\"completed\",\"output_text\":\"Hello\"}",
+        "{\"id\":\"resp_bad\",\"status\":\"incomplete\",\"output_text\":\"Hello\"}",
+        "{\"id\":\"resp_bad\",\"status\":\"completed\",\"output_text\":\" \"}",
+        "{\"id\":\"resp_bad\",\"status\":\"completed\",\"output_text\":\"Hello\",\"output\":[{\"type\":\"function_call\"}]}"
+    })
+    void rejectsUnusableChatResponsesWithoutRetrying(String payload) throws Exception {
+        for (boolean streaming : List.of(false, true)) {
+            RecordingHttpClient transport = new RecordingHttpClient(200, streaming ? chatStream("Hello", payload) : payload);
+            try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+                AiProviderException exception = assertThrows(AiProviderException.class, () -> {
+                    if (streaming) provider.stream(chatRequest("previous"), embeddingConfig("key", "trusted"), ignored -> { });
+                    else provider.execute(chatRequest("previous"), embeddingConfig("key", "trusted"));
+                });
+                assertFalse(exception.retryable());
+            }
+            assertEquals(1, transport.calls);
+        }
+    }
+
+    @Test
+    void rejectsMalformedOrMismatchedChatStreams() throws Exception {
+        for (String stream : List.of(
+            chatStream("partial", completedChat("resp_done", "complete")),
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: [DONE]\n\n",
+            "data: null\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.completed\",\"delta\":\"text\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":42}\n\n"
+        )) {
+            RecordingHttpClient transport = new RecordingHttpClient(200, stream);
+            try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+                assertThrows(AiProviderException.class, () -> provider.stream(
+                    chatRequest("previous"), embeddingConfig("key", "trusted"), ignored -> { }));
+            }
+            assertEquals(1, transport.calls);
+        }
+    }
+
+    @Test
+    void validatesDirectChatRequestsBeforeTransport() throws Exception {
+        RecordingHttpClient transport = new RecordingHttpClient(200, "{}");
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            for (AiRequest request : List.of(
+                AiRequest.builder().operation(AiOperation.CHAT).model("gpt-test").userPrompt("Hello").build(),
+                chatRequest(" "),
+                AiRequest.builder().model("gpt-test").userPrompt("Hello").previousResponseId("previous").build()
+            )) {
+                assertThrows(AiProviderException.class, () -> provider.execute(request, embeddingConfig("key", "trusted")));
+                assertThrows(AiProviderException.class, () -> provider.stream(request, embeddingConfig("key", "trusted"), ignored -> { }));
+            }
+        }
+        assertEquals(0, transport.calls);
+    }
+
+    private static AiRequest chatRequest(String previousId) {
+        return AiRequest.builder().operation(AiOperation.CHAT).model("gpt-test").store(true)
+            .instructions("Answer follow-up questions.").userPrompt("Hello").previousResponseId(previousId).build();
+    }
+
+    private static String completedChat(String id, String text) {
+        return """
+            {"id":"%s","status":"completed","output":[{"type":"message","role":"assistant",
+            "status":"completed","content":[{"type":"output_text","text":"%s"}]}],
+            "usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}
+            """.formatted(id, text).replace("\n", "");
+    }
+
+    private static String chatStream(String delta, String completion) {
+        return "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_created\"}}\n\n"
+            + "data: " + MAPPER.createObjectNode().put("type", "response.output_text.delta").put("delta", delta)
+            + "\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + completion + "}\n\n";
+    }
 
     @Test
     void exposesModelAndOperationSpecificImageOptions() throws Exception {
@@ -779,6 +1004,8 @@ class OpenAiProviderTest {
         private String method;
         private String uri;
         private String requestBody;
+        private HttpRequestBase capturedRequest;
+        private Runnable onExecute;
 
         private RecordingHttpClient(int responseStatus, String responseBody) {
             this.responseStatus = responseStatus;
@@ -799,12 +1026,16 @@ class OpenAiProviderTest {
             HttpContext context
         ) throws IOException {
             calls++;
+            capturedRequest = (HttpRequestBase) request;
             method = request.getRequestLine().getMethod();
             uri = request.getRequestLine().getUri();
             headers.clear();
             headers.addAll(List.of(request.getAllHeaders()));
             if (request instanceof HttpEntityEnclosingRequest enclosingRequest) {
                 requestBody = EntityUtils.toString(enclosingRequest.getEntity(), StandardCharsets.UTF_8);
+            }
+            if (onExecute != null) {
+                onExecute.run();
             }
             if (failure != null) {
                 throw failure;

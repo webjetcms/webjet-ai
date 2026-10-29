@@ -1,9 +1,15 @@
 package com.webjetcms.ai.provider.local;
 
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -11,6 +17,7 @@ import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.TranslationOptions;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.provider.local.NativeSeq2SeqRuntimeFactory.Resources;
 import com.webjetcms.ai.provider.local.Seq2SeqBundleValidator.PreparedBundle;
 
@@ -64,6 +71,18 @@ public final class LocalTranslationModelProvider extends Seq2SeqProvider<NativeT
     @Override
     public String id() { return PROVIDER_ID; }
 
+    @Override
+    public AiCapabilities capabilities(String modelId) {
+        super.capabilities(modelId);
+        Support modelSupport = model.aliases().contains(modelId) ? Support.SUPPORTED : Support.UNSUPPORTED;
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, new Operation(Support.SUPPORTED, modelSupport, Support.UNSUPPORTED, Continuation.NONE),
+            AiOperation.CHAT, Operation.unsupported(),
+            AiOperation.GENERATE_IMAGE, Operation.unsupported(),
+            AiOperation.EDIT_IMAGE, Operation.unsupported()
+        ), Support.UNSUPPORTED, Support.UNSUPPORTED);
+    }
+
     /** Returns language codes discovered from the validated tokenizer metadata.
      * @return immutable set of supported language codes
      * @throws AiProviderException when the provider is closing or closed
@@ -90,8 +109,9 @@ public final class LocalTranslationModelProvider extends Seq2SeqProvider<NativeT
      */
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return LocalProviderBoundary.invoke(config, () ->
-            read(() -> {
+        return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
+            return read(() -> {
                 ResolvedRequest resolved = validateAndResolve(request);
                 try {
                     NativeTokenizerBatch source = tokenizer.encode(
@@ -105,8 +125,8 @@ public final class LocalTranslationModelProvider extends Seq2SeqProvider<NativeT
                 } catch (Exception exception) {
                     throw new AiProviderException(PROVIDER_ID, "Local translation inference failed", exception);
                 }
-            })
-        );
+            });
+        });
     }
 
     /** Rejects streaming because the local sequence-to-sequence runtime returns completed text.
@@ -120,14 +140,19 @@ public final class LocalTranslationModelProvider extends Seq2SeqProvider<NativeT
     public AiResponse stream(AiRequest request, AiProviderConfig config, AiStreamListener listener)
         throws AiProviderException {
         return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
             throw new AiProviderException(PROVIDER_ID,
-                "Streaming is not supported by the local translation model provider");
+                "Streaming is not supported by the local translation model provider")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         });
     }
 
     private ResolvedRequest validateAndResolve(AiRequest request) throws AiProviderException {
         if (request == null) throw invalid("Text request must not be null");
-        if (request.operation() != AiOperation.TEXT) throw invalid("Local translation models require a TEXT request");
+        if (request.operation() != AiOperation.TEXT) {
+            throw invalid("Local translation models require a TEXT request")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
+        }
         if (request.inputText() == null || request.inputText().isBlank())
             throw invalid("Local translation model input must not be blank");
         if (hasText(request.instructions()) || hasText(request.userPrompt()))

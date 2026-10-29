@@ -11,9 +11,15 @@ option each model supports.
 
 ## Capabilities
 
+`client.capabilities("openai", model)` describes adapter support and per-operation
+streaming without making a request. Text/chat and embedding model support remains
+unknown; image model support uses the existing image-option catalogue and explicit
+adapter restrictions. Metadata does not guarantee current model availability.
+
 | Task | Request | Non-streaming call | `stream` | Important requirements |
 | --- | --- | --- | --- | --- |
 | Text generation or transformation | `AiRequest` with `TEXT` | `execute` | Yes | A non-blank model |
+| Continue a text conversation | `AiRequest` with `CHAT` | `execute` | Yes | Explicit `store(true)`; optional `previousResponseId` from the same provider |
 | Analyze text and an image | `AiRequest` with `TEXT` | `execute` | Yes | A model that accepts image input |
 | Generate images | `AiRequest` with `GENERATE_IMAGE` | `execute` | No | An image-generation model; callers should supply a meaningful prompt |
 | Edit an image | `AiRequest` with `EDIT_IMAGE` | `execute` | No | A non-empty `inputMedia`; DALL-E 3 is generation-only |

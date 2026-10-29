@@ -22,7 +22,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.webjetcms:webjet-ai:2.0.4'
+    implementation 'com.webjetcms:webjet-ai:2.1.0'
 }
 ```
 
@@ -32,12 +32,12 @@ Maven:
 <dependency>
     <groupId>com.webjetcms</groupId>
     <artifactId>webjet-ai</artifactId>
-    <version>2.0.4</version>
+    <version>2.1.0</version>
 </dependency>
 ```
 
-Version `2.0.4` also publishes the optional local runtime as the separate
-`com.webjetcms:webjet-ai-local:2.0.4` artifact. Cloud-provider applications only
+Version `2.1.0` also publishes the optional local runtime as the separate
+`com.webjetcms:webjet-ai-local:2.1.0` artifact. Cloud-provider applications only
 need the core `webjet-ai` dependency shown above.
 
 ## Minimal usage
@@ -157,6 +157,56 @@ List<String> bundledProviders = AiProviders.builtIns();
 String openAi = AiProviders.OPENAI;
 ```
 
+### Provider and model capabilities
+
+Query locally known capabilities without credentials or network requests. Use
+`client.capabilities(model)` when the client contains only one provider.
+
+```java
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Support;
+import com.webjetcms.ai.AiOperation;
+
+AiCapabilities capabilities = client.capabilities(providerId, model);
+AiCapabilities.Operation chat = capabilities.operation(AiOperation.CHAT);
+boolean canOfferChat = chat.adapterSupport() == Support.SUPPORTED
+    && chat.modelSupport() != Support.UNSUPPORTED;
+boolean canOfferStreaming = canOfferChat && chat.adapterStreaming() == Support.SUPPORTED;
+boolean requiresStorage = chat.continuation() == Continuation.PROVIDER_STORAGE_REQUIRED;
+```
+
+`adapterSupport()` describes what the library adapter implements. `modelSupport()`
+describes what its metadata knows about the selected model; `UNKNOWN` is not a
+rejection. `support()` combines both: either unsupported value yields
+`UNSUPPORTED`, two supported values yield `SUPPORTED`, and all other combinations
+yield `UNKNOWN`. Thus an uncatalogued text model can still be offered by CMS even
+when combined support is unknown. The returned operation map and values are
+immutable, with operations ordered by `AiOperation`.
+
+`adapterStreaming()` describes the adapter's streaming path for that operation.
+It does not guarantee that the selected model accepts streaming. Listeners receive
+text fragments; image media is returned in the completed response where supported.
+Embeddings have separate `embeddingSupport()` and `embeddingModelSupport()` values
+because they use `EmbeddingRequest` and `embed(...)`, rather than `AiOperation`.
+
+OpenAI and Gemini describe `CHAT` continuation as `PROVIDER_STORAGE_REQUIRED`.
+CMS must still explicitly permit storage before setting `store(true)`; lookup
+never changes the request or grants storage consent. OpenRouter and current local
+providers report `CHAT` as unsupported. Other operations report no continuation.
+
+Remote text/chat and embedding model support remains `UNKNOWN`; model names and
+prefixes are not guessed. Known image capabilities reuse the existing static
+catalogues and adapter restrictions. OpenRouter's image-generation catalogue does
+not establish editing support, so editing remains unknown except for explicitly
+excluded models. Local providers recognize the aliases of their loaded model and
+reject other model IDs in their metadata, without loading or running another model.
+
+Metadata is advisory and does not verify model availability, account access, or
+custom endpoint behavior. Execution retains its existing validation and permits
+unknown remote models. Custom providers inherit unknown metadata until they
+override `capabilities(model)`; `ModelInfo` and existing APIs remain unchanged.
+
 Add an application-owned provider directly during discovery:
 
 ```java
@@ -257,7 +307,7 @@ build prefix and run `./gradlew :webjet-ai-local:localModelTool --args='...'`.
 Prepare the portable FP32 bundle:
 
 ```shell
-java -jar webjet-ai-local-2.0.1.jar prepare \
+java -jar webjet-ai-local-2.1.0.jar prepare \
   --model multilingual-e5-base \
   --output /path/to/multilingual-e5-base-fp32.zip
 ```
@@ -270,7 +320,7 @@ unless `--overwrite` is specified.
 Use the same command for the smaller 384-value model:
 
 ```shell
-java -jar webjet-ai-local-2.0.1.jar prepare \
+java -jar webjet-ai-local-2.1.0.jar prepare \
   --model multilingual-e5-small
 ```
 
@@ -280,7 +330,7 @@ Its default FP32 output is `multilingual-e5-small-fp32.zip`; the canonical
 An explicitly selected quantized bundle is available for CPUs with AVX-512 VNNI:
 
 ```shell
-java -jar webjet-ai-local-2.0.1.jar prepare \
+java -jar webjet-ai-local-2.1.0.jar prepare \
   --model multilingual-e5-base \
   --variant int8-avx512-vnni
 ```
@@ -317,7 +367,7 @@ JAR version.
 Prepare the portable quantized M2M100 translation bundle in the same way:
 
 ```shell
-java -jar webjet-ai-local-2.0.1.jar prepare \
+java -jar webjet-ai-local-2.1.0.jar prepare \
   --model facebook/m2m100_418M \
   --variant int8
 ```
@@ -332,7 +382,7 @@ read from that tokenizer rather than hardcoded by the library.
 Prepare EuroLLM-1.7B-Instruct for local multilingual text generation:
 
 ```shell
-java -jar webjet-ai-local-2.0.1.jar prepare \
+java -jar webjet-ai-local-2.1.0.jar prepare \
   --model utter-project/EuroLLM-1.7B-Instruct
 ```
 
@@ -360,7 +410,7 @@ graph is resolved. Copying only `webjet-ai-local.jar` is not sufficient.
 
 ```gradle
 dependencies {
-    implementation 'com.webjetcms:webjet-ai-local:2.0.4'
+    implementation 'com.webjetcms:webjet-ai-local:2.1.0'
 }
 ```
 
@@ -588,6 +638,92 @@ Expansion is single-pass and repeat-safe: placeholders introduced inside an
 untrusted value remain literal, canonical untrusted-data blocks are not scanned
 again, and consumed or suspicious fields are reported to the host.
 
+## Cancelling a request
+
+Create one `AiCancellationToken` per call and pass it to the `execute` or `stream`
+overload. Both remain synchronous; the host owns its executor and task registry.
+The overloads are also available with an explicit provider ID.
+
+```java
+AiCancellationToken cancellation = new AiCancellationToken();
+Future<AiResponse> future = executor.submit(
+    () -> client.execute(request, config, cancellation)
+);
+
+// In the Stop, New chat, or editor-close handler for this task:
+cancellation.cancel(); // Abort the AI request through its provider
+future.cancel(true);   // Cancel the task and request thread interruption
+```
+
+For streaming, pass the token after the listener:
+
+```java
+AiResponse response = client.stream(request, config, listener, cancellation);
+```
+
+Use `com.webjetcms.ai.AiCancellationToken` and `java.util.concurrent.Future` in the
+first example. Create the token before submitting the task so Stop can also cancel
+work that has not started yet. The token is thread-safe and cannot be reset;
+repeated `cancel()` calls are harmless. Sharing a token intentionally cancels all
+calls using it, so use a fresh token for every independent task.
+
+OpenAI, Gemini, and OpenRouter abort the individual HTTP request, including blocked
+reads and streaming responses. Text, chat, and image requests use the same mechanism
+where supported by the adapter. Other concurrent calls and the shared client remain
+usable. Cancellation does not close the provider, create threads, or change storage
+consent. `embed` and `listModels` retain their existing APIs without token overloads.
+
+When observed before the final result check, cancellation throws
+`AiProviderException` with `category() == AiErrorCategory.CANCELLED` and
+`retryable() == false`, including after credential redaction. A cancelled call does
+not return a successful partial response. Existing exception constructors default
+to `AiErrorCategory.UNKNOWN`; ordinary timeouts are not classified as cancellation.
+If the host also cancels its `Future`, `Future.get()` reports Java's
+`CancellationException` instead of exposing the worker's provider exception.
+
+Cancellation after the final check cannot retract a successful result. An already
+dispatched listener callback may finish, so the host must discard stale callbacks
+and results when a chat or editor has changed. Aborting HTTP cannot guarantee that
+the remote provider stops generation, avoids charges, or deletes stored context.
+
+Existing custom and local providers remain compatible through default methods that
+check cancellation before and after blocking execution and around listener calls.
+These defaults cannot interrupt blocked transport or native inference; a provider
+must override the token overloads to implement active cancellation. Existing
+token-free methods retain their signatures and behavior.
+
+## Stable error categories
+
+Use `AiProviderException.category()` for recovery decisions, together with
+`statusCode()` and `retryable()`. Message text remains diagnostic and is not a
+stable API.
+
+| Category | Meaning |
+| --- | --- |
+| `CANCELLED` | Explicit caller cancellation; never automatically retry. |
+| `INVALID_CONTINUATION` | A supplied chat continuation ID is blank or a structured provider error identifies it as unusable. The host can offer to start a new conversation. |
+| `UNSUPPORTED_OPERATION` | A known provider adapter or model limitation, including unsupported streaming or embeddings. The host can offer a supported operation or provider. |
+| `UNKNOWN` | No reliable specific classification; use the existing status and retryability information. |
+
+OpenAI classifies continuation failures only for a continuing `CHAT` request and
+an explicit error code or parameter identifying `previous_response_id`. This
+applies to HTTP errors, failed response payloads, and SSE error events. Arbitrary
+model output, message text, and generic HTTP 400/404 responses are not used for
+classification. Gemini's documented error schema currently provides no reliable
+continuation-specific discriminator, so its remote continuation failures remain
+`UNKNOWN`.
+
+Existing constructors still default to `UNKNOWN`. Custom adapters can use the
+categorized constructor or `exception.withCategory(category)`, which preserves
+the original diagnostics. Credential redaction preserves all categories. Missing
+storage consent and unrelated input validation remain `UNKNOWN`; the library
+does not reset conversations, retry requests, or enable storage in response to
+these categories.
+
+Hosts can expose `category().name()`, `statusCode()`, and `retryable()` in their
+error DTOs while keeping `rawResponse()` and exception causes out of frontend
+responses. Treat unknown future category names as the generic recovery path.
+
 ## Media and response values
 
 Additional immutable value helpers include `BinaryContent.from(path, mediaType)`,
@@ -637,15 +773,15 @@ composite build instead of publishing to `mavenLocal()`:
 ./gradlew --include-build ../webjet-ai test
 ```
 
-To test the `2.0.4` release candidate through a normal Maven dependency graph
+To test the `2.1.0` release candidate through a normal Maven dependency graph
 instead:
 
 ```shell
-./gradlew -PreleaseVersion=2.0.4 publishToMavenLocal
+./gradlew -PreleaseVersion=2.1.0 publishToMavenLocal
 ```
 
 Then add `mavenLocal()` and depend on
-`com.webjetcms:webjet-ai-local:2.0.4` in the consuming project.
+`com.webjetcms:webjet-ai-local:2.1.0` in the consuming project.
 
 The opt-in production-bundle smoke test performs no download:
 
@@ -673,7 +809,7 @@ keyring, matching traditional Maven `gpg:sign-and-deploy-file` usage. Keep
 these properties in `~/.gradle/gradle.properties` or CI secrets, for example:
 
 ```properties
-releaseVersion=2.0.4
+releaseVersion=2.1.0
 signingKeyId=0x36F2327F
 ```
 
@@ -681,7 +817,7 @@ If you sign with an in-memory exported private key instead, also provide
 `signingPassword`. To create the Central bundle locally, run:
 
 ```shell
-./gradlew centralBundle -PreleaseVersion=2.0.4 -PsigningKeyId=0x36F2327F
+./gradlew centralBundle -PreleaseVersion=2.1.0 -PsigningKeyId=0x36F2327F
 ```
 
 During a local interactive run, Gradle prints the resolved `releaseVersion` and
@@ -694,7 +830,7 @@ both stable and `-SNAPSHOT` semantic versions. Configure `githubUsername` and
 `GITHUB_TOKEN`, then run:
 
 ```shell
-./gradlew publishAllPublicationsToGitHubPackagesRepository -PreleaseVersion=2.0.4-SNAPSHOT
+./gradlew publishAllPublicationsToGitHubPackagesRepository -PreleaseVersion=2.1.0-SNAPSHOT
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development rules,

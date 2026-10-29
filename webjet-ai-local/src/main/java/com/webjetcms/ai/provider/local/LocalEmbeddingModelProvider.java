@@ -4,7 +4,13 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
+import com.webjetcms.ai.AiErrorCategory;
+import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -18,6 +24,7 @@ import com.webjetcms.ai.EmbeddingResponse;
 import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.provider.local.ApprovedEmbeddingModelCatalog.EmbeddingModelDefinition;
 import com.webjetcms.ai.provider.local.NativeEmbeddingInferenceSession.PoolingResult;
 import com.webjetcms.ai.provider.local.NativeEmbeddingRuntimeFactory.Resources;
@@ -80,6 +87,17 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
     @Override
     public String id() { return PROVIDER_ID; }
 
+    @Override
+    public AiCapabilities capabilities(String modelId) {
+        AiProvider.super.capabilities(modelId);
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, Operation.unsupported(),
+            AiOperation.CHAT, Operation.unsupported(),
+            AiOperation.GENERATE_IMAGE, Operation.unsupported(),
+            AiOperation.EDIT_IMAGE, Operation.unsupported()
+        ), Support.SUPPORTED, model.aliases().contains(modelId) ? Support.SUPPORTED : Support.UNSUPPORTED);
+    }
+
     /**
      * Returns the single model loaded from the validated bundle.
      *
@@ -124,8 +142,10 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
         return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
             throw new AiProviderException(PROVIDER_ID,
-                "Generation is not supported by the local embedding model provider");
+                "Generation is not supported by the local embedding model provider")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         });
     }
 
@@ -136,8 +156,10 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
         AiStreamListener listener
     ) throws AiProviderException {
         return LocalProviderBoundary.invoke(config, () -> {
+            ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
             throw new AiProviderException(PROVIDER_ID,
-                "Streaming is not supported by the local embedding model provider");
+                "Streaming is not supported by the local embedding model provider")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         });
     }
 

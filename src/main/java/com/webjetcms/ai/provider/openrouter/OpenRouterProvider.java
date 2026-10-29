@@ -30,6 +30,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiErrorCategory;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
@@ -47,6 +53,8 @@ import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
+import com.webjetcms.ai.internal.CancellationSupport;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.internal.ImageOptionValidator;
 import com.webjetcms.ai.security.PromptInjectionDefense;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
@@ -102,6 +110,24 @@ public final class OpenRouterProvider implements AiProvider {
         return OpenRouterImageOptions.definitions(model);
     }
 
+    @Override
+    public AiCapabilities capabilities(String model) {
+        AiProvider.super.capabilities(model);
+        boolean vectorModel = OpenRouterImageOptions.isRecraftVectorModel(model);
+        Support generation = vectorModel ? Support.UNSUPPORTED
+            : OpenRouterImageOptions.definitions(model).isEmpty() ? Support.UNKNOWN : Support.SUPPORTED;
+        Support editing = vectorModel ? Support.UNSUPPORTED : Support.UNKNOWN;
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, new Operation(
+                Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED, Continuation.NONE),
+            AiOperation.CHAT, Operation.unsupported(),
+            AiOperation.GENERATE_IMAGE, new Operation(
+                Support.SUPPORTED, generation, Support.UNSUPPORTED, Continuation.NONE),
+            AiOperation.EDIT_IMAGE, new Operation(
+                Support.SUPPORTED, editing, Support.UNSUPPORTED, Continuation.NONE)
+        ), Support.SUPPORTED, Support.UNKNOWN);
+    }
+
     private List<ModelInfo> listModelsInternal(AiProviderConfig config) throws AiProviderException {
         validateConfig(config);
 
@@ -140,19 +166,34 @@ public final class OpenRouterProvider implements AiProvider {
 
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return invokeAtBoundary(config, () -> executeInternal(request, config));
+        return execute(request, config, AiCancellationToken.none());
     }
 
-    private AiResponse executeInternal(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    @Override
+    public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
+        return invokeAtBoundary(config, () -> CancellationSupport.call(
+            PROVIDER_ID,
+            token,
+            () -> executeInternal(request, config, token)
+        ));
+    }
+
+    private AiResponse executeInternal(
+        AiRequest request,
+        AiProviderConfig config,
+        AiCancellationToken token
+    ) throws AiProviderException {
         validateRequest(request);
         validateConfig(config);
 
         if (request.operation() != AiOperation.TEXT) {
-            return executeImageInternal(request, config);
+            return executeImageInternal(request, config, token);
         }
 
         HttpPost httpRequest = createChatRequest(request, config, false);
-        try (CloseableHttpResponse response = httpClient.execute(httpRequest)) {
+        try (AiCancellationToken.Registration cancellation = token.onCancel(httpRequest::abort);
+            CloseableHttpResponse response = httpClient.execute(httpRequest)) {
             int statusCode = response.getStatusLine().getStatusCode();
             String rawResponse = readEntity(response.getEntity());
             ensureSuccessful(statusCode, rawResponse);
@@ -164,13 +205,17 @@ public final class OpenRouterProvider implements AiProvider {
         }
     }
 
-    private AiResponse executeImageInternal(AiRequest request, AiProviderConfig config)
-        throws AiProviderException {
+    private AiResponse executeImageInternal(
+        AiRequest request,
+        AiProviderConfig config,
+        AiCancellationToken token
+    ) throws AiProviderException {
         ObjectNode body = buildImageBody(request);
         HttpPost httpRequest = new HttpPost(endpoint(config, IMAGES_PATH));
         configureRequest(httpRequest, config, false);
         httpRequest.setEntity(new StringEntity(body.toString(), ContentType.APPLICATION_JSON));
-        try (CloseableHttpResponse response = httpClient.execute(httpRequest)) {
+        try (AiCancellationToken.Registration cancellation = token.onCancel(httpRequest::abort);
+            CloseableHttpResponse response = httpClient.execute(httpRequest)) {
             int statusCode = response.getStatusLine().getStatusCode();
             String rawResponse = readEntity(response.getEntity());
             ensureSuccessful(statusCode, rawResponse);
@@ -230,13 +275,33 @@ public final class OpenRouterProvider implements AiProvider {
     @Override
     public AiResponse stream(AiRequest request, AiProviderConfig config, AiStreamListener listener)
         throws AiProviderException {
-        return invokeAtBoundary(config, () -> streamInternal(request, config, listener));
+        return stream(request, config, listener, AiCancellationToken.none());
+    }
+
+    @Override
+    public AiResponse stream(
+        AiRequest request,
+        AiProviderConfig config,
+        AiStreamListener listener,
+        AiCancellationToken token
+    ) throws AiProviderException {
+        return invokeAtBoundary(config, () -> CancellationSupport.call(
+            PROVIDER_ID,
+            token,
+            () -> streamInternal(
+                request,
+                config,
+                CancellationSupport.listener(PROVIDER_ID, token, listener),
+                token
+            )
+        ));
     }
 
     private AiResponse streamInternal(
         AiRequest request,
         AiProviderConfig config,
-        AiStreamListener listener
+        AiStreamListener listener,
+        AiCancellationToken token
     ) throws AiProviderException {
         validateRequest(request);
         validateConfig(config);
@@ -244,14 +309,15 @@ public final class OpenRouterProvider implements AiProvider {
             throw new AiProviderException(
                 PROVIDER_ID,
                 "OpenRouter streaming is supported only for text requests."
-            );
+            ).withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         }
         if (listener == null) {
             throw new AiProviderException(PROVIDER_ID, "A stream listener is required.");
         }
 
         HttpPost httpRequest = createChatRequest(request, config, true);
-        try (CloseableHttpResponse response = httpClient.execute(httpRequest)) {
+        try (AiCancellationToken.Registration cancellation = token.onCancel(httpRequest::abort);
+            CloseableHttpResponse response = httpClient.execute(httpRequest)) {
             int statusCode = response.getStatusLine().getStatusCode();
             if (statusCode < 200 || statusCode >= 300) {
                 throw errorResponse(statusCode, readEntity(response.getEntity()));
@@ -808,6 +874,7 @@ public final class OpenRouterProvider implements AiProvider {
         if (request == null) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter request is required.");
         }
+        ChatRequestValidator.rejectUnsupported(PROVIDER_ID, request);
         if (isBlank(request.model())) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter model is required.");
         }
@@ -816,7 +883,7 @@ public final class OpenRouterProvider implements AiProvider {
             throw new AiProviderException(
                 PROVIDER_ID,
                 "OpenRouter Recraft vector models return SVG, which is not supported."
-            );
+            ).withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         }
         if (request.operation() == AiOperation.EDIT_IMAGE && request.inputMedia() == null) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter image editing requires input media.");

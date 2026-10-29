@@ -10,6 +10,8 @@ import java.util.Objects;
 import java.util.Set;
 
 import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.internal.ChatRequestValidator;
+import com.webjetcms.ai.internal.CancellationSupport;
 
 /**
  * Owns a fixed set of AI provider instances and selects them by exact identifier.
@@ -250,6 +252,35 @@ public final class AiClient implements AutoCloseable {
     }
 
     /**
+     * Describes capabilities using the only registered provider, without credentials or I/O.
+     *
+     * @param model non-blank provider-specific model identifier
+     * @return immutable advisory adapter and model capabilities
+     * @throws IllegalStateException if exactly one provider is not registered
+     * @throws IllegalArgumentException if the model is null or blank
+     */
+    public AiCapabilities capabilities(String model) {
+        return capabilities(soleProviderId(), model);
+    }
+
+    /**
+     * Describes locally known capabilities without loading a model catalogue or making requests.
+     * Metadata does not grant storage consent or change request validation. Unknown model
+     * support must not be treated as a definitive rejection.
+     *
+     * @param providerId registered provider identifier
+     * @param model non-blank provider-specific model identifier
+     * @return immutable advisory adapter and model capabilities
+     * @throws IllegalArgumentException if the provider or model is invalid
+     */
+    public AiCapabilities capabilities(String providerId, String model) {
+        if (model == null || model.isBlank()) {
+            throw new IllegalArgumentException("Capability model must not be blank");
+        }
+        return Objects.requireNonNull(provider(providerId).capabilities(model), "AI provider capabilities");
+    }
+
+    /**
      * Returns static image option metadata from the only registered provider.
      * This call does not require credentials or perform network I/O.
      *
@@ -333,9 +364,46 @@ public final class AiClient implements AutoCloseable {
      */
     public AiResponse execute(String providerId, AiRequest request, AiProviderConfig config)
         throws AiProviderException {
+        return execute(providerId, request, config, AiCancellationToken.none());
+    }
+
+    /**
+     * Executes a cancellable request using the only registered provider.
+     *
+     * @param request operation and inputs to execute
+     * @param config provider credentials and connection settings
+     * @param token non-null token created for this call
+     * @return completed response if cancellation was not observed at the final check
+     * @throws IllegalStateException if exactly one provider is not registered
+     * @throws AiProviderException if cancelled or execution fails
+     */
+    public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
+        return execute(soleProviderId(), request, config, token);
+    }
+
+    /**
+     * Executes a cancellable request with the same prompt defenses as the original API.
+     * Built-in HTTP providers abort only this request; legacy providers may finish their
+     * blocking work before cancellation is observed. A later cancellation cannot retract
+     * a response that passed the final cancellation check.
+     *
+     * @param providerId registered provider identifier
+     * @param request operation and inputs to execute
+     * @param config provider credentials and connection settings
+     * @param token non-null token created for this call
+     * @return completed response if cancellation was not observed at the final check
+     * @throws IllegalArgumentException if the provider is not registered
+     * @throws AiProviderException if cancelled or execution fails
+     */
+    public AiResponse execute(
+        String providerId, AiRequest request, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
         AiProvider selectedProvider = provider(providerId);
+        Objects.requireNonNull(token, "token");
         try {
-            return selectedProvider.execute(prepareRequest(selectedProvider, request), config);
+            return CancellationSupport.call(providerId, token,
+                () -> selectedProvider.execute(prepareRequest(selectedProvider, request), config, token));
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
@@ -425,9 +493,50 @@ public final class AiClient implements AutoCloseable {
         AiProviderConfig config,
         AiStreamListener listener
     ) throws AiProviderException {
+        return stream(providerId, request, config, listener, AiCancellationToken.none());
+    }
+
+    /**
+     * Streams a cancellable request using the only registered provider.
+     *
+     * @param request operation and inputs to execute
+     * @param config provider credentials and connection settings
+     * @param listener callback receiving text fragments
+     * @param token non-null token created for this call
+     * @return completed response if cancellation was not observed at the final check
+     * @throws IllegalStateException if exactly one provider is not registered
+     * @throws AiProviderException if cancelled or streaming fails
+     */
+    public AiResponse stream(
+        AiRequest request, AiProviderConfig config, AiStreamListener listener, AiCancellationToken token
+    ) throws AiProviderException {
+        return stream(soleProviderId(), request, config, listener, token);
+    }
+
+    /**
+     * Streams a cancellable request with prompt defenses and guarded listener delivery.
+     * Built-in HTTP providers abort this request's I/O. An already-dispatched callback
+     * may finish, and legacy providers may only stop when their blocking work returns.
+     *
+     * @param providerId registered provider identifier
+     * @param request operation and inputs to execute
+     * @param config provider credentials and connection settings
+     * @param listener callback receiving text fragments
+     * @param token non-null token created for this call
+     * @return completed response if cancellation was not observed at the final check
+     * @throws IllegalArgumentException if the provider is not registered
+     * @throws AiProviderException if cancelled or streaming fails
+     */
+    public AiResponse stream(
+        String providerId, AiRequest request, AiProviderConfig config,
+        AiStreamListener listener, AiCancellationToken token
+    ) throws AiProviderException {
         AiProvider selectedProvider = provider(providerId);
+        Objects.requireNonNull(token, "token");
         try {
-            return selectedProvider.stream(prepareRequest(selectedProvider, request), config, listener);
+            return CancellationSupport.call(providerId, token,
+                () -> selectedProvider.stream(prepareRequest(selectedProvider, request), config,
+                    CancellationSupport.listener(providerId, token, listener), token));
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
@@ -444,8 +553,9 @@ public final class AiClient implements AutoCloseable {
             .redactSecrets(config);
     }
 
-    private static AiRequest prepareRequest(AiProvider provider, AiRequest request) {
+    private static AiRequest prepareRequest(AiProvider provider, AiRequest request) throws AiProviderException {
         if (request == null) return null;
+        ChatRequestValidator.validate(provider.id(), request);
         AiInputHandling handling = Objects.requireNonNull(
             provider.inputHandling(request.operation()),
             "provider.inputHandling"

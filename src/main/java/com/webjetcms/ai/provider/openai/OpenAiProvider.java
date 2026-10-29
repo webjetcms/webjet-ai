@@ -34,6 +34,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiErrorCategory;
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
@@ -49,6 +55,8 @@ import com.webjetcms.ai.EmbeddingVector;
 import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.image.ImageOptions;
+import com.webjetcms.ai.internal.CancellationSupport;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
 import com.webjetcms.ai.security.PromptInjectionDefense;
@@ -111,6 +119,26 @@ public final class OpenAiProvider implements AiProvider {
         return OpenAiImageOptions.definitions(model, operation);
     }
 
+    @Override
+    public AiCapabilities capabilities(String model) {
+        AiProvider.super.capabilities(model);
+        Support generation = OpenAiImageOptions.definitions(model, AiOperation.GENERATE_IMAGE).isEmpty()
+            ? Support.UNKNOWN : Support.SUPPORTED;
+        Support editing = "dall-e-3".equals(model) ? Support.UNSUPPORTED
+            : OpenAiImageOptions.definitions(model, AiOperation.EDIT_IMAGE).isEmpty()
+                ? Support.UNKNOWN : Support.SUPPORTED;
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, new Operation(
+                Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED, Continuation.NONE),
+            AiOperation.CHAT, new Operation(
+                Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED, Continuation.PROVIDER_STORAGE_REQUIRED),
+            AiOperation.GENERATE_IMAGE, new Operation(
+                Support.SUPPORTED, generation, Support.UNSUPPORTED, Continuation.NONE),
+            AiOperation.EDIT_IMAGE, new Operation(
+                Support.SUPPORTED, editing, Support.UNSUPPORTED, Continuation.NONE)
+        ), Support.SUPPORTED, Support.UNKNOWN);
+    }
+
     private List<ModelInfo> listModelsInternal(AiProviderConfig config) throws AiProviderException {
         requireConfigured(config);
 
@@ -128,19 +156,32 @@ public final class OpenAiProvider implements AiProvider {
 
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return invokeAtBoundary(config, () -> executeInternal(request, config));
+        return execute(request, config, AiCancellationToken.none());
     }
 
-    private AiResponse executeInternal(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    @Override
+    public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
+        return invokeAtBoundary(config, () -> CancellationSupport.call(
+            PROVIDER_ID, token, () -> executeInternal(request, config, token)
+        ));
+    }
+
+    private AiResponse executeInternal(
+        AiRequest request,
+        AiProviderConfig config,
+        AiCancellationToken token
+    ) throws AiProviderException {
         requireRequest(request);
+        ChatRequestValidator.validate(PROVIDER_ID, request);
         requireConfigured(config);
         requireModel(request);
 
         try {
             return switch (request.operation()) {
-                case TEXT -> executeText(request, config);
-                case GENERATE_IMAGE -> generateImage(request, config);
-                case EDIT_IMAGE -> editImage(request, config);
+                case TEXT, CHAT -> executeText(request, config, token);
+                case GENERATE_IMAGE -> generateImage(request, config, token);
+                case EDIT_IMAGE -> editImage(request, config, token);
             };
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
@@ -195,23 +236,40 @@ public final class OpenAiProvider implements AiProvider {
     public AiResponse stream(AiRequest request, AiProviderConfig config, AiStreamListener listener)
         throws AiProviderException {
 
-        return invokeAtBoundary(config, () -> streamInternal(request, config, listener));
+        return stream(request, config, listener, AiCancellationToken.none());
+    }
+
+    @Override
+    public AiResponse stream(
+        AiRequest request,
+        AiProviderConfig config,
+        AiStreamListener listener,
+        AiCancellationToken token
+    ) throws AiProviderException {
+        return invokeAtBoundary(config, () -> CancellationSupport.call(
+            PROVIDER_ID, token, () -> streamInternal(
+                request, config, CancellationSupport.listener(PROVIDER_ID, token, listener), token
+            )
+        ));
     }
 
     private AiResponse streamInternal(
         AiRequest request,
         AiProviderConfig config,
-        AiStreamListener listener
+        AiStreamListener listener,
+        AiCancellationToken token
     ) throws AiProviderException {
 
         requireRequest(request);
+        ChatRequestValidator.validate(PROVIDER_ID, request);
         if (listener == null) {
             throw new AiProviderException(PROVIDER_ID, "OpenAI stream listener is required");
         }
         requireConfigured(config);
         requireModel(request);
-        if (request.operation() != AiOperation.TEXT) {
-            throw new AiProviderException(PROVIDER_ID, "OpenAI streaming is supported only for text requests");
+        if (request.operation() != AiOperation.TEXT && request.operation() != AiOperation.CHAT) {
+            throw new AiProviderException(PROVIDER_ID, "OpenAI streaming is supported only for text requests")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         }
 
         ObjectNode body = buildTextBody(request);
@@ -220,11 +278,12 @@ public final class OpenAiProvider implements AiProvider {
         HttpPost post = jsonPost(endpoint(config, RESPONSES_PATH), body);
         prepare(post, config, "text/event-stream");
 
-        try (CloseableHttpResponse response = httpClient.execute(post)) {
+        try (AiCancellationToken.Registration cancellation = token.onCancel(post::abort);
+             CloseableHttpResponse response = httpClient.execute(post)) {
             int statusCode = response.getStatusLine().getStatusCode();
             if (isSuccessful(statusCode) == false) {
                 String bodyText = readEntity(response.getEntity());
-                throw httpError(statusCode, bodyText);
+                throw httpError(statusCode, bodyText, isContinuation(request));
             }
 
             HttpEntity entity = response.getEntity();
@@ -234,8 +293,15 @@ public final class OpenAiProvider implements AiProvider {
             Charset charset = responseCharset(entity);
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(entity.getContent(), charset))) {
-                OpenAiStreamParser.StreamResult result = OpenAiStreamParser.parse(reader, listener);
-                return new AiResponse(result.text(), List.of(), result.usage(), result.finishReason());
+                OpenAiStreamParser.StreamResult result = OpenAiStreamParser.parse(
+                    reader,
+                    listener,
+                    request.operation() == AiOperation.CHAT,
+                    isContinuation(request)
+                );
+                return new AiResponse(
+                    result.text(), List.of(), result.usage(), result.finishReason(), result.responseId()
+                );
             }
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
@@ -249,13 +315,16 @@ public final class OpenAiProvider implements AiProvider {
         httpClient.close();
     }
 
-    private AiResponse executeText(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    private AiResponse executeText(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
         HttpPost post = jsonPost(endpoint(config, RESPONSES_PATH), buildTextBody(request));
         prepare(post, config, "application/json");
-        String response = executeForString(post, config);
+        String response = executeForResult(post, config, token, isContinuation(request)).body();
 
         try {
-            return parseTextResponse(response);
+            return request.operation() == AiOperation.CHAT
+                ? parseChatResponse(MAPPER.readTree(response), response, isContinuation(request))
+                : parseTextResponse(response);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (IOException | RuntimeException exception) {
@@ -264,7 +333,8 @@ public final class OpenAiProvider implements AiProvider {
         }
     }
 
-    private AiResponse generateImage(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    private AiResponse generateImage(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
         if (hasMeaningfulImagePrompt(request) == false) {
             throw new AiProviderException(PROVIDER_ID, "An image prompt is required");
         }
@@ -281,13 +351,15 @@ public final class OpenAiProvider implements AiProvider {
 
         HttpPost post = jsonPost(endpoint(config, IMAGE_GENERATIONS_PATH), body);
         prepare(post, config, "application/json");
-        return executeImage(post, config, (String) imageOptions.get("output_format"));
+        return executeImage(post, config, (String) imageOptions.get("output_format"), token);
     }
 
-    private AiResponse editImage(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    private AiResponse editImage(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
         if ("dall-e-3".equals(request.model())) {
             throw new AiProviderException(PROVIDER_ID,
-                "Image editing with " + request.model() + " is not supported by this provider adapter");
+                "Image editing with " + request.model() + " is not supported by this provider adapter")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
         }
 
         BinaryContent input = request.inputMedia();
@@ -304,7 +376,7 @@ public final class OpenAiProvider implements AiProvider {
         HttpPost post = new HttpPost(endpoint(config, IMAGE_EDITS_PATH));
         post.setEntity(buildImageEditEntity(request, input, prompt, imageOptions));
         prepare(post, config, "application/json");
-        return executeImage(post, config, (String) imageOptions.get("output_format"));
+        return executeImage(post, config, (String) imageOptions.get("output_format"), token);
     }
 
     static HttpEntity buildImageEditEntity(
@@ -373,9 +445,10 @@ public final class OpenAiProvider implements AiProvider {
     private AiResponse executeImage(
         HttpPost post,
         AiProviderConfig config,
-        String requestedFormat
+        String requestedFormat,
+        AiCancellationToken token
     ) throws AiProviderException {
-        String response = executeForString(post, config);
+        String response = executeForString(post, config, token);
         try {
             return parseImageResponse(response, requestedFormat);
         } catch (AiProviderException exception) {
@@ -392,11 +465,18 @@ public final class OpenAiProvider implements AiProvider {
         body.put("store", request.store());
 
         ArrayNode inputs = body.putArray("input");
-        addTextInput(
-            inputs,
-            "system",
-            PromptInjectionDefense.hardenSystemInstructions(request.instructions())
-        );
+        if (request.operation() == AiOperation.CHAT) {
+            body.put("instructions", PromptInjectionDefense.hardenChatInstructions(request.instructions()));
+            if (request.previousResponseId() != null) {
+                body.put("previous_response_id", request.previousResponseId());
+            }
+        } else {
+            addTextInput(
+                inputs,
+                "system",
+                PromptInjectionDefense.hardenSystemInstructions(request.instructions())
+            );
+        }
         addProtectedInput(inputs, request.inputText(), UntrustedSource.INPUT_TEXT);
         addProtectedInput(inputs, request.userPrompt(), UntrustedSource.USER_PROMPT);
 
@@ -439,7 +519,7 @@ public final class OpenAiProvider implements AiProvider {
 
     static AiResponse parseTextResponse(String response) throws IOException, AiProviderException {
         JsonNode root = MAPPER.readTree(response);
-        ensureSuccessfulResponse(root, response);
+        ensureSuccessfulResponse(root, response, false);
 
         String text = textOrNull(root.get("output_text"));
         boolean textFound = text != null;
@@ -474,6 +554,63 @@ public final class OpenAiProvider implements AiProvider {
         return new AiResponse(text, List.of(), parseUsage(root.path("usage")), responseStatus(root));
     }
 
+    static AiResponse parseChatResponse(JsonNode root, String response, boolean continuation) throws AiProviderException {
+        ensureSuccessfulResponse(root, response, continuation);
+        if ("completed".equals(textOrNull(root.get("status"))) == false || root.hasNonNull("error")) {
+            throw classifyContinuationError(
+                invalidResponse("OpenAI chat response is not completed", response, null), root.path("error"), continuation
+            );
+        }
+        JsonNode id = root.get("id");
+        if (id == null || id.isTextual() == false || id.textValue().isBlank()) {
+            throw invalidResponse("OpenAI chat response does not contain a response ID", response, null);
+        }
+
+        JsonNode outputs = root.path("output");
+        if (root.hasNonNull("output") && outputs.isArray() == false) {
+            throw invalidResponse("OpenAI chat response contains invalid output", response, null);
+        }
+        for (JsonNode output : outputs) {
+            String type = textOrNull(output.get("type"));
+            if ("message".equals(type) == false && "reasoning".equals(type) == false) {
+                throw invalidResponse("OpenAI chat response contains an unsupported output action", response, null);
+            }
+            if (output.hasNonNull("status")
+                && "completed".equals(textOrNull(output.get("status"))) == false) {
+                throw invalidResponse("OpenAI chat output is not completed", response, null);
+            }
+        }
+
+        StringBuilder text = new StringBuilder();
+        JsonNode outputText = root.get("output_text");
+        if (outputText != null && outputText.isTextual()) {
+            text.append(outputText.textValue());
+        } else {
+            if (outputs.isArray()) {
+                for (JsonNode output : outputs) {
+                    if ("message".equals(textOrNull(output.get("type"))) == false) {
+                        continue;
+                    }
+                    JsonNode content = output.path("content");
+                    if (content.isArray() == false) {
+                        continue;
+                    }
+                    for (JsonNode part : content) {
+                        JsonNode partText = part.get("text");
+                        if ("output_text".equals(textOrNull(part.get("type")))
+                            && partText != null && partText.isTextual()) {
+                            text.append(partText.textValue());
+                        }
+                    }
+                }
+            }
+        }
+        if (text.toString().isBlank()) {
+            throw invalidResponse("OpenAI chat response does not contain usable output text", response, null);
+        }
+        return new AiResponse(text.toString(), List.of(), parseUsage(root.path("usage")), "completed", id.textValue());
+    }
+
     static AiResponse parseImageResponse(String response) throws IOException, AiProviderException {
         return parseImageResponse(response, null);
     }
@@ -481,7 +618,7 @@ public final class OpenAiProvider implements AiProvider {
     static AiResponse parseImageResponse(String response, String requestedFormat)
         throws IOException, AiProviderException {
         JsonNode root = MAPPER.readTree(response);
-        ensureSuccessfulResponse(root, response);
+        ensureSuccessfulResponse(root, response, false);
         JsonNode data = root.path("data");
         if (data.isArray() == false) {
             throw invalidResponse("OpenAI image response does not contain a data array", response, null);
@@ -665,14 +802,40 @@ public final class OpenAiProvider implements AiProvider {
         return executeForResult(request, config).body();
     }
 
+    private String executeForString(
+        HttpRequestBase request,
+        AiProviderConfig config,
+        AiCancellationToken token
+    ) throws AiProviderException {
+        return executeForResult(request, config, token).body();
+    }
+
     private HttpResult executeForResult(HttpRequestBase request, AiProviderConfig config)
         throws AiProviderException {
+        return executeForResult(request, config, AiCancellationToken.none());
+    }
+
+    private HttpResult executeForResult(
+        HttpRequestBase request,
+        AiProviderConfig config,
+        AiCancellationToken token
+    ) throws AiProviderException {
+        return executeForResult(request, config, token, false);
+    }
+
+    private HttpResult executeForResult(
+        HttpRequestBase request,
+        AiProviderConfig config,
+        AiCancellationToken token,
+        boolean continuation
+    ) throws AiProviderException {
         prepare(request, config, "application/json");
-        try (CloseableHttpResponse response = httpClient.execute(request)) {
+        try (AiCancellationToken.Registration cancellation = token.onCancel(request::abort);
+             CloseableHttpResponse response = httpClient.execute(request)) {
             int statusCode = response.getStatusLine().getStatusCode();
             String body = readEntity(response.getEntity());
             if (isSuccessful(statusCode) == false) {
-                throw httpError(statusCode, body);
+                throw httpError(statusCode, body, continuation);
             }
             return new HttpResult(statusCode, body);
         } catch (AiProviderException exception) {
@@ -889,14 +1052,45 @@ public final class OpenAiProvider implements AiProvider {
         };
     }
 
-    private AiProviderException httpError(int statusCode, String response) {
+    private AiProviderException httpError(int statusCode, String response, boolean continuation) {
         String detail = errorMessage(response);
         String message = "OpenAI request failed (" + statusCode + ")";
         if (isBlank(detail) == false) {
             message += ": " + detail;
         }
         boolean retryable = statusCode == 408 || statusCode == 409 || statusCode == 429 || statusCode >= 500;
-        return new AiProviderException(PROVIDER_ID, statusCode, message, response, retryable);
+        AiProviderException exception = new AiProviderException(PROVIDER_ID, statusCode, message, response, retryable);
+        if (continuation == false) return exception;
+        try {
+            return classifyContinuationError(exception, MAPPER.readTree(response).path("error"), true);
+        } catch (IOException | RuntimeException ignored) {
+            return exception;
+        }
+    }
+
+    private static boolean isContinuation(AiRequest request) {
+        return request.operation() == AiOperation.CHAT && isBlank(request.previousResponseId()) == false;
+    }
+
+    /**
+     * Classifies a continuation failure from a protocol error object, never model output.
+     *
+     * @param exception failure whose diagnostics must be retained
+     * @param error structured error from an HTTP response or explicit response/SSE failure
+     * @param continuation whether the request is a chat with a supplied continuation ID
+     * @return categorized failure when an exact code or parameter identifies the continuation
+     */
+    static AiProviderException classifyContinuationError(
+        AiProviderException exception,
+        JsonNode error,
+        boolean continuation
+    ) {
+        if (continuation && error.isObject()
+            && ("previous_response_not_found".equals(error.path("code").textValue())
+                || "previous_response_id".equals(error.path("param").textValue()))) {
+            return exception.withCategory(AiErrorCategory.INVALID_CONTINUATION);
+        }
+        return exception;
     }
 
     private static String errorMessage(String response) {
@@ -912,7 +1106,8 @@ public final class OpenAiProvider implements AiProvider {
         }
     }
 
-    private static void ensureSuccessfulResponse(JsonNode root, String rawResponse) throws AiProviderException {
+    private static void ensureSuccessfulResponse(JsonNode root, String rawResponse, boolean continuation)
+        throws AiProviderException {
         if (root == null || root.isObject() == false) {
             throw invalidResponse("OpenAI returned an empty or invalid response", rawResponse, null);
         }
@@ -923,13 +1118,13 @@ public final class OpenAiProvider implements AiProvider {
             if (isBlank(reason)) {
                 reason = textOrNull(root.path("error").get("message"));
             }
-            throw new AiProviderException(
+            throw classifyContinuationError(new AiProviderException(
                 PROVIDER_ID,
                 200,
                 "OpenAI response " + status + (isBlank(reason) ? "" : ": " + reason),
                 rawResponse,
                 false
-            );
+            ), root.path("error"), continuation);
         }
     }
 

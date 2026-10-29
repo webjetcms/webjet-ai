@@ -16,7 +16,12 @@ import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.TokenUsage;
 
-/** Decodes Gemini generateContent and streamGenerateContent payloads. */
+/**
+ * Decodes candidate-based Gemini generateContent and streamGenerateContent payloads.
+ *
+ * <p>Collects text and inline media from the first candidate, together with response-level usage.
+ * CHAT interaction responses are handled by {@link GeminiInteractionsParser}.</p>
+ */
 final class GeminiResponseParser {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -24,6 +29,13 @@ final class GeminiResponseParser {
     private GeminiResponseParser() {
     }
 
+    /**
+     * Parses generated content and rejects empty, blocked, or unsuccessful responses.
+     *
+     * @param payload JSON response body
+     * @return collected text, media, usage, and finish reason
+     * @throws IOException if JSON is invalid or the response contains no usable successful content
+     */
     static AiResponse parse(String payload) throws IOException {
         if (payload == null || payload.isBlank()) {
             throw new IOException("Gemini returned an empty response.");
@@ -34,6 +46,14 @@ final class GeminiResponseParser {
         return accumulator.result(false);
     }
 
+    /**
+     * Collects SSE events or a compatible JSON array, requiring a terminal STOP finish reason.
+     *
+     * @param reader response reader, which remains open after parsing
+     * @param listener receives text fragments as they arrive; may be {@code null}
+     * @return accumulated text, media, usage, and finish reason
+     * @throws IOException if reading, decoding, response validation, or listener delivery fails
+     */
     static AiResponse parseStream(BufferedReader reader, AiStreamListener listener) throws IOException {
         Accumulator accumulator = new Accumulator(listener);
         StringBuilder eventData = new StringBuilder();
@@ -87,6 +107,7 @@ final class GeminiResponseParser {
         accumulator.accept(MAPPER.readTree(payload));
     }
 
+    /** Collects candidate content and the latest usage and finish metadata across response chunks. */
     private static final class Accumulator {
 
         private final AiStreamListener listener;
@@ -106,6 +127,12 @@ final class GeminiResponseParser {
             this.listener = listener;
         }
 
+        /**
+         * Consumes one response object or recursively consumes an array of response chunks.
+         *
+         * @param root parsed payload; null and missing nodes are ignored
+         * @throws IOException if the response reports an error, contains invalid media, or listener delivery fails
+         */
         private void accept(JsonNode root) throws IOException {
             if (root == null || root.isNull() || root.isMissingNode()) {
                 return;
@@ -124,6 +151,12 @@ final class GeminiResponseParser {
             readUsage(root.has("usageMetadata") ? root.path("usageMetadata") : root.path("usage"));
         }
 
+        /**
+         * Converts an embedded provider error into a parsing failure.
+         *
+         * @param root response object to inspect
+         * @throws IOException if an error is present, using its message or JSON representation
+         */
         private void rejectEmbeddedError(JsonNode root) throws IOException {
             JsonNode error = root.path("error");
             if (error.isMissingNode() || error.isNull()) {
@@ -136,6 +169,12 @@ final class GeminiResponseParser {
             throw new IOException("Gemini error: " + message);
         }
 
+        /**
+         * Rejects responses whose prompt feedback reports a blocking reason.
+         *
+         * @param root response object containing optional prompt feedback
+         * @throws IOException if the prompt was blocked
+         */
         private void rejectPromptFeedback(JsonNode root) throws IOException {
             JsonNode promptFeedback = root.path("promptFeedback");
             String blockReason = promptFeedback.path("blockReason").asText(null);
@@ -147,6 +186,12 @@ final class GeminiResponseParser {
             throw new IOException("Gemini blocked the prompt with " + blockReason + suffix);
         }
 
+        /**
+         * Collects the first candidate's text and media and updates its finish metadata.
+         *
+         * @param candidates candidate array; empty arrays and other node types are ignored
+         * @throws IOException if inline media is invalid or listener delivery fails
+         */
         private void readCandidate(JsonNode candidates) throws IOException {
             if (candidates.isArray() == false || candidates.isEmpty()) {
                 return;
@@ -178,6 +223,12 @@ final class GeminiResponseParser {
             }
         }
 
+        /**
+         * Decodes inline Base64 media from either supported inline-data field spelling.
+         *
+         * @param part content part whose absent or blank media data is ignored
+         * @throws IOException if the media data is not valid Base64
+         */
         private void readInlineData(JsonNode part) throws IOException {
             JsonNode inlineData = part.has("inlineData") ? part.path("inlineData") : part.path("inline_data");
             if (inlineData.isMissingNode() || inlineData.isNull()) {
@@ -210,6 +261,11 @@ final class GeminiResponseParser {
             }
         }
 
+        /**
+         * Updates cumulative token counts and retains integral provider-specific usage details.
+         *
+         * @param usage usage object; absent counts retain prior values and a missing total is calculated
+         */
         private void readUsage(JsonNode usage) {
             if (usage.isObject() == false) {
                 return;
@@ -227,6 +283,13 @@ final class GeminiResponseParser {
             totalTokens = usage.path("totalTokenCount").asLong(fallbackTotal);
         }
 
+        /**
+         * Validates collected content and builds the final response.
+         *
+         * @param requireTerminalFinishReason whether an explicit STOP finish reason is required
+         * @return collected text, media, token usage, and finish reason
+         * @throws IOException if content is missing, generation failed, or required completion is absent
+         */
         private AiResponse result(boolean requireTerminalFinishReason) throws IOException {
             if (sawPayload == false) {
                 throw new IOException("Gemini returned an empty response.");

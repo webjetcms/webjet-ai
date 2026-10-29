@@ -14,7 +14,9 @@ final class AiRequestPreparer {
         Objects.requireNonNull(request, "request");
         return AiRequest.preparedCopy(
             request,
-            PromptInjectionDefense.hardenSystemInstructions(request.instructions())
+            request.operation() == AiOperation.CHAT
+                ? PromptInjectionDefense.hardenChatInstructions(request.instructions())
+                : PromptInjectionDefense.hardenSystemInstructions(request.instructions())
         );
     }
 }

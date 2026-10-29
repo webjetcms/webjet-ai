@@ -6,6 +6,7 @@ import java.io.IOException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.webjetcms.ai.AiProviderException;
+import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.TokenUsage;
 
@@ -20,8 +21,14 @@ final class OpenAiStreamParser {
     static StreamResult parse(BufferedReader reader, AiStreamListener listener)
         throws IOException, AiProviderException {
 
+        return parse(reader, listener, false, false);
+    }
+
+    static StreamResult parse(BufferedReader reader, AiStreamListener listener, boolean chat, boolean continuation)
+        throws IOException, AiProviderException {
+
         StringBuilder fullText = new StringBuilder();
-        StreamState state = new StreamState();
+        StreamState state = new StreamState(chat, continuation);
         String event = null;
         StringBuilder data = new StringBuilder();
 
@@ -59,7 +66,7 @@ final class OpenAiStreamParser {
             );
         }
 
-        return new StreamResult(fullText.toString(), state.usage, state.finishReason);
+        return new StreamResult(fullText.toString(), state.usage, state.finishReason, state.responseId);
     }
 
     private static boolean dispatch(
@@ -84,8 +91,19 @@ final class OpenAiStreamParser {
             throw streamError("OpenAI returned a malformed streaming event", data, exception);
         }
 
+        if (state.chat && (chunk == null || chunk.isObject() == false)) {
+            throw streamError("OpenAI returned a malformed chat streaming event", data, null);
+        }
+
         String type = isBlank(event) ? textOrNull(chunk.get("type")) : event;
+        if (state.chat && isBlank(event) == false && chunk.hasNonNull("type")
+            && event.equals(textOrNull(chunk.get("type"))) == false) {
+            throw streamError("OpenAI chat streaming event type does not match its payload", data, null);
+        }
         if ("response.output_text.delta".equals(type)) {
+            if (state.chat && (state.completed || chunk.path("delta").isTextual() == false)) {
+                throw streamError("OpenAI returned an invalid chat text delta", data, null);
+            }
             String delta = textOrNull(chunk.get("delta"));
             if (delta != null) {
                 fullText.append(delta);
@@ -97,24 +115,31 @@ final class OpenAiStreamParser {
             }
         } else if ("response.completed".equals(type)) {
             JsonNode response = chunk.path("response");
+            if (state.chat) {
+                AiResponse completed = OpenAiProvider.parseChatResponse(response, data, state.continuation);
+                if (state.completed || completed.text().equals(fullText.toString()) == false) {
+                    throw streamError("OpenAI chat stream does not match its completed response", data, null);
+                }
+                state.responseId = completed.responseId();
+            }
             state.usage = OpenAiProvider.parseUsage(response.path("usage"));
             state.finishReason = defaultIfBlank(textOrNull(response.get("status")), "completed");
             state.completed = true;
         } else if ("response.incomplete".equals(type) || "response.failed".equals(type)
                 || "error".equals(type)) {
-            throw failure(type, chunk, data);
+            throw failure(type, chunk, data, state.continuation);
         }
 
         JsonNode response = chunk.path("response");
         String status = textOrNull(response.get("status"));
         if ("incomplete".equalsIgnoreCase(status) || "failed".equalsIgnoreCase(status)
                 || "cancelled".equalsIgnoreCase(status)) {
-            throw failure(status, chunk, data);
+            throw failure(status, chunk, data, state.continuation);
         }
         return false;
     }
 
-    private static AiProviderException failure(String type, JsonNode chunk, String raw) {
+    private static AiProviderException failure(String type, JsonNode chunk, String raw, boolean continuation) {
         JsonNode response = chunk.path("response");
         String reason = textOrNull(response.path("incomplete_details").get("reason"));
         if (isBlank(reason)) {
@@ -130,7 +155,12 @@ final class OpenAiStreamParser {
         if (isBlank(reason) == false) {
             message += ": " + reason;
         }
-        return new AiProviderException(OpenAiProvider.PROVIDER_ID, 200, message, raw, false);
+        JsonNode error = response.path("error");
+        if (error.isObject() == false) error = chunk.path("error");
+        if (error.isObject() == false && "error".equals(type)) error = chunk;
+        return OpenAiProvider.classifyContinuationError(
+            new AiProviderException(OpenAiProvider.PROVIDER_ID, 200, message, raw, false), error, continuation
+        );
     }
 
     private static AiProviderException streamError(String message, String raw, Throwable cause) {
@@ -155,11 +185,19 @@ final class OpenAiStreamParser {
     }
 
     private static final class StreamState {
+        private final boolean chat;
+        private final boolean continuation;
         private TokenUsage usage = TokenUsage.EMPTY;
         private String finishReason;
+        private String responseId;
         private boolean completed;
+
+        private StreamState(boolean chat, boolean continuation) {
+            this.chat = chat;
+            this.continuation = chat && continuation;
+        }
     }
 
-    record StreamResult(String text, TokenUsage usage, String finishReason) {
+    record StreamResult(String text, TokenUsage usage, String finishReason, String responseId) {
     }
 }
