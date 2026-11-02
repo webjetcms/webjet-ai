@@ -86,6 +86,21 @@ The default `AiProvider.embed(...)` implementation reports that embeddings are n
 supported. Override it only when the backend supports embeddings. Override `close()`
 when the provider owns an HTTP client, executor, or another closeable resource.
 
+### Chat support in 2.1
+
+Existing providers need no new method implementations. Handle the new `CHAT` enum
+value explicitly when switching over operations; a text-only provider should
+reject it with `UNSUPPORTED_OPERATION`, as the example above does.
+
+An adapter that supports chat must honor the caller's explicit storage opt-in,
+send only the current turn with `previousResponseId`, and return the new ID through
+the five-argument `AiResponse` constructor. Keep conversation state in the host,
+not in mutable provider fields. `AiClient` validates the shared text-only chat
+constraints and cleans echoed input blocks from responses. Direct provider calls
+must perform their own request validation. See the [chat contract](../README.md#chat-and-conversation-continuation).
+
+### Capability metadata and cancellation
+
 Override `capabilities(String model)` to publish an immutable `AiCapabilities`
 descriptor. The default validates the non-blank model ID and returns unknown
 metadata, preserving existing providers. Supply an `Operation` for each known

@@ -18,14 +18,12 @@ uses [Semantic Versioning](https://semver.org/).
   translation options, and blank text.
 - Chat-specific prompt defenses that allow conversational questions while keeping
   untrusted content subordinate to security rules and trusted task instructions.
-
 - Immutable `AiCapabilities` metadata through `AiClient.capabilities(...)` and
   backward-compatible provider defaults, without credentials, network access, or
   inference during lookup.
 - Separate adapter and model support, per-operation streaming, continuation storage
   requirements, and embedding capabilities for remote and local providers. Unknown
   remote models retain their existing execution behavior.
-
 - Per-call `AiCancellationToken` overloads for synchronous `execute` and `stream`,
   aborting only the active HTTP request in OpenAI, Gemini, and OpenRouter while
   retaining existing signatures and shared transport resources.
@@ -33,13 +31,14 @@ uses [Semantic Versioning](https://semver.org/).
   redaction. Existing exception constructors use `UNKNOWN`.
 - Compatibility defaults for custom and local providers that check cancellation
   around blocking execution and streamed callbacks without closing shared resources.
-
-  - Stable `INVALID_CONTINUATION` and `UNSUPPORTED_OPERATION` error categories,
+- Stable `INVALID_CONTINUATION` and `UNSUPPORTED_OPERATION` error categories,
   including conservative OpenAI HTTP and SSE continuation classification and
   explicit unsupported-operation failures across bundled providers.
 - `AiProviderException.withCategory(...)` preserves diagnostics and credential
   redaction behavior. Ambiguous provider errors retain `UNKNOWN`; categories
   do not trigger retries, conversation resets, or storage changes.
+
+### Fixed
 
 - Chat instructions explicitly exclude internal input boundaries from answers.
   `AiClient` removes echoed untrusted input blocks from completed chat responses
@@ -50,8 +49,19 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The development build defaults to `2.1.0-SNAPSHOT`; release builds use
+  `-PreleaseVersion=2.1.0` for both artifacts.
 - Maven Central releases now wait for manual publication in Central Portal after
   validation, while the GitHub Release is still created automatically.
+
+### Compatibility
+
+- Existing execution methods, provider implementations, and the four-argument
+  `AiResponse` constructor remain supported. `AiResponse` now has a fifth record
+  component, `responseId`, which participates in equality and record-based
+  serialization.
+- Exhaustive switches over `AiOperation` must handle `CHAT`. See the
+  [2.1 upgrade notes](README.md#upgrading-from-20x) for host integration details.
 
 ## [2.0.4]
 
@@ -177,6 +187,8 @@ uses [Semantic Versioning](https://semver.org/).
 - Prompt-injection defense utilities.
 - Java 17 build, tests, API documentation, and Maven Central publication.
 
+[2.1.0]: https://github.com/webjetcms/webjet-ai/compare/v2.0.4...v2.1.0
+[2.0.4]: https://github.com/webjetcms/webjet-ai/releases/tag/v2.0.4
 [2.0.0]: https://github.com/webjetcms/webjet-ai/compare/v1.2.0...v2.0.0
 [1.2.0]: https://github.com/webjetcms/webjet-ai/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/webjetcms/webjet-ai/compare/v1.1.0...v1.1.1

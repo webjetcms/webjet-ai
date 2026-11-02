@@ -1,6 +1,6 @@
 # OpenAI provider
 
-`OpenAiProvider` implements text, multimodal text, image generation, image
+`OpenAiProvider` implements text, text chat, multimodal text, image generation, image
 editing, and text embeddings through OpenAI's REST APIs. Its provider identifier
 is `openai` when it is selected from a client containing multiple providers.
 
@@ -103,7 +103,27 @@ For `TEXT`, OpenAI receives:
 3. protected `userPrompt` as another user input;
 4. optional `inputMedia` as an inline data URL.
 
-`store` is forwarded only for text requests. It defaults to `false`.
+`store` is forwarded for `TEXT` and `CHAT` requests. It defaults to `false`;
+`CHAT` requires an explicit `true` value.
+
+## Chat
+
+Use `AiOperation.CHAT` for text conversations through the Responses endpoint.
+The [chat example](../../README.md#chat-and-conversation-continuation) shows a first
+turn followed by a streamed continuation. Set `previousResponseId` to the latest
+successful `responseId()`; the adapter sends it as `previous_response_id` and
+returns the new response's `id`. Omit it to start a fresh conversation.
+
+Each turn sends hardened `instructions` and only the current protected `inputText`
+and `userPrompt`. It requires `store(true)` and meaningful user/source text, and
+rejects binary input, image options, and translation options. Continuation IDs
+are rejected on other operations.
+
+Chat requires a completed response with a non-blank ID and usable text. Reasoning
+content is excluded, and tool-call or incomplete output fails with
+`AiProviderException`. Streaming additionally validates that the terminal response
+matches the accumulated text. `AiClient` removes echoed internal input blocks
+while preserving usage, the response ID, and the `completed` finish reason.
 
 ## Multimodal text request
 
@@ -126,7 +146,7 @@ type or image input.
 
 ## Streaming text
 
-Streaming is available only for `TEXT` requests. The listener receives decoded
+Streaming is available for `TEXT` and `CHAT` requests. The listener receives decoded
 text fragments in provider order, and the returned response contains the complete
 text and final usage information.
 
@@ -235,8 +255,10 @@ This adapter does not expose an image mask option.
 
 ## `AiRequest` fields
 
-This table applies to generation requests. Embeddings use `EmbeddingRequest`
-with the separate `model`, `inputs`, and `options` components.
+This table covers `TEXT` and image requests; [chat](#chat) has additional storage
+and text-only requirements. `previousResponseId` is rejected for all operations
+in this table. Embeddings use `EmbeddingRequest` with separate `model`, `inputs`,
+and `options` components.
 
 | Field | `TEXT` | `GENERATE_IMAGE` | `EDIT_IMAGE` |
 | --- | --- | --- | --- |

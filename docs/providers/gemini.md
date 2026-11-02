@@ -1,6 +1,6 @@
 # Google Gemini provider
 
-`GeminiProvider` implements text embeddings, text and multimodal generation,
+`GeminiProvider` implements text embeddings, text chat, text and multimodal generation,
 image generation, and image editing through the Google Gemini REST API. Its
 provider identifier is `gemini` when it is selected from a client containing
 multiple providers.
@@ -107,6 +107,26 @@ For `TEXT`, hardened `instructions` become Gemini `systemInstruction`.
 `inputText` and `userPrompt` become protected user content parts. Optional
 `inputMedia` is appended as Base64 `inlineData`.
 
+## Chat
+
+Use `AiOperation.CHAT` for text conversations through the `interactions` endpoint.
+The [chat example](../../README.md#chat-and-conversation-continuation) also works
+with `AiProviders.GEMINI` and a Gemini model that supports Interactions.
+`previousResponseId` is sent as `previous_interaction_id`; the returned interaction
+ID becomes `responseId()`. Omit the ID for a fresh conversation.
+
+Each turn sends hardened `instructions` as `system_instruction` and the current
+protected `inputText` and `userPrompt` as text input parts, requesting a text
+response. Every turn requires `store(true)` and meaningful user/source text.
+Binary input, image options, translation options, and continuation IDs on other
+operations are rejected before transport.
+
+Only `model_output` text is returned; thoughts and non-text content are excluded.
+The interaction must finish as `completed` with a non-blank ID and usable text.
+Streams must include `interaction.completed` after all steps stop. Function calls,
+incomplete interactions, and malformed streams fail with `AiProviderException`.
+`AiClient` removes echoed input blocks and retains usage and the interaction ID.
+
 ## Multimodal text request
 
 Use `TEXT` when media is input and the expected response is text.
@@ -139,7 +159,8 @@ AiResponse completed = client.stream(
 
 The listener must not be null. It receives text deltas only. The returned response
 contains the accumulated text, generated media, usage, and terminal finish reason.
-A successful stream must end with Gemini's `STOP` finish reason.
+A successful `TEXT` or image stream must end with Gemini's `STOP` finish reason;
+`CHAT` uses the separate Interactions lifecycle described [above](#chat).
 
 The adapter does not restrict streaming to `TEXT`, but image generation/editing
 over the streaming endpoint still depends on the selected model.
@@ -257,8 +278,10 @@ GeneratedMedia editedImage = response.media().get(0);
 
 ## `AiRequest` fields
 
-This table applies to generation requests. Embeddings use `EmbeddingRequest`
-with the separate `model`, `inputs`, and `options` components.
+This table covers `TEXT` and image requests; [chat](#chat) uses Interactions with
+its own storage and text-only requirements. `previousResponseId` is rejected for
+all operations in this table. Embeddings use `EmbeddingRequest` with separate
+`model`, `inputs`, and `options` components.
 
 | Field | `TEXT` | `GENERATE_IMAGE` | `EDIT_IMAGE` |
 | --- | --- | --- | --- |
@@ -289,7 +312,7 @@ The provider follows Gemini catalogue pagination, removes the `models/` prefix,
 and sorts results by model identifier. The result does not describe whether a
 model supports embeddings, text, image input, image output, or editing.
 
-Gemini may return text and media in the same response:
+For `TEXT` and image operations, Gemini may return text and media in the same response:
 
 - only the first response candidate is consumed;
 - all text parts in that candidate are concatenated into `response.text()`;

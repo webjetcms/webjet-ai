@@ -40,6 +40,23 @@ Version `2.1.0` also publishes the optional local runtime as the separate
 `com.webjetcms:webjet-ai-local:2.1.0` artifact. Cloud-provider applications only
 need the core `webjet-ai` dependency shown above.
 
+### Upgrading from 2.0.x
+
+Update both artifacts to `2.1.0` when using the local runtime. Java 17 remains the
+minimum version. Existing `execute`, `stream`, and exception constructors remain
+available; custom providers inherit defaults for capabilities and cancellation.
+
+Handle the new `CHAT` value in exhaustive `AiOperation` switches. `AiResponse`
+adds `responseId` as its fifth record component; its four-argument constructor
+still works and sets this field to `null`. Review code that reflects over record
+components or serializes responses into a fixed schema. Record equality now
+includes the continuation ID.
+
+Existing requests still default to `TEXT` and `store(false)`. Chat is an explicit
+opt-in and requires permission to store context with the selected provider.
+Capability lookup does not grant that permission. Treat unrecognized future
+error categories as the generic error path.
+
 ## Minimal usage
 
 ```java
@@ -94,6 +111,55 @@ The example's `selectConfiguredProvider(...)` and `selectTextGenerationModel(...
 calls represent host UI or policy. A catalogue entry does not describe model
 capabilities, so use provider capability metadata or documentation rather than list
 position when selecting a model for an operation.
+
+## Chat and conversation continuation
+
+OpenAI and Gemini support text-only `CHAT` through provider-managed history.
+Within an open client, use a configuration for the selected provider and a model
+that supports its chat endpoint:
+
+```java
+import com.webjetcms.ai.AiOperation;
+import com.webjetcms.ai.AiProviders;
+import com.webjetcms.ai.AiRequest;
+import com.webjetcms.ai.AiResponse;
+
+String providerId = AiProviders.OPENAI; // Or AiProviders.GEMINI
+String chatModel = "your-chat-model";
+String instructions = "Answer questions about the supplied report.";
+
+AiResponse first = client.execute(providerId, AiRequest.builder()
+    .operation(AiOperation.CHAT).model(chatModel)
+    .instructions(instructions).inputText("The report says sales doubled.")
+    .userPrompt("What changed?").store(true).build(), config);
+
+AiResponse next = client.stream(providerId, AiRequest.builder()
+    .operation(AiOperation.CHAT).model(chatModel)
+    .instructions(instructions).userPrompt("Summarize that in one sentence.")
+    .previousResponseId(first.responseId()).store(true).build(), config, System.out::print);
+
+String continuationId = next.responseId();
+```
+
+Send trusted instructions on every turn. Send only the current turn's source text
+and question; the provider retrieves earlier context using the supplied ID. Keep
+the latest successful `responseId()` with the conversation's provider and account
+configuration. IDs are provider-specific and must not be reused across providers
+or unrelated conversations. Omit `previousResponseId` to start a new conversation.
+The client keeps no conversation history or current ID of its own.
+
+Every chat turn requires explicit `store(true)` and non-blank `inputText` or
+`userPrompt`; instructions alone are insufficient. Binary input, image options,
+translation options, and blank continuation IDs are rejected. `previousResponseId`
+is rejected on operations other than `CHAT`. OpenRouter and local providers do not
+support `CHAT`; use `TEXT` for independent text requests without stored history.
+
+Successful chat responses include text, usage, `finishReason` equal to `completed`,
+and a continuation ID. Tool calls and incomplete responses are rejected. Internal
+input blocks echoed by the model are removed by `AiClient`, including during
+streaming; response metadata is retained. See the [OpenAI](docs/providers/openai.md#chat)
+and [Gemini](docs/providers/gemini.md#chat) guides for protocol details and
+[stable error categories](#stable-error-categories) for continuation failures.
 
 ## Image capability lookup
 
@@ -250,8 +316,8 @@ select it automatically. Use their provider-ID overloads when the client contain
 multiple providers. Identifier-free calls fail clearly if the client contains zero or
 multiple providers.
 
-Embeddings use a dedicated request and response API, so the existing
-`AiOperation` and `AiResponse` contracts remain unchanged:
+Embeddings use a dedicated request and response API rather than an
+`AiOperation` value or `AiResponse`:
 
 ```java
 import java.util.List;
@@ -596,8 +662,8 @@ end with `.` to indicate a potentially unfinished sentence.
 
 ## Provider guides
 
-Each provider guide shows how to build requests for text, streaming, multimodal
-input, image generation, image editing, and text embeddings. The capability
+Each provider guide shows how to build requests for text, chat where supported,
+streaming, multimodal input, image generation, image editing, and text embeddings. The capability
 tables also identify fields that a particular adapter forwards or ignores.
 
 - [OpenAI](docs/providers/openai.md)
@@ -618,6 +684,8 @@ The enclosed source text is omitted together with its markers; the generated
 answer and response metadata are retained. Other operations keep their original
 response text. This is output cleanup, not a substitute for prompt-injection
 defenses. Responses already saved by a host application are not rewritten.
+Streaming may buffer marker fragments and leading whitespace; concatenated text
+retains the same answer indentation as the completed response.
 
 An `AiProvider` may explicitly select literal handling when boundary markers would
 change the result. The local M2M100 provider uses it for deterministic translation.
@@ -772,6 +840,13 @@ settings.
 The `checkStandaloneBoundary` verification rejects imports from WebJET CMS,
 Spring, servlet APIs, and JPA. Build outputs include the main, sources, and
 Javadoc JARs.
+
+Without a `releaseVersion` property, development artifacts use `2.1.0-SNAPSHOT`.
+Verify the release version and both modules' publication metadata explicitly:
+
+```shell
+./gradlew clean check javadoc -PreleaseVersion=2.1.0
+```
 
 For simultaneous local development with a consuming Gradle project, use a
 composite build instead of publishing to `mavenLocal()`:

@@ -17,7 +17,9 @@ available through `AiClient.imageOptions(...)` without credentials or network ac
 ## Capabilities
 
 `client.capabilities("openrouter", model)` describes adapter support without making
-a request. `CHAT` continuation and image streaming are unsupported by this adapter.
+a request. `CHAT` and image streaming are unsupported by this adapter.
+Requests with `CHAT`, or with `previousResponseId` on another operation, are
+rejected before transport; `store(true)` does not enable conversation history.
 Known image-generation support uses the static image catalogue; that catalogue
 does not establish model editing support. Text and embedding model support remains
 unknown, and uncatalogued models retain their existing execution behavior.
