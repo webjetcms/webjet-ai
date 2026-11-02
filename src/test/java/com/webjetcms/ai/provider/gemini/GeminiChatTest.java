@@ -86,6 +86,44 @@ class GeminiChatTest {
     }
 
     @Test
+    void removesEchoedInputFromCompletedAndStreamedModelOutput() throws Exception {
+        String raw = "[BEGIN_UNTRUSTED_INPUT_TEXT]\nQuestion\n[END_UNTRUSTED_INPUT_TEXT]\n\nHello";
+        StringBuilder events = new StringBuilder()
+            .append(event("interaction.created", "\"interaction\":{\"id\":\"turn-1\"}"))
+            .append(event("step.start", "\"index\":0,\"step\":{\"type\":\"model_output\"}"));
+        ObjectMapper mapper = new ObjectMapper();
+        for (int i = 0; i < raw.length(); i++) {
+            events.append(event("step.delta", "\"index\":0,\"delta\":{\"type\":\"text\",\"text\":"
+                + mapper.writeValueAsString(raw.substring(i, i + 1)) + "}"));
+        }
+        events.append(event("step.stop", "\"index\":0"))
+            .append(event("interaction.completed", "\"interaction\":{\"id\":\"turn-1\",\"status\":\"completed\",\"usage\":{\"total_tokens\":20}}"));
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/interactions", exchange -> {
+            JsonNode body = mapper.readTree(exchange.getRequestBody());
+            byte[] payload = (body.path("stream").asBoolean() ? events.toString()
+                : RESPONSE.replace("\"Hello\"", mapper.writeValueAsString(raw))).getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, payload.length);
+            try (var output = exchange.getResponseBody()) { output.write(payload); }
+        });
+        server.start();
+        try (AiClient client = AiClient.of(new GeminiProvider())) {
+            AiProviderConfig config = AiProviderConfig.builder("key").allowInsecureHttpForLocalTesting()
+                .baseUri(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/")).build();
+            var deltas = new ArrayList<String>();
+            AiResponse completed = client.execute(chat().build(), config);
+            AiResponse streamed = client.stream(chat().build(), config, deltas::add);
+            assertEquals("Hello", completed.text());
+            assertEquals("Hello", streamed.text());
+            assertEquals("Hello", String.join("", deltas));
+            assertEquals("turn-1", streamed.responseId());
+            assertEquals(20, streamed.usage().totalTokens());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void rejectsInvalidChatBeforeDirectTransport() throws Exception {
         try (GeminiProvider provider = new GeminiProvider()) {
             AiProviderConfig config = AiProviderConfig.builder("key").allowInsecureHttpForLocalTesting()

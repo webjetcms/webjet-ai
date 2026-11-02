@@ -612,6 +612,13 @@ Pass the immutable `AiRequest` directly to `AiClient.execute(...)` or
 delegating to the provider: it hardens trusted instructions and protects untrusted
 input text and user prompts. The original request keeps its readable input values.
 
+For `CHAT`, the client also removes echoed `BEGIN_UNTRUSTED_*` input blocks from
+completed responses and streamed text, even when a marker spans multiple chunks.
+The enclosed source text is omitted together with its markers; the generated
+answer and response metadata are retained. Other operations keep their original
+response text. This is output cleanup, not a substitute for prompt-injection
+defenses. Responses already saved by a host application are not rewritten.
+
 An `AiProvider` may explicitly select literal handling when boundary markers would
 change the result. The local M2M100 provider uses it for deterministic translation.
 The local EuroLLM provider retains protected prompt preparation and also rejects

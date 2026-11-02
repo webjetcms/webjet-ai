@@ -403,7 +403,8 @@ public final class AiClient implements AutoCloseable {
         Objects.requireNonNull(token, "token");
         try {
             return CancellationSupport.call(providerId, token,
-                () -> selectedProvider.execute(prepareRequest(selectedProvider, request), config, token));
+                () -> cleanChatResponse(request,
+                    selectedProvider.execute(prepareRequest(selectedProvider, request), config, token)));
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
@@ -534,13 +535,39 @@ public final class AiClient implements AutoCloseable {
         AiProvider selectedProvider = provider(providerId);
         Objects.requireNonNull(token, "token");
         try {
-            return CancellationSupport.call(providerId, token,
-                () -> selectedProvider.stream(prepareRequest(selectedProvider, request), config,
-                    CancellationSupport.listener(providerId, token, listener), token));
+            return CancellationSupport.call(providerId, token, () -> {
+                AiRequest prepared = prepareRequest(selectedProvider, request);
+                AiStreamListener guarded = CancellationSupport.listener(providerId, token, listener);
+                if (request == null || request.operation() != AiOperation.CHAT) {
+                    return selectedProvider.stream(prepared, config, guarded, token);
+                }
+                ChatResponseText filter = new ChatResponseText();
+                AiStreamListener filtered = guarded == null ? null : CancellationSupport.listener(providerId, token,
+                    delta -> emitChatText(providerId, guarded, filter.append(delta)));
+                AiResponse response = selectedProvider.stream(prepared, config, filtered, token);
+                emitChatText(providerId, guarded, filter.finish());
+                return cleanChatResponse(request, response);
+            });
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
             throw unexpectedProviderFailure(providerId, exception, config);
+        }
+    }
+
+    private static AiResponse cleanChatResponse(AiRequest request, AiResponse response) {
+        if (request == null || request.operation() != AiOperation.CHAT || response == null) return response;
+        return response.withText(ChatResponseText.clean(response.text()));
+    }
+
+    private static void emitChatText(String providerId, AiStreamListener listener, String text) throws AiProviderException {
+        if (listener == null || text.isEmpty()) return;
+        try {
+            listener.onTextDelta(text);
+        } catch (AiProviderException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw new AiProviderException(providerId, "The stream listener rejected a chat response fragment.", exception);
         }
     }
 

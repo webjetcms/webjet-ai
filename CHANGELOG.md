@@ -41,6 +41,13 @@ uses [Semantic Versioning](https://semver.org/).
   redaction behavior. Ambiguous provider errors retain `UNKNOWN`; categories
   do not trigger retries, conversation resets, or storage changes.
 
+- Chat instructions explicitly exclude internal input boundaries from answers.
+  `AiClient` removes echoed untrusted input blocks from completed chat responses
+  and streamed text, including markers split across chunks, while preserving
+  response IDs, usage, media and completion metadata.
+  Leading whitespace is handled consistently across chunk boundaries without
+  changing answer indentation.
+
 ### Changed
 
 - Maven Central releases now wait for manual publication in Central Portal after
