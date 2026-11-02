@@ -16,8 +16,11 @@ import java.util.EnumMap;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
 
 class AiCapabilitiesTest {
 
@@ -58,49 +61,36 @@ class AiCapabilitiesTest {
                 assertEquals(UNKNOWN, capabilities.embeddingModelSupport(), provider);
 
                 Operation chat = capabilities.operation(CHAT);
-                if ("openrouter".equals(provider)) {
-                    assertEquals(UNSUPPORTED, chat.adapterSupport());
-                    assertEquals(UNSUPPORTED, chat.support());
-                    assertEquals(UNSUPPORTED, chat.adapterStreaming());
-                    assertEquals(NONE, chat.continuation());
-                } else {
-                    assertEquals(new Operation(SUPPORTED, UNKNOWN, SUPPORTED, PROVIDER_STORAGE_REQUIRED),
-                        chat, provider);
-                }
+                assertEquals("openrouter".equals(provider) ? new Operation(UNSUPPORTED, UNKNOWN, UNSUPPORTED, NONE)
+                    : new Operation(SUPPORTED, UNKNOWN, SUPPORTED, PROVIDER_STORAGE_REQUIRED), chat, provider);
+                assertEquals("openrouter".equals(provider) ? UNSUPPORTED : UNKNOWN, chat.support(), provider);
                 for (AiOperation operation : List.of(GENERATE_IMAGE, EDIT_IMAGE)) {
-                    Operation image = capabilities.operation(operation);
-                    assertEquals(SUPPORTED, image.adapterSupport(), provider);
-                    assertEquals(UNKNOWN, image.modelSupport(), provider);
-                    assertEquals("gemini".equals(provider) ? SUPPORTED : UNSUPPORTED,
-                        image.adapterStreaming(), provider);
-                    assertEquals(NONE, image.continuation(), provider);
+                    assertEquals(new Operation(SUPPORTED, UNKNOWN,
+                        "gemini".equals(provider) ? SUPPORTED : UNSUPPORTED, NONE), capabilities.operation(operation), provider);
                 }
             }
         }
     }
 
-    @Test
-    void knownImageMetadataPreservesOperationRestrictionsAndGeminiNormalization() throws Exception {
+    @ParameterizedTest
+    @CsvSource({
+        "openai, gpt-image-2, SUPPORTED, SUPPORTED",
+        "openai, dall-e-3, SUPPORTED, UNSUPPORTED",
+        "gemini, models/gemini-3.1-flash-image, SUPPORTED, SUPPORTED",
+        "openrouter, openai/gpt-image-2, SUPPORTED, UNKNOWN",
+        "openrouter, recraft/recraft-v4-vector, UNSUPPORTED, UNSUPPORTED"
+    })
+    void knownImageMetadataPreservesOperationRestrictionsAndGeminiNormalization(
+        String provider, String model, Support generation, Support editing
+    ) throws Exception {
         try (AiClient client = AiClient.discover()) {
-            AiCapabilities openAi = client.capabilities("openai", "gpt-image-2");
-            assertEquals(SUPPORTED, openAi.operation(GENERATE_IMAGE).support());
-            assertEquals(SUPPORTED, openAi.operation(EDIT_IMAGE).support());
-            AiCapabilities dallE = client.capabilities("openai", "dall-e-3");
-            assertEquals(SUPPORTED, dallE.operation(GENERATE_IMAGE).support());
-            assertEquals(UNSUPPORTED, dallE.operation(EDIT_IMAGE).support());
-
-            AiCapabilities gemini = client.capabilities("gemini", "models/gemini-3.1-flash-image");
-            assertEquals(client.capabilities("gemini", "gemini-3.1-flash-image"), gemini);
-            assertEquals(SUPPORTED, gemini.operation(GENERATE_IMAGE).support());
-            assertEquals(SUPPORTED, gemini.operation(EDIT_IMAGE).support());
-
-            AiCapabilities router = client.capabilities("openrouter", "openai/gpt-image-2");
-            assertEquals(SUPPORTED, router.operation(GENERATE_IMAGE).support());
-            assertEquals(UNKNOWN, router.operation(EDIT_IMAGE).modelSupport());
-            assertEquals(UNKNOWN, router.operation(EDIT_IMAGE).support());
-            AiCapabilities vector = client.capabilities("openrouter", "recraft/recraft-v4-vector");
-            assertEquals(UNSUPPORTED, vector.operation(GENERATE_IMAGE).support());
-            assertEquals(UNSUPPORTED, vector.operation(EDIT_IMAGE).support());
+            AiCapabilities capabilities = client.capabilities(provider, model);
+            assertEquals(generation, capabilities.operation(GENERATE_IMAGE).support());
+            assertEquals(editing, capabilities.operation(EDIT_IMAGE).support());
+            assertEquals(editing, capabilities.operation(EDIT_IMAGE).modelSupport());
+            if ("gemini".equals(provider)) {
+                assertEquals(client.capabilities(provider, "gemini-3.1-flash-image"), capabilities);
+            }
         }
     }
 }

@@ -14,17 +14,11 @@ class ChatResponseTextTest {
     /** Both input sources are removed while the generated answer remains intact. */
     @Test
     void removesEchoedBlocksFromCompleteResponses() {
-        assertEquals(ANSWER, ChatResponseText.clean(ECHO + "\n\n" + ANSWER));
+        assertCleanAcrossChunkBoundaries(ECHO + "\n\n" + ANSWER, ANSWER);
         assertEquals(ANSWER, ChatResponseText.clean(
             "[BEGIN_UNTRUSTED_USER_PROMPT]Question[END_UNTRUSTED_USER_PROMPT]\n" + ECHO + "\n" + ANSWER));
         assertEquals("Before\n\nAfter", ChatResponseText.clean("Before\n" + ECHO + "\nAfter"));
         assertEquals("    indented code\n", ChatResponseText.clean(ECHO + "\n\n    indented code\n"));
-    }
-
-    /** Every possible split in the envelope produces the same visible answer. */
-    @Test
-    void filtersMarkersAcrossEveryChunkBoundary() {
-        assertCleanAcrossChunkBoundaries(ECHO + "\n\n" + ANSWER, ANSWER);
     }
 
     /** Echo cleanup preserves the same whitespace regardless of chunk boundaries. */

@@ -17,6 +17,8 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -31,6 +33,8 @@ import com.webjetcms.ai.AiResponse;
 
 class GeminiChatTest {
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private static final String RESPONSE = """
         {"id":"turn-1","status":"completed","steps":[
           {"type":"thought","summary":[{"type":"text","text":"private thought"}]},
@@ -39,14 +43,17 @@ class GeminiChatTest {
           "usage":{"total_input_tokens":11,"total_output_tokens":5,"total_tokens":20}}
         """;
 
-    @Test
-    void executesFirstTurnAndStreamsContinuationWithoutReplayingHistory() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void executesFirstTurnAndStreamsContinuationWithoutReplayingHistory(boolean echoInput) throws Exception {
+        String echo = echoInput ? "[BEGIN_UNTRUSTED_INPUT_TEXT]\nQuestion\n[END_UNTRUSTED_INPUT_TEXT]\n\n" : "";
         List<JsonNode> bodies = new CopyOnWriteArrayList<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/proxy/v1beta/interactions", exchange -> {
-            JsonNode body = new ObjectMapper().readTree(exchange.getRequestBody());
+            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
             bodies.add(body);
-            byte[] payload = (body.path("stream").asBoolean() ? stream() : RESPONSE).getBytes(StandardCharsets.UTF_8);
+            byte[] payload = (body.path("stream").asBoolean() ? stream(echo)
+                : RESPONSE.replace("\"Hello\"", MAPPER.writeValueAsString(echo + "Hello"))).getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(200, payload.length);
             try (var output = exchange.getResponseBody()) {
                 output.write(payload);
@@ -80,44 +87,6 @@ class GeminiChatTest {
             assertFalse(bodies.get(1).toString().contains("Source facts"));
             assertFalse(bodies.get(1).toString().contains("Hello"));
             assertEquals("turn-1", bodies.get(1).path("previous_interaction_id").asText());
-        } finally {
-            server.stop(0);
-        }
-    }
-
-    @Test
-    void removesEchoedInputFromCompletedAndStreamedModelOutput() throws Exception {
-        String raw = "[BEGIN_UNTRUSTED_INPUT_TEXT]\nQuestion\n[END_UNTRUSTED_INPUT_TEXT]\n\nHello";
-        StringBuilder events = new StringBuilder()
-            .append(event("interaction.created", "\"interaction\":{\"id\":\"turn-1\"}"))
-            .append(event("step.start", "\"index\":0,\"step\":{\"type\":\"model_output\"}"));
-        ObjectMapper mapper = new ObjectMapper();
-        for (int i = 0; i < raw.length(); i++) {
-            events.append(event("step.delta", "\"index\":0,\"delta\":{\"type\":\"text\",\"text\":"
-                + mapper.writeValueAsString(raw.substring(i, i + 1)) + "}"));
-        }
-        events.append(event("step.stop", "\"index\":0"))
-            .append(event("interaction.completed", "\"interaction\":{\"id\":\"turn-1\",\"status\":\"completed\",\"usage\":{\"total_tokens\":20}}"));
-        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/interactions", exchange -> {
-            JsonNode body = mapper.readTree(exchange.getRequestBody());
-            byte[] payload = (body.path("stream").asBoolean() ? events.toString()
-                : RESPONSE.replace("\"Hello\"", mapper.writeValueAsString(raw))).getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, payload.length);
-            try (var output = exchange.getResponseBody()) { output.write(payload); }
-        });
-        server.start();
-        try (AiClient client = AiClient.of(new GeminiProvider())) {
-            AiProviderConfig config = AiProviderConfig.builder("key").allowInsecureHttpForLocalTesting()
-                .baseUri(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/")).build();
-            var deltas = new ArrayList<String>();
-            AiResponse completed = client.execute(chat().build(), config);
-            AiResponse streamed = client.stream(chat().build(), config, deltas::add);
-            assertEquals("Hello", completed.text());
-            assertEquals("Hello", streamed.text());
-            assertEquals("Hello", String.join("", deltas));
-            assertEquals("turn-1", streamed.responseId());
-            assertEquals(20, streamed.usage().totalTokens());
         } finally {
             server.stop(0);
         }
@@ -162,7 +131,7 @@ class GeminiChatTest {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/interactions", exchange -> {
             int status = statuses.get(bodies.size());
-            bodies.add(new ObjectMapper().readTree(exchange.getRequestBody()));
+            bodies.add(MAPPER.readTree(exchange.getRequestBody()));
             String fields = "\"error\":{\"code\":\"" + (status == 400 ? "invalid_request" : "not_found")
                 + "\",\"message\":\"previous_interaction_id missing: test-gemini-key and trusted-secret\"}";
             byte[] payload = (status == 200 ? event("error", fields) : "{" + fields + "}")
@@ -209,13 +178,21 @@ class GeminiChatTest {
         return "event: " + type + "\ndata: {\"event_type\":\"" + type + "\"," + fields + "}\n\n";
     }
 
-    private static String stream() {
+    private static String stream() { return stream(""); }
+
+    private static String stream(String echo) {
+        StringBuilder echoedEvents = new StringBuilder();
+        for (int i = 0; i < echo.length(); i++) {
+            echoedEvents.append(event("step.delta", "\"index\":1,\"delta\":" + MAPPER.createObjectNode()
+                .put("type", "text").put("text", echo.substring(i, i + 1))));
+        }
         return ": keepalive\n\n"
             + event("interaction.created", "\"interaction\":{\"id\":\"turn-2\"}")
             + event("step.start", "\"index\":0,\"step\":{\"type\":\"thought\"}")
             + event("step.delta", "\"index\":0,\"delta\":{\"type\":\"text\",\"text\":\"private thought\"}")
             + event("step.stop", "\"index\":0")
             + event("step.start", "\"index\":1,\"step\":{\"type\":\"model_output\"}")
+            + echoedEvents
             + event("step.delta", "\"index\":1,\"delta\":{\"type\":\"text\",\"text\":\"Hello\"}")
             + event("step.delta", "\"index\":1,\"delta\":{\"type\":\"text\",\"text\":\" again\"}")
             + event("step.stop", "\"index\":1")

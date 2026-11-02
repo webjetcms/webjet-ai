@@ -98,8 +98,7 @@ class AiClientTest {
         StubProvider provider = new StubProvider("stub");
         try (AiClient client = AiClient.of(provider)) {
             for (String id : new String[] {"thread-a", "thread-b", null, "thread-a-next"}) {
-                AiRequest request = AiRequest.builder().operation(AiOperation.CHAT).store(true)
-                    .previousResponseId(id).instructions("Answer questions about the supplied report.")
+                AiRequest request = chatRequest().previousResponseId(id).instructions("Answer questions about the supplied report.")
                     .inputText("The report says sales doubled.").userPrompt("What changed?").build();
                 client.execute(request, AiProviderConfig.empty());
                 client.stream(request, AiProviderConfig.empty(), delta -> { });
@@ -121,17 +120,13 @@ class AiClientTest {
     void validatesChatBeforeDelegationEvenForLiteralProviders() throws Exception {
         StubProvider provider = new StubProvider("stub", AiInputHandling.LITERAL);
         List<AiRequest> invalidRequests = List.of(
-            AiRequest.builder().operation(AiOperation.CHAT).userPrompt("Hello").build(),
-            AiRequest.builder().operation(AiOperation.CHAT).store(true).instructions("Help").build(),
-            AiRequest.builder().operation(AiOperation.CHAT).store(true).userPrompt("\u200B\u0000").build(),
-            AiRequest.builder().operation(AiOperation.CHAT).store(true).userPrompt("Hello")
-                .previousResponseId(" ").build(),
-            AiRequest.builder().operation(AiOperation.CHAT).store(true).userPrompt("Hello")
-                .inputMedia(new BinaryContent(new byte[] {1}, "image/png", "image.png")).build(),
-            AiRequest.builder().operation(AiOperation.CHAT).store(true).userPrompt("Hello")
-                .imageOptions(new ImageOptions(1, null, null)).build(),
-            AiRequest.builder().operation(AiOperation.CHAT).store(true).userPrompt("Hello")
-                .translationOptions(new TranslationOptions()).build(),
+            chatRequest().store(false).build(),
+            chatRequest().userPrompt(null).instructions("Help").build(),
+            chatRequest().userPrompt("\u200B\u0000").build(),
+            chatRequest().previousResponseId(" ").build(),
+            chatRequest().inputMedia(new BinaryContent(new byte[] {1}, "image/png", "image.png")).build(),
+            chatRequest().imageOptions(new ImageOptions(1, null, null)).build(),
+            chatRequest().translationOptions(new TranslationOptions()).build(),
             AiRequest.builder().userPrompt("Hello").previousResponseId("previous").build()
         );
 
@@ -147,6 +142,10 @@ class AiClientTest {
         }
         assertNull(provider.executeRequest);
         assertNull(provider.streamRequest);
+    }
+
+    private static AiRequest.Builder chatRequest() {
+        return AiRequest.builder().operation(AiOperation.CHAT).store(true).userPrompt("Hello");
     }
 
     @Test

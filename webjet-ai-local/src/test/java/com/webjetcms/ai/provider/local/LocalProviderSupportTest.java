@@ -91,16 +91,13 @@ class LocalProviderSupportTest {
                         .store(true).previousResponseId("previous").build();
                     String message = operation == AiOperation.CHAT
                         ? "CHAT is not supported by this provider" : "previousResponseId is supported only for CHAT requests";
-                    AiProviderException execution = assertThrows(AiProviderException.class,
-                        () -> provider.execute(request, AiProviderConfig.empty()));
-                    AiProviderException streaming = assertThrows(AiProviderException.class,
-                        () -> provider.stream(request, AiProviderConfig.empty(), delta -> { }));
-                    AiErrorCategory category = operation == AiOperation.CHAT
-                        ? AiErrorCategory.UNSUPPORTED_OPERATION : AiErrorCategory.UNKNOWN;
-                    assertEquals(message, execution.getMessage(), provider.id());
-                    assertEquals(message, streaming.getMessage(), provider.id());
-                    assertEquals(category, execution.category(), provider.id());
-                    assertEquals(category, streaming.category(), provider.id());
+                    for (AiProviderException failure : List.of(
+                        assertThrows(AiProviderException.class, () -> provider.execute(request, AiProviderConfig.empty())),
+                        assertThrows(AiProviderException.class, () -> provider.stream(request, AiProviderConfig.empty(), delta -> { })))) {
+                        assertEquals(message, failure.getMessage(), provider.id());
+                        assertEquals(operation == AiOperation.CHAT ? AiErrorCategory.UNSUPPORTED_OPERATION
+                            : AiErrorCategory.UNKNOWN, failure.category(), provider.id());
+                    }
                 }
                 AiRequest image = AiRequest.builder().operation(AiOperation.GENERATE_IMAGE).build();
                 assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, assertThrows(AiProviderException.class,

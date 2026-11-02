@@ -13,12 +13,7 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class AiClientChatOutputTest {
-    private static final String INSTRUCTIONS = """
-        You are a helpful conversational assistant.
-        Reply in the language used by the user.
-        Use the previous messages in this conversation when answering follow-up questions.
-        Keep answers concise and return plain text.
-        """;
+    private static final String INSTRUCTIONS = "Answer clearly in the user’s language.";
     private static final String ANSWER = "Hlavným mestom Slovenska je Bratislava.";
     private static final String RAW = "[BEGIN_UNTRUSTED_INPUT_TEXT]\nAké je hlavné mesto Slovenska?\n"
         + "[END_UNTRUSTED_INPUT_TEXT]\n\n" + ANSWER;
@@ -32,11 +27,8 @@ class AiClientChatOutputTest {
             for (AiResponse result : List.of(client.execute(request, AiProviderConfig.empty()),
                 client.stream(request, AiProviderConfig.empty(), deltas::add),
                 client.stream(request, AiProviderConfig.empty(), null))) {
-                assertEquals(ANSWER, result.text());
-                assertEquals(provider.response.usage(), result.usage());
-                assertEquals(provider.response.media(), result.media());
-                assertEquals("completed", result.finishReason());
-                assertEquals("response-id", result.responseId());
+                assertEquals(new AiResponse(ANSWER, provider.response.media(), provider.response.usage(),
+                    "completed", "response-id"), result);
             }
             assertEquals(ANSWER, String.join("", deltas));
             assertEquals(INSTRUCTIONS, request.instructions());

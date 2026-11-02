@@ -89,42 +89,27 @@ class OpenAiProviderTest {
         );
         for (Failure failure : failures) {
             for (String previousId : new String[] {null, "resp_previous"}) {
-                RecordingHttpClient transport = new RecordingHttpClient(failure.status(), failure.body());
-                try (OpenAiProvider provider = new OpenAiProvider(transport)) {
-                    AiProviderException exception = assertThrows(AiProviderException.class, () -> {
-                        if (failure.streaming()) {
-                            provider.stream(chatRequest(previousId), embeddingConfig("key", "trusted"), ignored -> { });
-                        } else {
-                            provider.execute(chatRequest(previousId), embeddingConfig("key", "trusted"));
-                        }
-                    });
-                    assertEquals(previousId == null ? AiErrorCategory.UNKNOWN : failure.category(), exception.category());
-                    assertEquals(failure.status(), exception.statusCode());
-                    assertEquals(failure.raw(), exception.rawResponse());
-                    assertFalse(exception.retryable());
-                    assertEquals(1, transport.calls);
-                    assertEquals(previousId, MAPPER.readTree(transport.requestBody).path("previous_response_id").textValue());
-                }
+                AiProviderException exception = chatFailure(failure.status(), failure.body(), failure.streaming(), previousId);
+                assertEquals(previousId == null ? AiErrorCategory.UNKNOWN : failure.category(), exception.category());
+                assertEquals(failure.status(), exception.statusCode());
+                assertEquals(failure.raw(), exception.rawResponse());
+                assertFalse(exception.retryable());
             }
         }
     }
 
-    @Test
-    void classifiesUnsupportedStreamingAndImageEditingBeforeHttp() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void classifiesUnsupportedStreamingAndImageEditingBeforeHttp(boolean streaming) throws Exception {
         RecordingHttpClient transport = new RecordingHttpClient(200, "{}");
+        AiRequest request = AiRequest.builder().operation(streaming ? AiOperation.GENERATE_IMAGE : AiOperation.EDIT_IMAGE)
+            .model(streaming ? "gpt-image-1.5" : "dall-e-3").build();
         try (OpenAiProvider provider = new OpenAiProvider(transport)) {
-            AiProviderException streaming = assertThrows(AiProviderException.class, () -> provider.stream(
-                AiRequest.builder().operation(AiOperation.GENERATE_IMAGE).model("gpt-image-1.5").build(),
-                embeddingConfig("key", "trusted"), ignored -> { }
-            ));
-            AiProviderException editing = assertThrows(AiProviderException.class, () -> provider.execute(
-                AiRequest.builder().operation(AiOperation.EDIT_IMAGE).model("dall-e-3").build(),
-                embeddingConfig("key", "trusted")
-            ));
-            assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, streaming.category());
-            assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, editing.category());
-            assertFalse(streaming.retryable());
-            assertFalse(editing.retryable());
+            AiProviderException failure = assertThrows(AiProviderException.class, streaming
+                ? () -> provider.stream(request, embeddingConfig("key", "trusted"), ignored -> { })
+                : () -> provider.execute(request, embeddingConfig("key", "trusted")));
+            assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, failure.category());
+            assertFalse(failure.retryable());
             assertEquals(0, transport.calls);
         }
     }
@@ -155,17 +140,9 @@ class OpenAiProviderTest {
     @Test
     void cancellationInsideStreamListenerAbortsRequestAndStopsBufferedDeltas() throws Exception {
         AiCancellationToken token = new AiCancellationToken();
-        String stream = """
-            event: response.output_text.delta
-            data: {"delta":"Hello"}
-
-            event: response.output_text.delta
-            data: {"delta":" again"}
-
-            event: response.completed
-            data: {"response":{"status":"completed"}}
-
-            """;
+        String stream = "event: response.output_text.delta\ndata: {\"delta\":\"Hello\"}\n\n"
+            + "event: response.output_text.delta\ndata: {\"delta\":\" again\"}\n\n"
+            + "event: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n";
         RecordingHttpClient transport = new RecordingHttpClient(200, stream);
         List<String> deltas = new ArrayList<>();
         try (OpenAiProvider provider = new OpenAiProvider(transport)) {
@@ -223,15 +200,8 @@ class OpenAiProviderTest {
     })
     void rejectsUnusableChatResponsesWithoutRetrying(String payload) throws Exception {
         for (boolean streaming : List.of(false, true)) {
-            RecordingHttpClient transport = new RecordingHttpClient(200, streaming ? chatStream("Hello", payload) : payload);
-            try (OpenAiProvider provider = new OpenAiProvider(transport)) {
-                AiProviderException exception = assertThrows(AiProviderException.class, () -> {
-                    if (streaming) provider.stream(chatRequest("previous"), embeddingConfig("key", "trusted"), ignored -> { });
-                    else provider.execute(chatRequest("previous"), embeddingConfig("key", "trusted"));
-                });
-                assertFalse(exception.retryable());
-            }
-            assertEquals(1, transport.calls);
+            assertFalse(chatFailure(200, streaming ? chatStream("Hello", payload) : payload,
+                streaming, "previous").retryable());
         }
     }
 
@@ -244,12 +214,7 @@ class OpenAiProviderTest {
             "event: response.output_text.delta\ndata: {\"type\":\"response.completed\",\"delta\":\"text\"}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":42}\n\n"
         )) {
-            RecordingHttpClient transport = new RecordingHttpClient(200, stream);
-            try (OpenAiProvider provider = new OpenAiProvider(transport)) {
-                assertThrows(AiProviderException.class, () -> provider.stream(
-                    chatRequest("previous"), embeddingConfig("key", "trusted"), ignored -> { }));
-            }
-            assertEquals(1, transport.calls);
+            chatFailure(200, stream, true, "previous");
         }
     }
 
@@ -267,6 +232,19 @@ class OpenAiProviderTest {
             }
         }
         assertEquals(0, transport.calls);
+    }
+
+    private static AiProviderException chatFailure(int status, String payload, boolean streaming, String previousId)
+        throws Exception {
+        RecordingHttpClient transport = new RecordingHttpClient(status, payload);
+        try (OpenAiProvider provider = new OpenAiProvider(transport)) {
+            AiProviderException failure = assertThrows(AiProviderException.class, streaming
+                ? () -> provider.stream(chatRequest(previousId), embeddingConfig("key", "trusted"), ignored -> { })
+                : () -> provider.execute(chatRequest(previousId), embeddingConfig("key", "trusted")));
+            assertEquals(1, transport.calls);
+            assertEquals(previousId, MAPPER.readTree(transport.requestBody).path("previous_response_id").textValue());
+            return failure;
+        }
     }
 
     private static AiRequest chatRequest(String previousId) {
