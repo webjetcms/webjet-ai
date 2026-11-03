@@ -17,10 +17,8 @@ import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.TokenUsage;
 
 /**
- * Decodes candidate-based Gemini generateContent and streamGenerateContent payloads.
- *
- * <p>Collects text and inline media from the first candidate, together with response-level usage.
- * CHAT interaction responses are handled by {@link GeminiInteractionsParser}.</p>
+ * Decodes Gemini generateContent and streamGenerateContent payloads.
+ * Collects the first candidate's text and media; chat responses use {@link GeminiInteractionsParser}.
  */
 final class GeminiResponseParser {
 
@@ -30,11 +28,11 @@ final class GeminiResponseParser {
     }
 
     /**
-     * Parses generated content and rejects empty, blocked, or unsuccessful responses.
+     * Parses candidate content and rejects empty, blocked, or unsuccessful responses.
      *
      * @param payload JSON response body
-     * @return collected text, media, usage, and finish reason
-     * @throws IOException if JSON is invalid or the response contains no usable successful content
+     * @return collected text, media, usage, and optional finish reason
+     * @throws IOException if decoding fails or the response has no usable successful content
      */
     static AiResponse parse(String payload) throws IOException {
         if (payload == null || payload.isBlank()) {
@@ -107,7 +105,7 @@ final class GeminiResponseParser {
         accumulator.accept(MAPPER.readTree(payload));
     }
 
-    /** Collects candidate content and the latest usage and finish metadata across response chunks. */
+    /** Collects first-candidate content and the latest usage and finish metadata across chunks. */
     private static final class Accumulator {
 
         private final AiStreamListener listener;
@@ -128,10 +126,10 @@ final class GeminiResponseParser {
         }
 
         /**
-         * Consumes one response object or recursively consumes an array of response chunks.
+         * Consumes one response object or recursively consumes an array of chunks.
          *
          * @param root parsed payload; null and missing nodes are ignored
-         * @throws IOException if the response reports an error, contains invalid media, or listener delivery fails
+         * @throws IOException if the response reports a failure, media is invalid, or listener delivery fails
          */
         private void accept(JsonNode root) throws IOException {
             if (root == null || root.isNull() || root.isMissingNode()) {
@@ -250,6 +248,12 @@ final class GeminiResponseParser {
             }
         }
 
+        /**
+         * Delivers a fragment to the optional listener and wraps callback failures.
+         *
+         * @param delta text fragment to deliver
+         * @throws IOException if the listener rejects the fragment
+         */
         private void notifyListener(String delta) throws IOException {
             if (listener == null) {
                 return;

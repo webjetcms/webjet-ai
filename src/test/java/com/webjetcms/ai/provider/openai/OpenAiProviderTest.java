@@ -861,7 +861,7 @@ class OpenAiProviderTest {
             """;
         List<String> deltas = new ArrayList<>();
 
-        OpenAiStreamParser.StreamResult result = OpenAiStreamParser.parse(
+        AiResponse result = OpenAiStreamParser.parse(
             new BufferedReader(new StringReader(stream)),
             deltas::add
         );

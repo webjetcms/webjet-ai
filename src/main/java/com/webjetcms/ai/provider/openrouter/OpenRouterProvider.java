@@ -59,7 +59,10 @@ import com.webjetcms.ai.internal.ImageOptionValidator;
 import com.webjetcms.ai.security.PromptInjectionDefense;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 
-/** Framework-neutral client for OpenRouter text, embedding, and image APIs. */
+/**
+ * Framework-neutral client for OpenRouter text, embedding, and image APIs.
+ * Reuse the provider's pooled HTTP client and close the provider when it is no longer needed.
+ */
 public final class OpenRouterProvider implements AiProvider {
 
     /** Stable provider identifier used by {@code AiClient}. */
@@ -101,7 +104,7 @@ public final class OpenRouterProvider implements AiProvider {
 
     @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
-        return invokeAtBoundary(config, () -> listModelsInternal(config));
+        return invokeAtBoundary(config, AiCancellationToken.none(), () -> listModelsInternal(config));
     }
 
     @Override
@@ -128,6 +131,13 @@ public final class OpenRouterProvider implements AiProvider {
         ), Support.SUPPORTED, Support.UNKNOWN);
     }
 
+    /**
+     * Loads the catalogue across output modalities and orders models by creation time.
+     *
+     * @param config credentials, endpoint, and transport settings
+     * @return immutable model list, newest first with undated entries last
+     * @throws AiProviderException if configuration, transport, or catalogue parsing fails
+     */
     private List<ModelInfo> listModelsInternal(AiProviderConfig config) throws AiProviderException {
         validateConfig(config);
 
@@ -156,11 +166,8 @@ public final class OpenRouterProvider implements AiProvider {
                 Comparator.nullsLast(Comparator.reverseOrder())
             ));
             return List.copyOf(models);
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
         } catch (IOException exception) {
-            throw transportFailure("Unable to load the OpenRouter model catalogue.", exception)
-                .redactSecrets(config);
+            throw transportFailure("Unable to load the OpenRouter model catalogue.", exception);
         }
     }
 
@@ -172,13 +179,19 @@ public final class OpenRouterProvider implements AiProvider {
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
         throws AiProviderException {
-        return invokeAtBoundary(config, () -> CancellationSupport.call(
-            PROVIDER_ID,
-            token,
-            () -> executeInternal(request, config, token)
-        ));
+        return invokeAtBoundary(config, token, () -> executeInternal(request, config, token));
     }
 
+    /**
+     * Validates and dispatches text or image generation through the appropriate endpoint.
+     * Cancellation aborts this request without closing the shared HTTP client.
+     *
+     * @param request text or image request to validate and send
+     * @param config credentials, endpoint, and transport settings
+     * @param token non-null cancellation token for this call
+     * @return generated text or images with available usage and finish metadata
+     * @throws AiProviderException if validation, transport, or response parsing fails
+     */
     private AiResponse executeInternal(
         AiRequest request,
         AiProviderConfig config,
@@ -187,57 +200,36 @@ public final class OpenRouterProvider implements AiProvider {
         validateRequest(request);
         validateConfig(config);
 
-        if (request.operation() != AiOperation.TEXT) {
-            return executeImageInternal(request, config, token);
-        }
-
-        HttpPost httpRequest = createChatRequest(request, config, false);
+        boolean image = request.operation() != AiOperation.TEXT;
+        ObjectNode body = image ? buildImageBody(request) : buildChatBody(request, false);
+        HttpPost httpRequest = createRequest(config, image ? IMAGES_PATH : CHAT_COMPLETIONS_PATH, body, false);
         try (AiCancellationToken.Registration cancellation = token.onCancel(httpRequest::abort);
             CloseableHttpResponse response = httpClient.execute(httpRequest)) {
             int statusCode = response.getStatusLine().getStatusCode();
             String rawResponse = readEntity(response.getEntity());
             ensureSuccessful(statusCode, rawResponse);
-            return parseCompletion(rawResponse, request.operation());
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
+            return image
+                ? parseImageResponse(rawResponse, textOrNull(body.get("output_format")), request.model(), statusCode)
+                : parseCompletion(rawResponse, request.operation());
         } catch (IOException exception) {
-            throw transportFailure("OpenRouter request failed.", exception).redactSecrets(config);
-        }
-    }
-
-    private AiResponse executeImageInternal(
-        AiRequest request,
-        AiProviderConfig config,
-        AiCancellationToken token
-    ) throws AiProviderException {
-        ObjectNode body = buildImageBody(request);
-        HttpPost httpRequest = new HttpPost(endpoint(config, IMAGES_PATH));
-        configureRequest(httpRequest, config, false);
-        httpRequest.setEntity(new StringEntity(body.toString(), ContentType.APPLICATION_JSON));
-        try (AiCancellationToken.Registration cancellation = token.onCancel(httpRequest::abort);
-            CloseableHttpResponse response = httpClient.execute(httpRequest)) {
-            int statusCode = response.getStatusLine().getStatusCode();
-            String rawResponse = readEntity(response.getEntity());
-            ensureSuccessful(statusCode, rawResponse);
-            return parseImageResponse(
-                rawResponse,
-                textOrNull(body.get("output_format")),
-                request.model(),
-                statusCode
-            );
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
-        } catch (IOException exception) {
-            throw transportFailure("OpenRouter image request failed.", exception).redactSecrets(config);
+            throw transportFailure(image ? "OpenRouter image request failed." : "OpenRouter request failed.", exception);
         }
     }
 
     @Override
     public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
         throws AiProviderException {
-        return invokeAtBoundary(config, () -> embedInternal(request, config));
+        return invokeAtBoundary(config, AiCancellationToken.none(), () -> embedInternal(request, config));
     }
 
+    /**
+     * Requests floating-point embeddings and validates their correspondence to the inputs.
+     *
+     * @param request input texts, model, and optional output dimensions
+     * @param config credentials, endpoint, and transport settings
+     * @return embeddings in input order with available token usage
+     * @throws AiProviderException if validation, transport, or response parsing fails
+     */
     private EmbeddingResponse embedInternal(EmbeddingRequest request, AiProviderConfig config)
         throws AiProviderException {
         EmbeddingOptions options = requireEmbeddingRequest(request);
@@ -265,10 +257,8 @@ public final class OpenRouterProvider implements AiProvider {
                 options.dimensions(),
                 statusCode
             );
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
         } catch (IOException exception) {
-            throw transportFailure("OpenRouter embedding request failed.", exception).redactSecrets(config);
+            throw transportFailure("OpenRouter embedding request failed.", exception);
         }
     }
 
@@ -285,18 +275,21 @@ public final class OpenRouterProvider implements AiProvider {
         AiStreamListener listener,
         AiCancellationToken token
     ) throws AiProviderException {
-        return invokeAtBoundary(config, () -> CancellationSupport.call(
-            PROVIDER_ID,
-            token,
-            () -> streamInternal(
-                request,
-                config,
-                CancellationSupport.listener(PROVIDER_ID, token, listener),
-                token
-            )
+        return invokeAtBoundary(config, token, () -> streamInternal(
+            request, config, CancellationSupport.listener(PROVIDER_ID, token, listener), token
         ));
     }
 
+    /**
+     * Streams a text completion while registering cancellation for the active HTTP request.
+     *
+     * @param request text request to validate and send
+     * @param config credentials, endpoint, and transport settings
+     * @param listener non-null recipient of generated text fragments
+     * @param token non-null cancellation token for this call
+     * @return accumulated text and completion metadata
+     * @throws AiProviderException if validation, transport, parsing, or listener delivery fails
+     */
     private AiResponse streamInternal(
         AiRequest request,
         AiProviderConfig config,
@@ -315,7 +308,7 @@ public final class OpenRouterProvider implements AiProvider {
             throw new AiProviderException(PROVIDER_ID, "A stream listener is required.");
         }
 
-        HttpPost httpRequest = createChatRequest(request, config, true);
+        HttpPost httpRequest = createRequest(config, CHAT_COMPLETIONS_PATH, buildChatBody(request, true), true);
         try (AiCancellationToken.Registration cancellation = token.onCancel(httpRequest::abort);
             CloseableHttpResponse response = httpClient.execute(httpRequest)) {
             int statusCode = response.getStatusLine().getStatusCode();
@@ -333,10 +326,8 @@ public final class OpenRouterProvider implements AiProvider {
             )) {
                 return new OpenRouterSseParser(mapper).parse(reader, listener);
             }
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
         } catch (IOException exception) {
-            throw transportFailure("OpenRouter streaming request failed.", exception).redactSecrets(config);
+            throw transportFailure("OpenRouter streaming request failed.", exception);
         }
     }
 
@@ -345,15 +336,21 @@ public final class OpenRouterProvider implements AiProvider {
         httpClient.close();
     }
 
-    private HttpPost createChatRequest(AiRequest aiRequest, AiProviderConfig config, boolean stream)
+    private HttpPost createRequest(AiProviderConfig config, String path, ObjectNode body, boolean stream)
         throws AiProviderException {
-        ObjectNode body = buildChatBody(aiRequest, stream);
-        HttpPost request = new HttpPost(endpoint(config, CHAT_COMPLETIONS_PATH));
+        HttpPost request = new HttpPost(endpoint(config, path));
         configureRequest(request, config, stream);
         request.setEntity(new StringEntity(body.toString(), ContentType.APPLICATION_JSON));
         return request;
     }
 
+    /**
+     * Builds an image request with a protected prompt, validated options, and any input reference.
+     *
+     * @param request image-generation or image-edit request
+     * @return JSON body for the images endpoint
+     * @throws AiProviderException if the prompt, image options, or supplied media are invalid
+     */
     ObjectNode buildImageBody(AiRequest request) throws AiProviderException {
         ObjectNode body = mapper.createObjectNode();
         body.put("model", request.model());
@@ -380,6 +377,16 @@ public final class OpenRouterProvider implements AiProvider {
         return body;
     }
 
+    /**
+     * Validates embedding indices and vectors, restoring the original input order.
+     *
+     * @param rawResponse JSON embedding response
+     * @param expectedCount number of input texts
+     * @param dimensions required vector size, or {@code null} to infer it from the first vector
+     * @param statusCode HTTP status retained in parsing and validation failures
+     * @return ordered embeddings and available token usage
+     * @throws AiProviderException if decoding fails, the payload reports an error, or vectors are invalid
+     */
     private EmbeddingResponse parseEmbeddingResponse(
         String rawResponse,
         int expectedCount,
@@ -430,6 +437,16 @@ public final class OpenRouterProvider implements AiProvider {
         return new EmbeddingResponse(List.of(ordered), parseUsage(root.get("usage")));
     }
 
+    /**
+     * Decodes Base64 image entries and accepts only supported raster media types.
+     *
+     * @param rawResponse JSON image response
+     * @param requestedFormat format fallback when an entry omits its media type; may be {@code null}
+     * @param model model used to infer a format when the request omits it
+     * @param statusCode HTTP status retained in parsing and validation failures
+     * @return decoded images and available token usage
+     * @throws AiProviderException if the response reports an error or its image data or media types are invalid
+     */
     AiResponse parseImageResponse(
         String rawResponse,
         String requestedFormat,
@@ -522,6 +539,16 @@ public final class OpenRouterProvider implements AiProvider {
         return new AiResponse(null, media, parseUsage(root.get("usage")), null);
     }
 
+    /**
+     * Requires a nonempty vector and checks its size against any expected dimension count.
+     *
+     * @param values embedding array to inspect
+     * @param expected required size, or {@code null} to accept the observed size
+     * @param rawResponse original response retained for diagnostics
+     * @param statusCode HTTP status retained in validation failures
+     * @return validated vector size
+     * @throws AiProviderException if the vector is missing, empty, or has the wrong size
+     */
     private int requireEmbeddingDimensions(
         JsonNode values,
         Integer expected,
@@ -546,6 +573,16 @@ public final class OpenRouterProvider implements AiProvider {
         return actual;
     }
 
+    /**
+     * Converts a JSON embedding array into an immutable vector of finite floats.
+     *
+     * @param values embedding array to decode
+     * @param dimensions required vector size
+     * @param rawResponse original response retained for diagnostics
+     * @param statusCode HTTP status retained in validation failures
+     * @return validated embedding vector
+     * @throws AiProviderException if the size or any numeric value is invalid
+     */
     private EmbeddingVector parseEmbeddingVector(
         JsonNode values,
         int dimensions,
@@ -584,6 +621,15 @@ public final class OpenRouterProvider implements AiProvider {
         return new EmbeddingVector(vector);
     }
 
+    /**
+     * Builds a Chat Completions payload with protected messages and optional streaming.
+     * Stateless text requests use this endpoint; {@link AiOperation#CHAT} is unsupported.
+     *
+     * @param request request whose instructions, text, and media form the messages
+     * @param stream whether to request streaming output
+     * @return JSON body for the Chat Completions endpoint
+     * @throws AiProviderException if supplied input media is empty
+     */
     ObjectNode buildChatBody(AiRequest request, boolean stream) throws AiProviderException {
         ObjectNode body = mapper.createObjectNode();
         body.put("model", request.model());
@@ -595,6 +641,13 @@ public final class OpenRouterProvider implements AiProvider {
         return body;
     }
 
+    /**
+     * Combines security and task instructions with protected image prompt data.
+     * Input text is included only for image generation, not editing.
+     *
+     * @param request image request whose prompt fields are combined
+     * @return prepared prompt with blank components omitted
+     */
     private static String imagePrompt(AiRequest request) {
         StringBuilder prompt = new StringBuilder();
         appendPrompt(prompt, PromptInjectionDefense.getSecurityInstructions(request.instructions()));
@@ -618,6 +671,12 @@ public final class OpenRouterProvider implements AiProvider {
         return prompt.toString();
     }
 
+    /**
+     * Checks for task instructions or meaningful prompt data, excluding {@code inputText} for image editing.
+     *
+     * @param request image request to inspect
+     * @return whether content beyond the security instructions defines an image task
+     */
     private static boolean hasMeaningfulImagePrompt(AiRequest request) {
         if (PromptInjectionDefense.hasTaskInstructions(request.instructions())) return true;
         if (request.operation() == AiOperation.GENERATE_IMAGE
@@ -639,6 +698,13 @@ public final class OpenRouterProvider implements AiProvider {
         prompt.append(value);
     }
 
+    /**
+     * Adds the supplied image as a Base64 data URL in the image request's input references.
+     *
+     * @param body destination image request body
+     * @param media non-null input image and its media type
+     * @throws AiProviderException if the image bytes are empty
+     */
     private void addInputReference(ObjectNode body, BinaryContent media) throws AiProviderException {
         byte[] data = media.data();
         if (data.length == 0) {
@@ -654,6 +720,13 @@ public final class OpenRouterProvider implements AiProvider {
         );
     }
 
+    /**
+     * Separates trusted system instructions from protected user content and optional input media.
+     *
+     * @param request request whose operation determines instruction placement
+     * @return message array containing user content and any system instructions
+     * @throws AiProviderException if supplied input media is empty
+     */
     private ArrayNode buildMessages(AiRequest request) throws AiProviderException {
         ArrayNode messages = mapper.createArrayNode();
 
@@ -703,6 +776,13 @@ public final class OpenRouterProvider implements AiProvider {
         content.add(item);
     }
 
+    /**
+     * Appends an input image as a Base64 data URL within multimodal message content.
+     *
+     * @param content destination user-content array
+     * @param media non-null input image and its media type
+     * @throws AiProviderException if the image bytes are empty
+     */
     private void addImageContent(ArrayNode content, BinaryContent media) throws AiProviderException {
         byte[] data = media.data();
         if (data.length == 0) {
@@ -721,6 +801,14 @@ public final class OpenRouterProvider implements AiProvider {
         content.add(item);
     }
 
+    /**
+     * Parses the first completion choice and rejects unsuccessful finish reasons.
+     *
+     * @param rawResponse JSON completion response
+     * @param operation operation determining whether generated media is required
+     * @return message text, optional generated media, usage, and finish reason
+     * @throws AiProviderException if decoding, payload validation, or media parsing fails
+     */
     AiResponse parseCompletion(String rawResponse, AiOperation operation) throws AiProviderException {
         JsonNode root = parseJson(rawResponse, "completion");
         throwIfPayloadError(root, rawResponse);
@@ -740,6 +828,13 @@ public final class OpenRouterProvider implements AiProvider {
         return new AiResponse(text, media, parseUsage(root.get("usage")), finishReason);
     }
 
+    /**
+     * Accepts an absent finish reason or {@code stop} and rejects all other explicit reasons.
+     *
+     * @param finishReason provider completion reason, possibly {@code null} or blank
+     * @param rawResponse original response retained for diagnostics
+     * @throws AiProviderException if the finish reason indicates unsuccessful generation
+     */
     static void ensureSuccessfulFinishReason(String finishReason, String rawResponse)
         throws AiProviderException {
         if (isBlank(finishReason) || "stop".equalsIgnoreCase(finishReason)) {
@@ -754,6 +849,14 @@ public final class OpenRouterProvider implements AiProvider {
         );
     }
 
+    /**
+     * Collects generated images from completion data URLs, ignoring text entries.
+     *
+     * @param images completion image array
+     * @param rawResponse original response retained for diagnostics
+     * @return nonempty immutable list of decoded image media
+     * @throws AiProviderException if images are absent or any selected data URL is invalid
+     */
     private List<GeneratedMedia> parseGeneratedMedia(JsonNode images, String rawResponse)
         throws AiProviderException {
         if (images == null || images.isArray() == false) {
@@ -774,6 +877,14 @@ public final class OpenRouterProvider implements AiProvider {
         return List.copyOf(media);
     }
 
+    /**
+     * Decodes a Base64 data URL after validating its encoding and raster media type.
+     *
+     * @param dataUrl generated image encoded as a data URL
+     * @param rawResponse original response retained for diagnostics
+     * @return decoded image bytes and media type
+     * @throws AiProviderException if the URL, media type, or Base64 data is invalid
+     */
     private GeneratedMedia decodeDataUrl(String dataUrl, String rawResponse) throws AiProviderException {
         if (dataUrl.startsWith("data:") == false) {
             throw malformedResponse("OpenRouter generated image is not encoded as a data URL.", rawResponse);
@@ -819,6 +930,13 @@ public final class OpenRouterProvider implements AiProvider {
         else target.put(key, String.valueOf(value));
     }
 
+    /**
+     * Resolves an image media type from the requested format or the model's known default.
+     *
+     * @param requestedFormat optional output format
+     * @param model model used for format inference
+     * @return raster media type, PNG when unspecified, or a binary fallback for unsupported formats
+     */
     private static String mediaTypeForFormat(String requestedFormat, String model) {
         String format = requestedFormat;
         if (isBlank(format)) {
@@ -836,6 +954,12 @@ public final class OpenRouterProvider implements AiProvider {
         };
     }
 
+    /**
+     * Checks the raster media-type allowlist after removing parameters and normalizing case.
+     *
+     * @param mediaType candidate media type, possibly {@code null}
+     * @return whether the type identifies PNG, JPEG, or WebP content
+     */
     private static boolean isSupportedGeneratedMediaType(String mediaType) {
         if (isBlank(mediaType)) return false;
         String normalized = mediaType.trim().toLowerCase(java.util.Locale.ROOT);
@@ -849,6 +973,13 @@ public final class OpenRouterProvider implements AiProvider {
         };
     }
 
+    /**
+     * Applies timeouts and trusted headers before setting required authentication and content headers.
+     *
+     * @param request HTTP request to configure
+     * @param config credentials, timeouts, and trusted headers
+     * @param stream whether to accept SSE instead of JSON
+     */
     private void configureRequest(HttpRequestBase request, AiProviderConfig config, boolean stream) {
         request.setConfig(RequestConfig.custom()
             .setConnectTimeout(config.connectTimeoutMillis())
@@ -870,6 +1001,12 @@ public final class OpenRouterProvider implements AiProvider {
         }
     }
 
+    /**
+     * Validates model and image requirements while rejecting chat and unsupported vector-image operations.
+     *
+     * @param request request to validate
+     * @throws AiProviderException if the operation is unsupported or required inputs are missing or empty
+     */
     private void validateRequest(AiRequest request) throws AiProviderException {
         if (request == null) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter request is required.");
@@ -898,6 +1035,13 @@ public final class OpenRouterProvider implements AiProvider {
         }
     }
 
+    /**
+     * Validates the embedding model and every input before returning the request options.
+     *
+     * @param request embedding request to validate
+     * @return configured embedding options
+     * @throws AiProviderException if the request, model, or input texts are missing or blank
+     */
     private EmbeddingOptions requireEmbeddingRequest(EmbeddingRequest request) throws AiProviderException {
         if (request == null) {
             throw new AiProviderException(PROVIDER_ID, "OpenRouter embedding request is required.");
@@ -916,6 +1060,14 @@ public final class OpenRouterProvider implements AiProvider {
         return request.options();
     }
 
+    /**
+     * Appends a provider resource path to the configured or default API base URI.
+     *
+     * @param config configuration containing an optional custom endpoint
+     * @param path relative resource path and any query string
+     * @return absolute resource URI
+     * @throws AiProviderException if the combined URI is invalid
+     */
     private URI endpoint(AiProviderConfig config, String path) throws AiProviderException {
         URI baseUri = config.baseUri() == null ? DEFAULT_BASE_URI : config.baseUri();
         String base = baseUri.toString();
@@ -931,6 +1083,15 @@ public final class OpenRouterProvider implements AiProvider {
         return parseJson(rawResponse, responseName, -1);
     }
 
+    /**
+     * Decodes a nonblank response body while preserving HTTP diagnostics on parsing failures.
+     *
+     * @param rawResponse JSON body to decode
+     * @param responseName operation name used in failure messages
+     * @param statusCode HTTP status, or {@code -1} when unavailable
+     * @return decoded JSON tree without response-shape validation
+     * @throws AiProviderException if the body is blank or contains invalid JSON
+     */
     private JsonNode parseJson(String rawResponse, String responseName, int statusCode)
         throws AiProviderException {
         if (isBlank(rawResponse)) {
@@ -958,6 +1119,13 @@ public final class OpenRouterProvider implements AiProvider {
         if (statusCode < 200 || statusCode >= 300) throw errorResponse(statusCode, rawResponse);
     }
 
+    /**
+     * Builds a provider failure using upstream error details and status-based retry classification.
+     *
+     * @param statusCode HTTP or embedded error status, or {@code -1} when unavailable
+     * @param rawResponse original response retained for diagnostics
+     * @return failure awaiting credential redaction at the public boundary
+     */
     private AiProviderException errorResponse(int statusCode, String rawResponse) {
         String errorMessage = null;
         try {
@@ -992,6 +1160,12 @@ public final class OpenRouterProvider implements AiProvider {
         }
     }
 
+    /**
+     * Converts an integral or decimal-string error code into a status value.
+     *
+     * @param code provider error-code node, possibly {@code null}
+     * @return parsed integer, or {@code -1} when the code cannot be represented as an integer
+     */
     private static int errorStatus(JsonNode code) {
         if (code != null && code.isIntegralNumber() && code.canConvertToInt()) {
             return code.intValue();
@@ -1018,21 +1192,28 @@ public final class OpenRouterProvider implements AiProvider {
         return new AiProviderException(PROVIDER_ID, -1, message, null, true, cause);
     }
 
-    private static <T> T invokeAtBoundary(AiProviderConfig config, ProviderCall<T> call)
-        throws AiProviderException {
+    /**
+     * Applies cancellation checks and redacts credentials before a failure leaves the provider.
+     * Unexpected runtime failures are wrapped as provider exceptions.
+     *
+     * @param config configuration whose API key and trusted-header values must be redacted
+     * @param token non-null cancellation token checked before and after the call
+     * @param call operation to run within the provider boundary
+     * @param <T> operation result type
+     * @return operation result when cancellation has not been observed
+     * @throws AiProviderException if cancelled or the operation fails, with configured secrets redacted
+     */
+    private static <T> T invokeAtBoundary(
+        AiProviderConfig config, AiCancellationToken token, CancellationSupport.Call<T> call
+    ) throws AiProviderException {
         try {
-            return call.invoke();
+            return CancellationSupport.call(PROVIDER_ID, token, call);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
             throw new AiProviderException(PROVIDER_ID, "Unexpected OpenRouter provider failure", exception)
                 .redactSecrets(config);
         }
-    }
-
-    @FunctionalInterface
-    private interface ProviderCall<T> {
-        T invoke() throws AiProviderException;
     }
 
     private static boolean isRetryable(int statusCode) {
@@ -1044,6 +1225,13 @@ public final class OpenRouterProvider implements AiProvider {
         return entity == null ? "" : EntityUtils.toString(entity, StandardCharsets.UTF_8);
     }
 
+    /**
+     * Selects the first choice from a nonempty completion or stream choice array.
+     *
+     * @param root response object containing choices
+     * @return first choice node
+     * @throws AiProviderException if the choices array is missing or empty
+     */
     static JsonNode firstChoice(JsonNode root) throws AiProviderException {
         JsonNode choices = root.path("choices");
         if (choices.isArray() == false || choices.isEmpty()) {
@@ -1058,6 +1246,12 @@ public final class OpenRouterProvider implements AiProvider {
         return choices.get(0);
     }
 
+    /**
+     * Concatenates plain content strings and textual parts from a content array.
+     *
+     * @param content message content, possibly {@code null} or a missing node
+     * @return collected text, or an empty string when no supported text is present
+     */
     static String extractText(JsonNode content) {
         if (content == null || content.isNull() || content.isMissingNode()) return "";
         if (content.isTextual()) return content.asText();
@@ -1075,6 +1269,12 @@ public final class OpenRouterProvider implements AiProvider {
         return "";
     }
 
+    /**
+     * Reads token totals and retains nested integral usage details under dotted paths.
+     *
+     * @param usage optional provider usage object
+     * @return normalized counts and details, or empty usage when no object is supplied
+     */
     static TokenUsage parseUsage(JsonNode usage) {
         if (usage == null || usage.isNull() || usage.isObject() == false) return TokenUsage.EMPTY;
 
@@ -1089,6 +1289,13 @@ public final class OpenRouterProvider implements AiProvider {
         return new TokenUsage(inputTokens, outputTokens, totalTokens, details);
     }
 
+    /**
+     * Flattens integral usage fields from nested objects into dotted paths.
+     *
+     * @param node usage object to traverse
+     * @param prefix parent path, empty at the root
+     * @param details destination for collected path-value pairs
+     */
     private static void collectNumericDetails(JsonNode node, String prefix, Map<String, Long> details) {
         node.properties().forEach(entry -> {
             String key = prefix.isEmpty() ? entry.getKey() : prefix + "." + entry.getKey();
@@ -1101,6 +1308,12 @@ public final class OpenRouterProvider implements AiProvider {
         });
     }
 
+    /**
+     * Reads an integral or decimal-string catalogue timestamp without failing on unparseable text.
+     *
+     * @param node timestamp node, possibly {@code null}
+     * @return numeric value, or {@code null} when absent or unsupported
+     */
     private static Long longOrNull(JsonNode node) {
         if (node == null || node.isNull()) return null;
         if (node.isIntegralNumber()) return node.asLong();

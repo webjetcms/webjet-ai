@@ -2,15 +2,18 @@ package com.webjetcms.ai.provider.openai;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.util.List;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiStreamListener;
-import com.webjetcms.ai.TokenUsage;
 
-/** Decodes OpenAI's server-sent Responses API events. */
+/**
+ * Decodes OpenAI's server-sent Responses API events into completed responses.
+ * Chat streams additionally validate completion text and retain the continuation ID.
+ */
 final class OpenAiStreamParser {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -18,13 +21,25 @@ final class OpenAiStreamParser {
     private OpenAiStreamParser() {
     }
 
-    static StreamResult parse(BufferedReader reader, AiStreamListener listener)
+    static AiResponse parse(BufferedReader reader, AiStreamListener listener)
         throws IOException, AiProviderException {
 
         return parse(reader, listener, false, false);
     }
 
-    static StreamResult parse(BufferedReader reader, AiStreamListener listener, boolean chat, boolean continuation)
+    /**
+     * Delivers text deltas and requires a response.completed event before returning.
+     * Chat completion text must match the delivered deltas exactly.
+     *
+     * @param reader SSE reader, which remains open after parsing
+     * @param listener non-null recipient of text fragments
+     * @param chat whether to enforce chat response validation and retain the response ID
+     * @param continuation whether the chat request supplies a previous response ID
+     * @return accumulated text with completion usage, finish reason, and optional response ID
+     * @throws IOException if reading the stream fails
+     * @throws AiProviderException if the stream fails, is malformed or incomplete, or the listener throws
+     */
+    static AiResponse parse(BufferedReader reader, AiStreamListener listener, boolean chat, boolean continuation)
         throws IOException, AiProviderException {
 
         StringBuilder fullText = new StringBuilder();
@@ -58,7 +73,7 @@ final class OpenAiStreamParser {
             dispatch(event, data.toString(), listener, fullText, state);
         }
 
-        if (state.completed == false) {
+        if (state.completed == null) {
             throw streamError(
                 "OpenAI stream ended before the response.completed event",
                 fullText.toString(),
@@ -66,9 +81,20 @@ final class OpenAiStreamParser {
             );
         }
 
-        return new StreamResult(fullText.toString(), state.usage, state.finishReason, state.responseId);
+        return state.completed.withText(fullText.toString());
     }
 
+    /**
+     * Applies one SSE event to the accumulated text and completion state.
+     *
+     * @param event explicit SSE event name, or {@code null} to use the payload type
+     * @param data assembled event payload
+     * @param listener recipient of text deltas
+     * @param fullText text accumulated across events
+     * @param state completion and chat-validation state
+     * @return {@code true} when an explicit end-of-stream marker is received
+     * @throws AiProviderException if parsing, response validation, or listener delivery fails
+     */
     private static boolean dispatch(
         String event,
         String data,
@@ -101,7 +127,7 @@ final class OpenAiStreamParser {
             throw streamError("OpenAI chat streaming event type does not match its payload", data, null);
         }
         if ("response.output_text.delta".equals(type)) {
-            if (state.chat && (state.completed || chunk.path("delta").isTextual() == false)) {
+            if (state.chat && (state.completed != null || chunk.path("delta").isTextual() == false)) {
                 throw streamError("OpenAI returned an invalid chat text delta", data, null);
             }
             String delta = textOrNull(chunk.get("delta"));
@@ -117,14 +143,15 @@ final class OpenAiStreamParser {
             JsonNode response = chunk.path("response");
             if (state.chat) {
                 AiResponse completed = OpenAiProvider.parseChatResponse(response, data, state.continuation);
-                if (state.completed || completed.text().equals(fullText.toString()) == false) {
+                if (state.completed != null || completed.text().equals(fullText.toString()) == false) {
                     throw streamError("OpenAI chat stream does not match its completed response", data, null);
                 }
-                state.responseId = completed.responseId();
+                state.completed = completed;
+            } else {
+                state.completed = new AiResponse(fullText.toString(), List.of(),
+                    OpenAiProvider.parseUsage(response.path("usage")),
+                    defaultIfBlank(textOrNull(response.get("status")), "completed"));
             }
-            state.usage = OpenAiProvider.parseUsage(response.path("usage"));
-            state.finishReason = defaultIfBlank(textOrNull(response.get("status")), "completed");
-            state.completed = true;
         } else if ("response.incomplete".equals(type) || "response.failed".equals(type)
                 || "error".equals(type)) {
             throw failure(type, chunk, data, state.continuation);
@@ -139,6 +166,15 @@ final class OpenAiStreamParser {
         return false;
     }
 
+    /**
+     * Builds a non-retryable failure from an explicit error event or failed response status.
+     *
+     * @param type failing event type or response status
+     * @param chunk parsed event payload
+     * @param raw original event JSON retained for diagnostics
+     * @param continuation whether structured errors may identify an invalid continuation
+     * @return failure with provider details and any recognized continuation category
+     */
     private static AiProviderException failure(String type, JsonNode chunk, String raw, boolean continuation) {
         JsonNode response = chunk.path("response");
         String reason = textOrNull(response.path("incomplete_details").get("reason"));
@@ -184,20 +220,15 @@ final class OpenAiStreamParser {
         return isBlank(value) ? defaultValue : value;
     }
 
+    /** Holds chat validation settings and the accepted completion for a single stream. */
     private static final class StreamState {
         private final boolean chat;
         private final boolean continuation;
-        private TokenUsage usage = TokenUsage.EMPTY;
-        private String finishReason;
-        private String responseId;
-        private boolean completed;
+        private AiResponse completed;
 
         private StreamState(boolean chat, boolean continuation) {
             this.chat = chat;
             this.continuation = chat && continuation;
         }
-    }
-
-    record StreamResult(String text, TokenUsage usage, String finishReason, String responseId) {
     }
 }

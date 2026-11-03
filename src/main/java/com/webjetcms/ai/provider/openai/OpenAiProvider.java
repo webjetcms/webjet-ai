@@ -63,7 +63,7 @@ import com.webjetcms.ai.security.PromptInjectionDefense;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 
 /**
- * Framework-neutral REST client for the OpenAI Responses and Images APIs.
+ * Framework-neutral REST client for the OpenAI Responses, Images, and Embeddings APIs.
  * One provider instance owns one thread-safe HTTP client and should be reused.
  */
 public final class OpenAiProvider implements AiProvider {
@@ -110,7 +110,7 @@ public final class OpenAiProvider implements AiProvider {
 
     @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
-        return invokeAtBoundary(config, () -> listModelsInternal(config));
+        return invokeAtBoundary(config, AiCancellationToken.none(), () -> listModelsInternal(config));
     }
 
     @Override
@@ -139,18 +139,23 @@ public final class OpenAiProvider implements AiProvider {
         ), Support.SUPPORTED, Support.UNKNOWN);
     }
 
+    /**
+     * Fetches and parses the model catalogue using the configured transport.
+     *
+     * @param config credentials, endpoint, and transport settings
+     * @return immutable model list ordered by creation time, newest first
+     * @throws AiProviderException if configuration, transport, or catalogue parsing fails
+     */
     private List<ModelInfo> listModelsInternal(AiProviderConfig config) throws AiProviderException {
         requireConfigured(config);
 
         HttpGet request = new HttpGet(endpoint(config, MODELS_PATH));
-        prepare(request, config, "application/json");
-        String response = executeForString(request, config);
+        String response = executeForResult(request, config, AiCancellationToken.none(), false).body();
 
         try {
             return parseModels(response);
         } catch (IOException | RuntimeException exception) {
-            throw invalidResponse("Could not parse the OpenAI model catalogue", response, exception)
-                .redactSecrets(config);
+            throw invalidResponse("Could not parse the OpenAI model catalogue", response, exception);
         }
     }
 
@@ -162,11 +167,18 @@ public final class OpenAiProvider implements AiProvider {
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
         throws AiProviderException {
-        return invokeAtBoundary(config, () -> CancellationSupport.call(
-            PROVIDER_ID, token, () -> executeInternal(request, config, token)
-        ));
+        return invokeAtBoundary(config, token, () -> executeInternal(request, config, token));
     }
 
+    /**
+     * Validates and dispatches a synchronous text, chat, or image request.
+     *
+     * @param request operation and inputs to validate and send
+     * @param config credentials, endpoint, and transport settings
+     * @param token non-null cancellation token for the active HTTP request
+     * @return generated content and operation-specific metadata
+     * @throws AiProviderException if validation, request creation, transport, or response parsing fails
+     */
     private AiResponse executeInternal(
         AiRequest request,
         AiProviderConfig config,
@@ -183,20 +195,25 @@ public final class OpenAiProvider implements AiProvider {
                 case GENERATE_IMAGE -> generateImage(request, config, token);
                 case EDIT_IMAGE -> editImage(request, config, token);
             };
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
-            throw new AiProviderException(PROVIDER_ID, "Could not create the OpenAI request", exception)
-                .redactSecrets(config);
+            throw new AiProviderException(PROVIDER_ID, "Could not create the OpenAI request", exception);
         }
     }
 
     @Override
     public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
         throws AiProviderException {
-        return invokeAtBoundary(config, () -> embedInternal(request, config));
+        return invokeAtBoundary(config, AiCancellationToken.none(), () -> embedInternal(request, config));
     }
 
+    /**
+     * Requests floating-point embeddings and validates their correspondence to the inputs.
+     *
+     * @param request input texts, model, and optional output dimensions
+     * @param config credentials, endpoint, and transport settings
+     * @return embeddings in input order with available token usage
+     * @throws AiProviderException if validation, transport, or response parsing fails
+     */
     private EmbeddingResponse embedInternal(EmbeddingRequest request, AiProviderConfig config)
         throws AiProviderException {
         EmbeddingOptions options = requireEmbeddingRequest(request);
@@ -211,7 +228,9 @@ public final class OpenAiProvider implements AiProvider {
         ArrayNode input = body.putArray("input");
         request.inputs().forEach(input::add);
 
-        HttpResult result = executeForResult(jsonPost(endpoint(config, EMBEDDINGS_PATH), body), config);
+        HttpResult result = executeForResult(
+            jsonPost(endpoint(config, EMBEDDINGS_PATH), body), config, AiCancellationToken.none(), false
+        );
         try {
             return parseEmbeddingResponse(
                 result.body(),
@@ -219,16 +238,13 @@ public final class OpenAiProvider implements AiProvider {
                 options.dimensions(),
                 result.statusCode()
             );
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
         } catch (IOException | RuntimeException exception) {
             throw invalidResponse(
                 result.statusCode(),
                 "Could not parse the OpenAI embedding response",
                 result.body(),
                 exception
-            )
-                .redactSecrets(config);
+            );
         }
     }
 
@@ -246,13 +262,21 @@ public final class OpenAiProvider implements AiProvider {
         AiStreamListener listener,
         AiCancellationToken token
     ) throws AiProviderException {
-        return invokeAtBoundary(config, () -> CancellationSupport.call(
-            PROVIDER_ID, token, () -> streamInternal(
-                request, config, CancellationSupport.listener(PROVIDER_ID, token, listener), token
-            )
+        return invokeAtBoundary(config, token, () -> streamInternal(
+            request, config, CancellationSupport.listener(PROVIDER_ID, token, listener), token
         ));
     }
 
+    /**
+     * Streams a text or chat response while registering cancellation for the active HTTP request.
+     *
+     * @param request text or chat request to validate and send
+     * @param config credentials, endpoint, and transport settings
+     * @param listener non-null recipient of generated text fragments
+     * @param token non-null cancellation token for this call
+     * @return accumulated text and completion metadata, including a response ID for chat
+     * @throws AiProviderException if validation, transport, parsing, or listener delivery fails
+     */
     private AiResponse streamInternal(
         AiRequest request,
         AiProviderConfig config,
@@ -293,20 +317,15 @@ public final class OpenAiProvider implements AiProvider {
             Charset charset = responseCharset(entity);
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(entity.getContent(), charset))) {
-                OpenAiStreamParser.StreamResult result = OpenAiStreamParser.parse(
+                return OpenAiStreamParser.parse(
                     reader,
                     listener,
                     request.operation() == AiOperation.CHAT,
                     isContinuation(request)
                 );
-                return new AiResponse(
-                    result.text(), List.of(), result.usage(), result.finishReason(), result.responseId()
-                );
             }
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
         } catch (IOException exception) {
-            throw transportFailure("OpenAI streaming request failed", exception).redactSecrets(config);
+            throw transportFailure("OpenAI streaming request failed", exception);
         }
     }
 
@@ -315,24 +334,38 @@ public final class OpenAiProvider implements AiProvider {
         httpClient.close();
     }
 
+    /**
+     * Sends a Responses API request and applies text or chat completion validation.
+     *
+     * @param request validated text or chat request
+     * @param config credentials, endpoint, and transport settings
+     * @param token cancellation token for the active HTTP request
+     * @return generated text, usage, and completion metadata
+     * @throws AiProviderException if transport or response validation fails
+     */
     private AiResponse executeText(AiRequest request, AiProviderConfig config, AiCancellationToken token)
         throws AiProviderException {
         HttpPost post = jsonPost(endpoint(config, RESPONSES_PATH), buildTextBody(request));
-        prepare(post, config, "application/json");
         String response = executeForResult(post, config, token, isContinuation(request)).body();
 
         try {
             return request.operation() == AiOperation.CHAT
                 ? parseChatResponse(MAPPER.readTree(response), response, isContinuation(request))
                 : parseTextResponse(response);
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
         } catch (IOException | RuntimeException exception) {
-            throw invalidResponse("Could not parse the OpenAI text response", response, exception)
-                .redactSecrets(config);
+            throw invalidResponse("Could not parse the OpenAI text response", response, exception);
         }
     }
 
+    /**
+     * Validates image-generation options and requests images encoded as Base64.
+     *
+     * @param request image-generation request with a meaningful prompt
+     * @param config credentials, endpoint, and transport settings
+     * @param token cancellation token for the active HTTP request
+     * @return decoded generated images and available usage metadata
+     * @throws AiProviderException if validation, transport, or response parsing fails
+     */
     private AiResponse generateImage(AiRequest request, AiProviderConfig config, AiCancellationToken token)
         throws AiProviderException {
         if (hasMeaningfulImagePrompt(request) == false) {
@@ -350,10 +383,18 @@ public final class OpenAiProvider implements AiProvider {
         }
 
         HttpPost post = jsonPost(endpoint(config, IMAGE_GENERATIONS_PATH), body);
-        prepare(post, config, "application/json");
         return executeImage(post, config, (String) imageOptions.get("output_format"), token);
     }
 
+    /**
+     * Validates image-editing support and sends the input image as a multipart request.
+     *
+     * @param request edit request containing input media and a meaningful prompt
+     * @param config credentials, endpoint, and transport settings
+     * @param token cancellation token for the active HTTP request
+     * @return decoded edited images and available usage metadata
+     * @throws AiProviderException if editing is unsupported or validation, transport, or parsing fails
+     */
     private AiResponse editImage(AiRequest request, AiProviderConfig config, AiCancellationToken token)
         throws AiProviderException {
         if ("dall-e-3".equals(request.model())) {
@@ -375,10 +416,18 @@ public final class OpenAiProvider implements AiProvider {
         Map<String, Object> imageOptions = OpenAiImageOptions.validate(PROVIDER_ID, request);
         HttpPost post = new HttpPost(endpoint(config, IMAGE_EDITS_PATH));
         post.setEntity(buildImageEditEntity(request, input, prompt, imageOptions));
-        prepare(post, config, "application/json");
         return executeImage(post, config, (String) imageOptions.get("output_format"), token);
     }
 
+    /**
+     * Validates image options and builds a multipart image-edit request body.
+     *
+     * @param request edit request containing the model and image options
+     * @param input image bytes and media metadata
+     * @param prompt prepared edit prompt
+     * @return multipart entity with a sanitized image filename
+     * @throws AiProviderException if the supplied image options are invalid
+     */
     static HttpEntity buildImageEditEntity(
         AiRequest request,
         BinaryContent input,
@@ -392,6 +441,15 @@ public final class OpenAiProvider implements AiProvider {
         );
     }
 
+    /**
+     * Encodes validated image options and media into a multipart request body.
+     *
+     * @param request edit request containing the model
+     * @param input image bytes and media metadata
+     * @param prompt prepared edit prompt
+     * @param imageOptions validated options, with count mapped to the wire name {@code n}
+     * @return multipart entity using a safe filename and media type
+     */
     private static HttpEntity buildImageEditEntity(
         AiRequest request,
         BinaryContent input,
@@ -418,6 +476,12 @@ public final class OpenAiProvider implements AiProvider {
         return multipart.build();
     }
 
+    /**
+     * Removes directory components and replaces unsafe multipart filename characters with underscores.
+     *
+     * @param fileName supplied filename, possibly {@code null} or blank
+     * @return ASCII leaf filename, or {@code image} when no usable name remains
+     */
     static String safeMultipartFileName(String fileName) {
         if (isBlank(fileName)) return "image";
 
@@ -442,23 +506,37 @@ public final class OpenAiProvider implements AiProvider {
         return result.isBlank() || ".".equals(result) || "..".equals(result) ? "image" : result;
     }
 
+    /**
+     * Sends a prepared image request and decodes its Base64 response.
+     *
+     * @param post image-generation or image-edit request
+     * @param config credentials and transport settings
+     * @param requestedFormat output format used when response metadata omits it; may be {@code null}
+     * @param token cancellation token for the active HTTP request
+     * @return decoded image media and available usage metadata
+     * @throws AiProviderException if transport or response parsing fails
+     */
     private AiResponse executeImage(
         HttpPost post,
         AiProviderConfig config,
         String requestedFormat,
         AiCancellationToken token
     ) throws AiProviderException {
-        String response = executeForString(post, config, token);
+        String response = executeForResult(post, config, token, false).body();
         try {
             return parseImageResponse(response, requestedFormat);
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
         } catch (IOException | RuntimeException exception) {
-            throw invalidResponse("Could not parse the OpenAI image response", response, exception)
-                .redactSecrets(config);
+            throw invalidResponse("Could not parse the OpenAI image response", response, exception);
         }
     }
 
+    /**
+     * Builds a Responses payload with protected user inputs and explicit storage settings.
+     * Chat requests use top-level instructions and may include a previous response ID.
+     *
+     * @param request validated text or chat request
+     * @return request body containing instructions, text, and any input image
+     */
     static ObjectNode buildTextBody(AiRequest request) {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", request.model());
@@ -492,6 +570,13 @@ public final class OpenAiProvider implements AiProvider {
         return body;
     }
 
+    /**
+     * Parses catalogue entries, omitting blank identifiers and sorting newest models first.
+     *
+     * @param response JSON model catalogue
+     * @return immutable model list with undated entries last
+     * @throws IOException if JSON decoding fails or the data array is absent
+     */
     static List<ModelInfo> parseModels(String response) throws IOException {
         JsonNode root = MAPPER.readTree(response);
         JsonNode data = root.path("data");
@@ -517,43 +602,35 @@ public final class OpenAiProvider implements AiProvider {
         return List.copyOf(models);
     }
 
+    /**
+     * Parses generated text and usage while rejecting explicit unsuccessful response statuses.
+     *
+     * @param response JSON response body
+     * @return output text, which may be empty, with usage and optional finish status
+     * @throws IOException if JSON decoding fails
+     * @throws AiProviderException if the response is invalid, unsuccessful, or lacks output text
+     */
     static AiResponse parseTextResponse(String response) throws IOException, AiProviderException {
         JsonNode root = MAPPER.readTree(response);
         ensureSuccessfulResponse(root, response, false);
 
-        String text = textOrNull(root.get("output_text"));
-        boolean textFound = text != null;
-        if (textFound == false) {
-            StringBuilder combined = new StringBuilder();
-            JsonNode outputs = root.path("output");
-            if (outputs.isArray()) {
-                for (JsonNode output : outputs) {
-                    if ("reasoning".equals(textOrNull(output.get("type")))) {
-                        continue;
-                    }
-                    JsonNode content = output.path("content");
-                    if (content.isArray() == false) {
-                        continue;
-                    }
-                    for (JsonNode part : content) {
-                        String partText = textOrNull(part.get("text"));
-                        if (partText != null) {
-                            combined.append(partText);
-                            textFound = true;
-                        }
-                    }
-                }
-            }
-            text = combined.toString();
-        }
-
-        if (textFound == false) {
+        String text = outputText(root, false);
+        if (text == null) {
             throw invalidResponse("OpenAI response does not contain output text", response, null);
         }
 
         return new AiResponse(text, List.of(), parseUsage(root.path("usage")), responseStatus(root));
     }
 
+    /**
+     * Requires a completed chat response with usable text, a response ID, and no unsupported output actions.
+     *
+     * @param root parsed response object, including one nested inside a completion event
+     * @param response original response or event JSON retained for diagnostics
+     * @param continuation whether structured errors may identify an invalid continuation
+     * @return chat text, usage, completed status, and provider continuation ID
+     * @throws AiProviderException if completion, output, or continuation validation fails
+     */
     static AiResponse parseChatResponse(JsonNode root, String response, boolean continuation) throws AiProviderException {
         ensureSuccessfulResponse(root, response, continuation);
         if ("completed".equals(textOrNull(root.get("status"))) == false || root.hasNonNull("error")) {
@@ -581,40 +658,58 @@ public final class OpenAiProvider implements AiProvider {
             }
         }
 
-        StringBuilder text = new StringBuilder();
-        JsonNode outputText = root.get("output_text");
-        if (outputText != null && outputText.isTextual()) {
-            text.append(outputText.textValue());
-        } else {
-            if (outputs.isArray()) {
-                for (JsonNode output : outputs) {
-                    if ("message".equals(textOrNull(output.get("type"))) == false) {
-                        continue;
-                    }
-                    JsonNode content = output.path("content");
-                    if (content.isArray() == false) {
-                        continue;
-                    }
-                    for (JsonNode part : content) {
-                        JsonNode partText = part.get("text");
-                        if ("output_text".equals(textOrNull(part.get("type")))
-                            && partText != null && partText.isTextual()) {
-                            text.append(partText.textValue());
-                        }
+        String text = outputText(root, true);
+        if (isBlank(text)) {
+            throw invalidResponse("OpenAI chat response does not contain usable output text", response, null);
+        }
+        return new AiResponse(text, List.of(), parseUsage(root.path("usage")), "completed", id.textValue());
+    }
+
+    /**
+     * Prefers top-level output text, otherwise concatenating content outside reasoning outputs.
+     * Chat mode accepts only textual values and content parts typed as {@code output_text}.
+     *
+     * @param root response object whose structure has already been validated
+     * @param chat whether to apply the stricter chat text rules
+     * @return extracted text, possibly empty, or {@code null} when no text field is found
+     */
+    private static String outputText(JsonNode root, boolean chat) {
+        String text = chat ? root.path("output_text").textValue() : textOrNull(root.get("output_text"));
+        if (text != null) return text;
+        StringBuilder combined = new StringBuilder();
+        boolean found = false;
+        JsonNode outputs = root.path("output");
+        if (outputs.isArray()) {
+            for (JsonNode output : outputs) {
+                if ("reasoning".equals(textOrNull(output.get("type")))) continue;
+                JsonNode content = output.path("content");
+                if (content.isArray() == false) continue;
+                for (JsonNode part : content) {
+                    if (chat && "output_text".equals(textOrNull(part.get("type"))) == false) continue;
+                    String partText = chat ? part.path("text").textValue() : textOrNull(part.get("text"));
+                    if (partText != null) {
+                        combined.append(partText);
+                        found = true;
                     }
                 }
             }
         }
-        if (text.toString().isBlank()) {
-            throw invalidResponse("OpenAI chat response does not contain usable output text", response, null);
-        }
-        return new AiResponse(text.toString(), List.of(), parseUsage(root.path("usage")), "completed", id.textValue());
+        return found ? combined.toString() : null;
     }
 
     static AiResponse parseImageResponse(String response) throws IOException, AiProviderException {
         return parseImageResponse(response, null);
     }
 
+    /**
+     * Decodes generated Base64 images, using response format metadata before the requested format.
+     *
+     * @param response JSON image response
+     * @param requestedFormat format fallback, or {@code null} to default to PNG
+     * @return generated media and available usage and finish metadata
+     * @throws IOException if JSON decoding fails
+     * @throws AiProviderException if the response failed, image data is missing, or Base64 is invalid
+     */
     static AiResponse parseImageResponse(String response, String requestedFormat)
         throws IOException, AiProviderException {
         JsonNode root = MAPPER.readTree(response);
@@ -648,6 +743,17 @@ public final class OpenAiProvider implements AiProvider {
         return new AiResponse(null, media, parseUsage(root.path("usage")), responseStatus(root));
     }
 
+    /**
+     * Validates embedding indices and vectors, restoring the original input order.
+     *
+     * @param response JSON embedding response
+     * @param expectedCount number of input texts
+     * @param dimensions required vector size, or {@code null} to infer it from the first vector
+     * @param statusCode HTTP status retained in validation failures
+     * @return ordered embeddings and available token usage
+     * @throws IOException if JSON decoding fails
+     * @throws AiProviderException if counts, indices, dimensions, or vector values are invalid
+     */
     private static EmbeddingResponse parseEmbeddingResponse(
         String response,
         int expectedCount,
@@ -700,6 +806,16 @@ public final class OpenAiProvider implements AiProvider {
         return new EmbeddingResponse(List.of(ordered), parseUsage(root.path("usage")));
     }
 
+    /**
+     * Requires a nonempty vector and checks its size against any expected dimension count.
+     *
+     * @param values embedding array to inspect
+     * @param expected required size, or {@code null} to accept the observed size
+     * @param response original response retained for diagnostics
+     * @param statusCode HTTP status retained in validation failures
+     * @return validated vector size
+     * @throws AiProviderException if the vector is missing, empty, or has the wrong size
+     */
     private static int requireEmbeddingDimensions(
         JsonNode values,
         Integer expected,
@@ -727,6 +843,16 @@ public final class OpenAiProvider implements AiProvider {
         return actual;
     }
 
+    /**
+     * Converts a JSON embedding array into an immutable vector of finite floats.
+     *
+     * @param values embedding array to decode
+     * @param dimensions required vector size
+     * @param response original response retained for diagnostics
+     * @param statusCode HTTP status retained in validation failures
+     * @return validated embedding vector
+     * @throws AiProviderException if the size or any numeric value is invalid
+     */
     private static EmbeddingVector parseEmbeddingVector(
         JsonNode values,
         int dimensions,
@@ -768,6 +894,12 @@ public final class OpenAiProvider implements AiProvider {
         return new EmbeddingVector(vector);
     }
 
+    /**
+     * Reads token totals and nested integral details, accepting Responses and Chat Completions field names.
+     *
+     * @param usage optional provider usage object
+     * @return normalized counts and details, or empty usage when no object is supplied
+     */
     static TokenUsage parseUsage(JsonNode usage) {
         if (usage == null || usage.isObject() == false) {
             return TokenUsage.EMPTY;
@@ -786,6 +918,13 @@ public final class OpenAiProvider implements AiProvider {
         return new TokenUsage(input, output, total, details);
     }
 
+    /**
+     * Flattens integral usage fields from nested objects into dotted paths.
+     *
+     * @param node usage object to traverse
+     * @param prefix parent path, empty at the root
+     * @param target destination for collected path-value pairs
+     */
     private static void collectNumericDetails(JsonNode node, String prefix, Map<String, Long> target) {
         node.properties().forEach(entry -> {
             String key = prefix.isEmpty() ? entry.getKey() : prefix + "." + entry.getKey();
@@ -798,31 +937,17 @@ public final class OpenAiProvider implements AiProvider {
         });
     }
 
-    private String executeForString(HttpRequestBase request, AiProviderConfig config) throws AiProviderException {
-        return executeForResult(request, config).body();
-    }
-
-    private String executeForString(
-        HttpRequestBase request,
-        AiProviderConfig config,
-        AiCancellationToken token
-    ) throws AiProviderException {
-        return executeForResult(request, config, token).body();
-    }
-
-    private HttpResult executeForResult(HttpRequestBase request, AiProviderConfig config)
-        throws AiProviderException {
-        return executeForResult(request, config, AiCancellationToken.none());
-    }
-
-    private HttpResult executeForResult(
-        HttpRequestBase request,
-        AiProviderConfig config,
-        AiCancellationToken token
-    ) throws AiProviderException {
-        return executeForResult(request, config, token, false);
-    }
-
+    /**
+     * Sends a configured request, reads its body, and classifies HTTP or transport failures.
+     * The cancellation registration is released with the response; secrets are redacted by the caller's boundary.
+     *
+     * @param request prepared request whose headers and timeouts will be configured
+     * @param config credentials and transport settings
+     * @param token non-null cancellation token for the active request
+     * @param continuation whether structured errors may identify an invalid continuation
+     * @return successful HTTP status and response body
+     * @throws AiProviderException if transport fails or the HTTP status is unsuccessful
+     */
     private HttpResult executeForResult(
         HttpRequestBase request,
         AiProviderConfig config,
@@ -838,13 +963,17 @@ public final class OpenAiProvider implements AiProvider {
                 throw httpError(statusCode, body, continuation);
             }
             return new HttpResult(statusCode, body);
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
         } catch (IOException exception) {
-            throw transportFailure("OpenAI request failed", exception).redactSecrets(config);
+            throw transportFailure("OpenAI request failed", exception);
         }
     }
 
+    /**
+     * Successful HTTP response retained for operation-specific parsing.
+     *
+     * @param statusCode successful HTTP status
+     * @param body decoded response body, empty when no entity is supplied
+     */
     private record HttpResult(int statusCode, String body) { }
 
     private static HttpPost jsonPost(URI endpoint, JsonNode body) {
@@ -872,21 +1001,28 @@ public final class OpenAiProvider implements AiProvider {
         return new AiProviderException(PROVIDER_ID, -1, message, null, true, exception);
     }
 
-    private static <T> T invokeAtBoundary(AiProviderConfig config, ProviderCall<T> call)
-        throws AiProviderException {
+    /**
+     * Applies cancellation checks and redacts credentials before a failure leaves the provider.
+     * Unexpected runtime failures are wrapped as provider exceptions.
+     *
+     * @param config configuration whose API key and trusted-header values must be redacted
+     * @param token non-null cancellation token checked before and after the call
+     * @param call operation to run within the provider boundary
+     * @param <T> operation result type
+     * @return operation result when cancellation has not been observed
+     * @throws AiProviderException if cancelled or the operation fails, with configured secrets redacted
+     */
+    private static <T> T invokeAtBoundary(
+        AiProviderConfig config, AiCancellationToken token, CancellationSupport.Call<T> call
+    ) throws AiProviderException {
         try {
-            return call.invoke();
+            return CancellationSupport.call(PROVIDER_ID, token, call);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
             throw new AiProviderException(PROVIDER_ID, "Unexpected OpenAI provider failure", exception)
                 .redactSecrets(config);
         }
-    }
-
-    @FunctionalInterface
-    private interface ProviderCall<T> {
-        T invoke() throws AiProviderException;
     }
 
     private static URI endpoint(AiProviderConfig config, String path) {
@@ -916,6 +1052,13 @@ public final class OpenAiProvider implements AiProvider {
         }
     }
 
+    /**
+     * Validates the embedding model and every input before returning the request options.
+     *
+     * @param request embedding request to validate
+     * @return configured embedding options
+     * @throws AiProviderException if the request, model, or input texts are missing or blank
+     */
     private static EmbeddingOptions requireEmbeddingRequest(EmbeddingRequest request)
         throws AiProviderException {
         if (request == null) {
@@ -944,6 +1087,12 @@ public final class OpenAiProvider implements AiProvider {
         input.put("content", value);
     }
 
+    /**
+     * Copies scalar image options to JSON, mapping the public count option to {@code n}.
+     *
+     * @param body destination image request body
+     * @param options validated image options
+     */
     private static void addJsonImageOptions(ObjectNode body, Map<String, Object> options) {
         for (Map.Entry<String, Object> option : options.entrySet()) {
             String wireName = ImageOptions.COUNT.equals(option.getKey()) ? "n" : option.getKey();
@@ -955,6 +1104,13 @@ public final class OpenAiProvider implements AiProvider {
         }
     }
 
+    /**
+     * Combines security and task instructions with protected image prompt data.
+     * Input text is included only for image generation, not editing.
+     *
+     * @param request image request whose prompt fields are combined
+     * @return prepared prompt with blank components omitted
+     */
     static String imagePrompt(AiRequest request) {
         StringBuilder prompt = new StringBuilder();
         appendPrompt(prompt, PromptInjectionDefense.getSecurityInstructions(request.instructions()));
@@ -966,6 +1122,12 @@ public final class OpenAiProvider implements AiProvider {
         return prompt.toString();
     }
 
+    /**
+     * Checks for task instructions or meaningful prompt data, excluding {@code inputText} for image editing.
+     *
+     * @param request image request to inspect
+     * @return whether content beyond the security instructions defines an image task
+     */
     private static boolean hasMeaningfulImagePrompt(AiRequest request) {
         return PromptInjectionDefense.hasTaskInstructions(request.instructions())
             || PromptInjectionDefense.hasUntrustedText(
@@ -1052,6 +1214,14 @@ public final class OpenAiProvider implements AiProvider {
         };
     }
 
+    /**
+     * Builds an HTTP failure with retryability and conservative continuation classification.
+     *
+     * @param statusCode unsuccessful HTTP status
+     * @param response original response body retained for diagnostics
+     * @param continuation whether to inspect structured continuation error fields
+     * @return failure awaiting credential redaction at the public boundary
+     */
     private AiProviderException httpError(int statusCode, String response, boolean continuation) {
         String detail = errorMessage(response);
         String message = "OpenAI request failed (" + statusCode + ")";
@@ -1078,7 +1248,7 @@ public final class OpenAiProvider implements AiProvider {
      * @param exception failure whose diagnostics must be retained
      * @param error structured error from an HTTP response or explicit response/SSE failure
      * @param continuation whether the request is a chat with a supplied continuation ID
-     * @return categorized failure when an exact code or parameter identifies the continuation
+     * @return categorized failure when an exact code or parameter identifies the continuation, otherwise the original
      */
     static AiProviderException classifyContinuationError(
         AiProviderException exception,
@@ -1093,6 +1263,12 @@ public final class OpenAiProvider implements AiProvider {
         return exception;
     }
 
+    /**
+     * Extracts upstream error metadata before falling back to the provider's message.
+     *
+     * @param response JSON error response
+     * @return error detail, or {@code null} when absent or parsing fails
+     */
     private static String errorMessage(String response) {
         try {
             JsonNode error = MAPPER.readTree(response).path("error");
@@ -1106,6 +1282,14 @@ public final class OpenAiProvider implements AiProvider {
         }
     }
 
+    /**
+     * Rejects non-object responses and explicit incomplete, failed, or cancelled statuses.
+     *
+     * @param root parsed response to inspect
+     * @param rawResponse original response retained for diagnostics
+     * @param continuation whether structured errors may identify an invalid continuation
+     * @throws AiProviderException if the response shape or status indicates failure
+     */
     private static void ensureSuccessfulResponse(JsonNode root, String rawResponse, boolean continuation)
         throws AiProviderException {
         if (root == null || root.isObject() == false) {
@@ -1128,6 +1312,12 @@ public final class OpenAiProvider implements AiProvider {
         }
     }
 
+    /**
+     * Reads the top-level status, falling back to the first output entry when it is blank.
+     *
+     * @param root response object to inspect
+     * @return response or first-output status, or {@code null} when unavailable
+     */
     private static String responseStatus(JsonNode root) {
         String status = textOrNull(root.get("status"));
         if (isBlank(status) == false) {
