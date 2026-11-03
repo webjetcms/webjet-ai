@@ -99,6 +99,27 @@ not in mutable provider fields. `AiClient` validates the shared text-only chat
 constraints and cleans echoed input blocks from responses. Direct provider calls
 must perform their own request validation. See the [chat contract](../README.md#chat-and-conversation-continuation).
 
+### Response deletion
+
+Version `2.1.0` adds a default `deleteResponse(responseId, config)` implementation
+that throws `AiProviderException` with category `UNSUPPORTED_OPERATION`. Override
+it when the backend supports deleting stored responses, returning `DELETED` only
+after confirmation or `ALREADY_ABSENT` only after resource-specific confirmation
+that the requested response is missing. Generic HTTP 404s are insufficient.
+Throw for unconfirmed results; never return null or treat a request timeout as
+successful cleanup. The host supplies the account and endpoint that created the
+response and owns conversation membership and local history.
+
+The token overload checks cancellation around the blocking method by default.
+Override it to abort the active request without closing shared transport resources.
+Use the existing boundary redaction and cancellation conventions described below.
+Do not add implicit retries or a conversation store to the adapter.
+
+Publish adapter support using the fourth `AiCapabilities` constructor argument,
+`responseDeletionSupport`. This capability is independent of the model and never
+guarantees access to a particular response. The existing three-argument constructor
+sets it to `UNKNOWN`; implementing deletion does not automatically change metadata.
+
 ### Capability metadata and cancellation
 
 Override `capabilities(String model)` to publish an immutable `AiCapabilities`

@@ -54,6 +54,41 @@ public interface AiProvider extends AutoCloseable {
     List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException;
 
     /**
+     * Deletes one stored response using the account and endpoint that created it.
+     * The default reports {@link AiErrorCategory#UNSUPPORTED_OPERATION}.
+     *
+     * @param responseId opaque provider response ID
+     * @param config credentials, endpoint, and transport settings
+     * @return confirmed deletion or confirmed absence; never {@code null}
+     * @throws AiProviderException if unsupported, invalid, failed, or unconfirmed
+     */
+    default AiResponseDeletion deleteResponse(String responseId, AiProviderConfig config) throws AiProviderException {
+        throw new AiProviderException(id(), "Response deletion is not supported by this provider")
+            .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
+    }
+
+    /**
+     * Deletes one stored response with per-call cancellation. The compatibility default
+     * checks around the blocking call; adapters may override it to abort their transport.
+     * Cancellation or a transport failure does not establish whether deletion occurred.
+     *
+     * @param responseId opaque provider response ID
+     * @param config credentials, endpoint, and transport settings
+     * @param token non-null cancellation token for this call
+     * @return confirmed deletion or confirmed absence; never {@code null}
+     * @throws AiProviderException if cancelled, unsupported, invalid, failed, or unconfirmed
+     */
+    default AiResponseDeletion deleteResponse(
+        String responseId, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        try {
+            return CancellationSupport.call(id(), token, () -> deleteResponse(responseId, config));
+        } catch (AiProviderException exception) {
+            throw exception.redactSecrets(config);
+        }
+    }
+
+    /**
      * Describes locally known adapter and model capabilities without credentials or I/O.
      *
      * <p>The default preserves custom-provider compatibility by returning unknown

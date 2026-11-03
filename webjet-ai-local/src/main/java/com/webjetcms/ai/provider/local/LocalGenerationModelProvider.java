@@ -106,7 +106,7 @@ public final class LocalGenerationModelProvider implements AiProvider {
             AiOperation.CHAT, Operation.unsupported(),
             AiOperation.GENERATE_IMAGE, Operation.unsupported(),
             AiOperation.EDIT_IMAGE, Operation.unsupported()
-        ), Support.UNSUPPORTED, Support.UNSUPPORTED);
+        ), Support.UNSUPPORTED, Support.UNSUPPORTED, Support.UNSUPPORTED);
     }
 
     @Override

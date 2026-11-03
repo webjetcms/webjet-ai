@@ -16,11 +16,14 @@ import java.util.Objects;
  * @param operations operation metadata; omitted operations become unknown
  * @param embeddingSupport whether the adapter implements {@link AiProvider#embed}
  * @param embeddingModelSupport known embedding support of the selected model
+ * @param responseDeletionSupport whether the adapter implements deletion of stored responses;
+ *     independent of the selected model and not a guarantee of account access
  */
 public record AiCapabilities(
     Map<AiOperation, Operation> operations,
     Support embeddingSupport,
-    Support embeddingModelSupport
+    Support embeddingModelSupport,
+    Support responseDeletionSupport
 ) {
 
     private static final AiCapabilities UNKNOWN =
@@ -32,11 +35,13 @@ public record AiCapabilities(
      * @param operations operation metadata to copy
      * @param embeddingSupport adapter embedding support
      * @param embeddingModelSupport selected model's known embedding support
+     * @param responseDeletionSupport adapter response deletion support
      */
     public AiCapabilities {
         Objects.requireNonNull(operations, "operations");
         Objects.requireNonNull(embeddingSupport, "embeddingSupport");
         Objects.requireNonNull(embeddingModelSupport, "embeddingModelSupport");
+        Objects.requireNonNull(responseDeletionSupport, "responseDeletionSupport");
         EnumMap<AiOperation, Operation> copy = new EnumMap<>(AiOperation.class);
         operations.forEach((operation, capability) -> copy.put(
             Objects.requireNonNull(operation, "operation"),
@@ -46,6 +51,19 @@ public record AiCapabilities(
             copy.putIfAbsent(operation, Operation.unknown());
         }
         operations = Collections.unmodifiableMap(copy);
+    }
+
+    /**
+     * Creates metadata without a response-deletion declaration, preserving existing providers.
+     *
+     * @param operations operation metadata to copy
+     * @param embeddingSupport adapter embedding support
+     * @param embeddingModelSupport selected model's known embedding support
+     */
+    public AiCapabilities(
+        Map<AiOperation, Operation> operations, Support embeddingSupport, Support embeddingModelSupport
+    ) {
+        this(operations, embeddingSupport, embeddingModelSupport, Support.UNKNOWN);
     }
 
     /**

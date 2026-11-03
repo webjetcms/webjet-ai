@@ -30,12 +30,15 @@ class AiCapabilitiesTest {
         assertEquals(Operation.unknown(), unknown.operation(CHAT));
         assertEquals(UNKNOWN, unknown.embeddingSupport());
         assertEquals(UNKNOWN, unknown.embeddingModelSupport());
+        assertEquals(UNKNOWN, unknown.responseDeletionSupport());
         assertEquals(UNKNOWN, Operation.unsupported().modelSupport());
 
         EnumMap<AiOperation, Operation> source = new EnumMap<>(AiOperation.class);
         Operation text = new Operation(SUPPORTED, UNKNOWN, SUPPORTED, NONE);
         source.put(TEXT, text);
         AiCapabilities capabilities = new AiCapabilities(source, SUPPORTED, UNKNOWN);
+        assertEquals(UNKNOWN, capabilities.responseDeletionSupport());
+        assertThrows(NullPointerException.class, () -> new AiCapabilities(source, SUPPORTED, UNKNOWN, null));
         source.put(TEXT, Operation.unsupported());
         assertEquals(text, capabilities.operation(TEXT));
         assertEquals(Operation.unknown(), capabilities.operation(CHAT));
@@ -59,6 +62,8 @@ class AiCapabilitiesTest {
                 assertEquals(UNKNOWN, text.support(), provider);
                 assertEquals(SUPPORTED, capabilities.embeddingSupport(), provider);
                 assertEquals(UNKNOWN, capabilities.embeddingModelSupport(), provider);
+                assertEquals("openrouter".equals(provider) ? UNSUPPORTED : SUPPORTED,
+                    capabilities.responseDeletionSupport(), provider);
 
                 Operation chat = capabilities.operation(CHAT);
                 assertEquals("openrouter".equals(provider) ? new Operation(UNSUPPORTED, UNKNOWN, UNSUPPORTED, NONE)

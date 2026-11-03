@@ -24,6 +24,16 @@ uses [Semantic Versioning](https://semver.org/).
 - Separate adapter and model support, per-operation streaming, continuation storage
   requirements, and embedding capabilities for remote and local providers. Unknown
   remote models retain their existing execution behavior.
+- Provider-neutral `AiClient.deleteResponse(...)` and compatible `AiProvider`
+  defaults, with optional per-call cancellation and `AiResponseDeletion` results
+  distinguishing `DELETED` from `ALREADY_ABSENT`.
+- OpenAI Responses and Gemini Interactions deletion using existing pooled
+  transports, authentication, timeouts, credential redaction, and request-level
+  cancellation. Confirmation is conservative: generic 404s, malformed or
+  oversized bodies, and unexpected success responses remain failures. Deletion
+  does not retry automatically or manage conversations or local history.
+- Adapter-level `AiCapabilities.responseDeletionSupport()` metadata. OpenAI and
+  Gemini report support; OpenRouter and local providers report unsupported.
 - Per-call `AiCancellationToken` overloads for synchronous `execute` and `stream`,
   aborting only the active HTTP request in OpenAI, Gemini, and OpenRouter while
   retaining existing signatures and shared transport resources.
@@ -56,6 +66,10 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Compatibility
 
+- Custom providers inherit `UNSUPPORTED_OPERATION` for deletion and need no new
+  implementations. The three-argument `AiCapabilities` constructor is available
+  with deletion support `UNKNOWN`. The fourth record component,
+  `responseDeletionSupport`, participates in equality and record-based serialization.
 - Existing execution methods, provider implementations, and the four-argument
   `AiResponse` constructor remain supported. `AiResponse` now has a fifth record
   component, `responseId`, which participates in equality and record-based

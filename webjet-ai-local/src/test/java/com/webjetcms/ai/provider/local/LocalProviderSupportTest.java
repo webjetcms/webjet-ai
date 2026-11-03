@@ -68,6 +68,9 @@ class LocalProviderSupportTest {
                     capabilities.operation(AiOperation.TEXT).support());
                 assertEquals(embedding ? Support.SUPPORTED : Support.UNSUPPORTED, capabilities.embeddingSupport());
                 assertEquals(capabilities.embeddingSupport(), capabilities.embeddingModelSupport());
+                assertEquals(Support.UNSUPPORTED, capabilities.responseDeletionSupport());
+                assertEquals(AiErrorCategory.UNSUPPORTED_OPERATION, assertThrows(AiProviderException.class,
+                    () -> provider.deleteResponse("saved", AiProviderConfig.empty())).category());
                 for (AiOperation operation : AiOperation.values()) {
                     assertEquals(Support.UNSUPPORTED, capabilities.operation(operation).adapterStreaming());
                     assertEquals(Continuation.NONE, capabilities.operation(operation).continuation());

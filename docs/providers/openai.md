@@ -125,6 +125,27 @@ content is excluded, and tool-call or incomplete output fails with
 matches the accumulated text. `AiClient` removes echoed internal input blocks
 while preserving usage, the response ID, and the `completed` finish reason.
 
+## Response deletion
+
+Since `2.1.0`, `client.deleteResponse(responseId, config)` sends `DELETE /responses/{id}` using
+the configured base URI, Bearer authentication, trusted headers, and timeouts.
+The ID is encoded as one path segment. A cancellation-token overload aborts only
+that HTTP request; redirects and automatic retries remain disabled.
+
+`DELETED` requires HTTP 200 with a JSON object containing the exact string `id`,
+`object: "response.deleted"`, and boolean `deleted: true`, without an error field.
+This follows the [OpenAI deletion contract](https://developers.openai.com/api/reference/resources/responses/methods/delete).
+`ALREADY_ABSENT` requires HTTP 404 with `error.code: "response_not_found"`, or
+an `invalid_request_error` without a conflicting code containing the exact diagnostic
+`Response with id '<requested ID>' not found.`. Generic or differently worded
+404s remain failures so an incorrect endpoint cannot silently confirm cleanup.
+
+Malformed, duplicate-key, trailing, oversized, mismatched, and otherwise
+unconfirmed responses throw `AiProviderException`. A transport failure or
+cancellation leaves the remote deletion outcome unconfirmed. The host owns
+conversation membership, retries, and local history cleanup; deleting one
+response does not confirm deletion of other responses in its continuation chain.
+
 ## Multimodal text request
 
 Use `TEXT` with `inputMedia` when the expected result is text about an image.

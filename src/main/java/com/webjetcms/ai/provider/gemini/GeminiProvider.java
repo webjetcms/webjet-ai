@@ -19,6 +19,7 @@ import java.util.Set;
 import org.apache.http.HttpEntity;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpDelete;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpRequestBase;
@@ -43,6 +44,7 @@ import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
+import com.webjetcms.ai.AiResponseDeletion;
 import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.BinaryContent;
 import com.webjetcms.ai.EmbeddingOptions;
@@ -54,6 +56,7 @@ import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
 import com.webjetcms.ai.internal.CancellationSupport;
+import com.webjetcms.ai.internal.ResponseDeletionSupport;
 import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.internal.ImageOptionValidator;
 import com.webjetcms.ai.security.PromptInjectionDefense;
@@ -107,6 +110,72 @@ public final class GeminiProvider implements AiProvider {
     }
 
     @Override
+    public AiResponseDeletion deleteResponse(String responseId, AiProviderConfig config) throws AiProviderException {
+        return deleteResponse(responseId, config, AiCancellationToken.none());
+    }
+
+    @Override
+    public AiResponseDeletion deleteResponse(
+        String responseId, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        return invokeAtBoundary(config, token, () -> deleteResponseInternal(responseId, config, token));
+    }
+
+    /** Deletes one Interactions resource, requiring the documented empty success or explicit resource absence. */
+    private AiResponseDeletion deleteResponseInternal(
+        String responseId, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        requireConfigured(config);
+        HttpDelete request = new HttpDelete(URI.create(interactionsUri(config).toString()
+            + "/" + ResponseDeletionSupport.encodedId(PROVIDER_ID, responseId)));
+        configure(request, config, false);
+        try (AiCancellationToken.Registration cancellation = token.onCancel(request::abort);
+             CloseableHttpResponse response = httpClient.execute(request)) {
+            int status = response.getStatusLine().getStatusCode();
+            String payload;
+            try {
+                payload = ResponseDeletionSupport.readBody(response.getEntity());
+            } catch (ResponseDeletionSupport.ResponseTooLargeException exception) {
+                throw new AiProviderException(PROVIDER_ID, status, exception.getMessage(), null,
+                    isRetryable(status), exception);
+            }
+            JsonNode body;
+            try {
+                body = payload.isBlank() ? MAPPER.createObjectNode() : ResponseDeletionSupport.readObject(payload);
+            } catch (IOException exception) {
+                if (isSuccessful(status) == false) {
+                    throw responseFailure(status, payload, "Gemini response deletion failed.");
+                }
+                throw invalidResponse(status, "Gemini did not confirm response deletion.", payload, exception);
+            }
+            if ((status == 200 || status == 204) && body.isEmpty()) {
+                return AiResponseDeletion.DELETED;
+            }
+            if (status == 404 && isDeletedInteractionAbsent(body.path("error"), responseId)) {
+                return AiResponseDeletion.ALREADY_ABSENT;
+            }
+            if (isSuccessful(status) == false) {
+                throw responseFailure(status, payload, "Gemini response deletion failed.");
+            }
+            throw invalidResponse(status, "Gemini did not confirm response deletion.", payload, null);
+        } catch (IOException exception) {
+            throw transportFailure("Gemini response deletion was not confirmed.", exception);
+        }
+    }
+
+    /** Generic NOT_FOUND codes require an exact diagnostic identifying a missing interaction. */
+    private static boolean isDeletedInteractionAbsent(JsonNode error, String responseId) {
+        boolean notFound = "not_found".equals(error.path("code").asText())
+            || (error.path("code").isIntegralNumber() && error.path("code").canConvertToInt()
+                && error.path("code").intValue() == 404
+                && "NOT_FOUND".equals(error.path("status").asText()));
+        String message = error.path("message").asText();
+        return notFound && ("Interaction not found.".equals(message)
+            || "Failed to get completed interaction: Result not found.".equals(message)
+            || ("Interaction with id '" + responseId + "' not found.").equals(message));
+    }
+
+    @Override
     public Map<String, ImageOptionDefinition> imageOptions(String model, AiOperation operation) {
         AiProvider.super.imageOptions(model, operation);
         return GeminiImageOptions.definitions(normalizeModelId(model), operation);
@@ -129,7 +198,7 @@ public final class GeminiProvider implements AiProvider {
                 Support.SUPPORTED, generation, Support.SUPPORTED, Continuation.NONE),
             AiOperation.EDIT_IMAGE, new Operation(
                 Support.SUPPORTED, editing, Support.SUPPORTED, Continuation.NONE)
-        ), Support.SUPPORTED, Support.UNKNOWN);
+        ), Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED);
     }
 
     /**

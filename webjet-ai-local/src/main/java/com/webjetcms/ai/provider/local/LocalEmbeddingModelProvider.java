@@ -95,7 +95,8 @@ public final class LocalEmbeddingModelProvider implements AiProvider {
             AiOperation.CHAT, Operation.unsupported(),
             AiOperation.GENERATE_IMAGE, Operation.unsupported(),
             AiOperation.EDIT_IMAGE, Operation.unsupported()
-        ), Support.SUPPORTED, model.aliases().contains(modelId) ? Support.SUPPORTED : Support.UNSUPPORTED);
+        ), Support.SUPPORTED, model.aliases().contains(modelId) ? Support.SUPPORTED : Support.UNSUPPORTED,
+            Support.UNSUPPORTED);
     }
 
     /**

@@ -128,7 +128,7 @@ public final class OpenRouterProvider implements AiProvider {
                 Support.SUPPORTED, generation, Support.UNSUPPORTED, Continuation.NONE),
             AiOperation.EDIT_IMAGE, new Operation(
                 Support.SUPPORTED, editing, Support.UNSUPPORTED, Continuation.NONE)
-        ), Support.SUPPORTED, Support.UNKNOWN);
+        ), Support.SUPPORTED, Support.UNKNOWN, Support.UNSUPPORTED);
     }
 
     /**

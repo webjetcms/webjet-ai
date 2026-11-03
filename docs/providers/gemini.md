@@ -35,6 +35,29 @@ Image-operation streaming uses Gemini's streaming endpoint, but actual support i
 model-dependent. The stream listener receives only text fragments; generated
 binary media is available in the returned `AiResponse` after completion.
 
+## Response deletion
+
+Since `2.1.0`, `client.deleteResponse(responseId, config)` sends `DELETE /interactions/{id}`
+under the configured API base, using the existing `x-goog-api-key` authentication,
+trusted headers, and timeouts. Bases ending in `/models/` are supported just as
+for chat. The ID is encoded as one path segment. A cancellation-token overload
+aborts only that HTTP request; redirects and automatic retries remain disabled.
+
+`DELETED` requires HTTP 200 or 204 with an empty body or empty JSON object, following
+the [Gemini Interactions deletion contract](https://ai.google.dev/api/interactions-api).
+`ALREADY_ABSENT` requires HTTP 404, a structured `not_found` code (or numeric 404
+with status `NOT_FOUND`), and one of these exact resource-specific diagnostics:
+
+- `Interaction not found.`
+- `Interaction with id '<requested ID>' not found.`
+- `Failed to get completed interaction: Result not found.`
+
+Generic missing-route errors and other ambiguous responses remain failures.
+Malformed, duplicate-key, trailing, oversized, and nonempty success responses
+also fail. A timeout or cancellation cannot confirm whether remote deletion
+occurred. The host owns conversation membership, retries, and local history
+cleanup; this API deletes only the requested interaction.
+
 ## Configuration and client
 
 ```java

@@ -44,7 +44,8 @@ need the core `webjet-ai` dependency shown above.
 
 Update both artifacts to `2.1.0` when using the local runtime. Java 17 remains the
 minimum version. Existing `execute`, `stream`, and exception constructors remain
-available; custom providers inherit defaults for capabilities and cancellation.
+available; custom providers inherit defaults for capabilities, cancellation, and
+response deletion. The default deletion implementation reports `UNSUPPORTED_OPERATION`.
 
 Handle the new `CHAT` value in exhaustive `AiOperation` switches. `AiResponse`
 adds `responseId` as its fifth record component; its four-argument constructor
@@ -160,6 +161,48 @@ input blocks echoed by the model are removed by `AiClient`, including during
 streaming; response metadata is retained. See the [OpenAI](docs/providers/openai.md#chat)
 and [Gemini](docs/providers/gemini.md#chat) guides for protocol details and
 [stable error categories](#stable-error-categories) for continuation failures.
+
+## Deleting stored responses
+
+Since `2.1.0`, OpenAI and Gemini support deletion of one provider-managed response by ID:
+
+```java
+import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiResponseDeletion;
+
+AiResponseDeletion deletion = client.deleteResponse(
+    providerId, responseId, config, new AiCancellationToken()
+);
+```
+
+Use the same provider, account, and endpoint that created the response. No model
+or generation request is required. The cancellation token is optional, and
+clients containing one provider also offer `deleteResponse(responseId, config)`.
+
+The result is `DELETED` when the provider confirms deletion, or `ALREADY_ABSENT`
+when it explicitly identifies the requested resource as missing. Unsupported
+providers throw `AiProviderException` with category `UNSUPPORTED_OPERATION`.
+Other failures, including generic HTTP 404s and unconfirmed success responses,
+also throw; they must not be treated as confirmed cleanup. A timeout or
+cancellation can occur after remote deletion. The library never retries the
+operation automatically or deletes related responses or local history.
+
+`client.capabilities(providerId, model).responseDeletionSupport()` describes
+adapter support independently of the selected model: OpenAI and Gemini report
+`SUPPORTED`, OpenRouter and local providers report `UNSUPPORTED`, and existing
+custom providers default to `UNKNOWN`. Metadata does not establish account access
+or compatibility with a custom endpoint.
+
+`AiCapabilities` now includes a fourth record component, `responseDeletionSupport`.
+The existing three-argument constructor remains available and sets it to `UNKNOWN`.
+Consumers reflecting over record components or using fixed serialization schemas
+should account for the additional field; record equality includes it.
+
+The host remains responsible for authorization, choosing which IDs belong to a
+conversation, retaining unresolved cleanup work, and removing its local history.
+Provider-specific confirmation rules are documented in the
+[OpenAI](docs/providers/openai.md#response-deletion) and
+[Gemini](docs/providers/gemini.md#response-deletion) guides.
 
 ## Image capability lookup
 

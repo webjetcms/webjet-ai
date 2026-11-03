@@ -80,7 +80,7 @@ public final class LocalTranslationModelProvider extends Seq2SeqProvider<NativeT
             AiOperation.CHAT, Operation.unsupported(),
             AiOperation.GENERATE_IMAGE, Operation.unsupported(),
             AiOperation.EDIT_IMAGE, Operation.unsupported()
-        ), Support.UNSUPPORTED, Support.UNSUPPORTED);
+        ), Support.UNSUPPORTED, Support.UNSUPPORTED, Support.UNSUPPORTED);
     }
 
     /** Returns language codes discovered from the validated tokenizer metadata.

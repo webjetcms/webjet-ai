@@ -19,6 +19,7 @@ import org.apache.http.HttpEntity;
 import org.apache.http.HttpHeaders;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpDelete;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpRequestBase;
@@ -46,6 +47,7 @@ import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
+import com.webjetcms.ai.AiResponseDeletion;
 import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.BinaryContent;
 import com.webjetcms.ai.EmbeddingOptions;
@@ -56,6 +58,7 @@ import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.internal.CancellationSupport;
+import com.webjetcms.ai.internal.ResponseDeletionSupport;
 import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
@@ -114,6 +117,70 @@ public final class OpenAiProvider implements AiProvider {
     }
 
     @Override
+    public AiResponseDeletion deleteResponse(String responseId, AiProviderConfig config) throws AiProviderException {
+        return deleteResponse(responseId, config, AiCancellationToken.none());
+    }
+
+    @Override
+    public AiResponseDeletion deleteResponse(
+        String responseId, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        return invokeAtBoundary(config, token, () -> deleteResponseInternal(responseId, config, token));
+    }
+
+    /** Deletes one Responses resource, accepting only an explicit confirmation or resource-specific absence. */
+    private AiResponseDeletion deleteResponseInternal(
+        String responseId, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        requireConfigured(config);
+        HttpDelete request = new HttpDelete(endpoint(config,
+            RESPONSES_PATH + "/" + ResponseDeletionSupport.encodedId(PROVIDER_ID, responseId)));
+        prepare(request, config, "application/json");
+        try (AiCancellationToken.Registration cancellation = token.onCancel(request::abort);
+             CloseableHttpResponse response = httpClient.execute(request)) {
+            int status = response.getStatusLine().getStatusCode();
+            String payload;
+            try {
+                payload = ResponseDeletionSupport.readBody(response.getEntity());
+            } catch (ResponseDeletionSupport.ResponseTooLargeException exception) {
+                throw new AiProviderException(PROVIDER_ID, status, exception.getMessage(), null,
+                    isRetryable(status), exception);
+            }
+            JsonNode body;
+            try {
+                body = ResponseDeletionSupport.readObject(payload);
+            } catch (IOException exception) {
+                if (isSuccessful(status) == false) throw httpError(status, payload, false);
+                throw new AiProviderException(PROVIDER_ID, status,
+                    "OpenAI did not confirm response deletion", payload, false, exception);
+            }
+            if (status == 200 && body.has("error") == false
+                && body.path("deleted").isBoolean() && body.path("deleted").booleanValue()
+                && "response.deleted".equals(body.path("object").asText())
+                && body.path("id").isTextual()
+                && responseId.equals(body.path("id").asText())) {
+                return AiResponseDeletion.DELETED;
+            }
+            if (status == 404 && isDeletedResponseAbsent(body.path("error"), responseId)) {
+                return AiResponseDeletion.ALREADY_ABSENT;
+            }
+            if (isSuccessful(status) == false) throw httpError(status, payload, false);
+            throw new AiProviderException(PROVIDER_ID, status,
+                "OpenAI did not confirm response deletion", payload, false);
+        } catch (IOException exception) {
+            throw transportFailure("OpenAI response deletion was not confirmed", exception);
+        }
+    }
+
+    /** Recognizes only a response-specific code or an exact missing-response diagnostic for this ID. */
+    private static boolean isDeletedResponseAbsent(JsonNode error, String responseId) {
+        return "response_not_found".equals(error.path("code").asText())
+            || ("invalid_request_error".equals(error.path("type").asText())
+                && error.hasNonNull("code") == false
+                && ("Response with id '" + responseId + "' not found.").equals(error.path("message").asText()));
+    }
+
+    @Override
     public Map<String, ImageOptionDefinition> imageOptions(String model, AiOperation operation) {
         AiProvider.super.imageOptions(model, operation);
         return OpenAiImageOptions.definitions(model, operation);
@@ -136,7 +203,7 @@ public final class OpenAiProvider implements AiProvider {
                 Support.SUPPORTED, generation, Support.UNSUPPORTED, Continuation.NONE),
             AiOperation.EDIT_IMAGE, new Operation(
                 Support.SUPPORTED, editing, Support.UNSUPPORTED, Continuation.NONE)
-        ), Support.SUPPORTED, Support.UNKNOWN);
+        ), Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED);
     }
 
     /**
@@ -1228,14 +1295,19 @@ public final class OpenAiProvider implements AiProvider {
         if (isBlank(detail) == false) {
             message += ": " + detail;
         }
-        boolean retryable = statusCode == 408 || statusCode == 409 || statusCode == 429 || statusCode >= 500;
-        AiProviderException exception = new AiProviderException(PROVIDER_ID, statusCode, message, response, retryable);
+        AiProviderException exception = new AiProviderException(
+            PROVIDER_ID, statusCode, message, response, isRetryable(statusCode)
+        );
         if (continuation == false) return exception;
         try {
             return classifyContinuationError(exception, MAPPER.readTree(response).path("error"), true);
         } catch (IOException | RuntimeException ignored) {
             return exception;
         }
+    }
+
+    private static boolean isRetryable(int statusCode) {
+        return statusCode == 408 || statusCode == 409 || statusCode == 429 || statusCode >= 500;
     }
 
     private static boolean isContinuation(AiRequest request) {

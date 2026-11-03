@@ -12,6 +12,7 @@ import java.util.Set;
 import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.internal.CancellationSupport;
+import com.webjetcms.ai.internal.ResponseDeletionSupport;
 
 /**
  * Owns a fixed set of AI provider instances and selects them by exact identifier.
@@ -335,6 +336,82 @@ public final class AiClient implements AutoCloseable {
             ));
         });
         return Collections.unmodifiableMap(copy);
+    }
+
+    /**
+     * Deletes one stored response using the only registered provider.
+     *
+     * @param responseId opaque provider response ID
+     * @param config configuration for the account and endpoint that created the response
+     * @return confirmed deletion or confirmed absence
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws AiProviderException if unsupported, invalid, failed, or unconfirmed
+     */
+    public AiResponseDeletion deleteResponse(String responseId, AiProviderConfig config) throws AiProviderException {
+        return deleteResponse(soleProviderId(), responseId, config);
+    }
+
+    /**
+     * Deletes one stored response using a registered provider, without automatic retries.
+     * The host owns authorization, conversation membership, and local history cleanup.
+     *
+     * @param providerId registered provider identifier
+     * @param responseId opaque provider response ID
+     * @param config configuration for the account and endpoint that created the response
+     * @return confirmed deletion or confirmed absence
+     * @throws IllegalArgumentException if the provider is not registered
+     * @throws AiProviderException if unsupported, invalid, failed, or unconfirmed
+     */
+    public AiResponseDeletion deleteResponse(String providerId, String responseId, AiProviderConfig config)
+        throws AiProviderException {
+        return deleteResponse(providerId, responseId, config, AiCancellationToken.none());
+    }
+
+    /**
+     * Deletes one stored response using the only registered provider and a cancellation token.
+     *
+     * @param responseId opaque provider response ID
+     * @param config configuration for the account and endpoint that created the response
+     * @param token non-null cancellation token for this call
+     * @return confirmed deletion or confirmed absence
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws AiProviderException if cancelled, unsupported, invalid, failed, or unconfirmed
+     */
+    public AiResponseDeletion deleteResponse(
+        String responseId, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        return deleteResponse(soleProviderId(), responseId, config, token);
+    }
+
+    /**
+     * Deletes one stored response with cancellation and credential redaction. A failure,
+     * including cancellation, may occur after remote deletion and never confirms absence.
+     * Successful deletion of one response does not imply deletion of related responses.
+     *
+     * @param providerId registered provider identifier
+     * @param responseId opaque provider response ID
+     * @param config configuration for the account and endpoint that created the response
+     * @param token non-null cancellation token for this call
+     * @return confirmed deletion or confirmed absence
+     * @throws IllegalArgumentException if the provider is not registered
+     * @throws AiProviderException if cancelled, unsupported, invalid, failed, or unconfirmed
+     */
+    public AiResponseDeletion deleteResponse(
+        String providerId, String responseId, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        AiProvider selectedProvider = provider(providerId);
+        Objects.requireNonNull(token, "token");
+        try {
+            return CancellationSupport.call(providerId, token, () -> {
+                ResponseDeletionSupport.encodedId(providerId, responseId);
+                return Objects.requireNonNull(selectedProvider.deleteResponse(responseId, config, token),
+                    "AI provider deletion result");
+            });
+        } catch (AiProviderException exception) {
+            throw exception.redactSecrets(config);
+        } catch (RuntimeException exception) {
+            throw unexpectedProviderFailure(providerId, exception, config);
+        }
     }
 
     /**
