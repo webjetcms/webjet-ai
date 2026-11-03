@@ -60,6 +60,7 @@ class AiClientTest {
                 assertThrows(AiProviderException.class, () -> client.execute(request, AiProviderConfig.empty(), token)),
                 assertThrows(AiProviderException.class, () -> client.stream(request, AiProviderConfig.empty(), ignored -> { }, token)))) {
                 assertEquals(AiErrorCategory.CANCELLED, failure.category());
+                assertEquals(AiRequestLifecycle.State.NOT_SUBMITTED, failure.lifecycle().state());
                 assertFalse(failure.retryable());
             }
             assertNull(provider.executeRequest);
@@ -71,11 +72,13 @@ class AiClientTest {
     void categoriesPreserveDiagnosticsThroughCopyAndCredentialRedaction() {
         AiProviderConfig config = AiProviderConfig.builder("private-key").trustedHeader("X-Private", "header-secret").build();
         AiProviderException original = new AiProviderException("provider-private-key", 400,
-            "failure private-key", "header-secret", true, new Exception("private-key"));
+            "failure private-key", "header-secret", true, new Exception("private-key"))
+            .withLifecycle(new AiRequestLifecycle(AiRequestLifecycle.State.RESPONSE_OBSERVED, "response-private-key"));
         original.addSuppressed(new Exception("header-secret"));
         for (AiErrorCategory category : AiErrorCategory.values()) {
             AiProviderException categorized = original.withCategory(category);
             assertEquals(category, categorized.category());
+            assertEquals(original.lifecycle(), categorized.lifecycle());
             assertSame(categorized, categorized.withCategory(category));
             assertEquals(original.providerId(), categorized.providerId());
             assertEquals(original.getMessage(), categorized.getMessage());
@@ -86,11 +89,30 @@ class AiClientTest {
             AiProviderException redacted = categorized.redactSecrets(config).redactSecrets(config);
             assertEquals(category, redacted.category());
             assertEquals(400, redacted.statusCode());
+            assertEquals(AiRequestLifecycle.State.RESPONSE_OBSERVED, redacted.lifecycle().state());
+            assertFalse(redacted.lifecycle().responseId().contains("private-key"));
             assertEquals(category != AiErrorCategory.CANCELLED, redacted.retryable());
             assertRedacted(redacted, "private-key", "header-secret");
         }
         assertEquals(AiErrorCategory.UNKNOWN, original.category());
         assertSame(original, original.withCategory(null));
+    }
+
+    @Test
+    void preservesObservedStateWhenCredentialsConsumeTheEntireResponseId() {
+        AiProviderConfig config = AiProviderConfig.builder("private-key")
+            .trustedHeader("X-Private", "header-secret").build();
+        for (String id : List.of("private-key", "header-secret")) {
+            AiProviderException original = new AiProviderException("provider", 429,
+                "failure private-key", "header-secret", true)
+                .withLifecycle(new AiRequestLifecycle(AiRequestLifecycle.State.RESPONSE_OBSERVED, id));
+            AiProviderException redacted = original.redactSecrets(config).redactSecrets(config);
+            assertEquals(AiRequestLifecycle.State.RESPONSE_OBSERVED, redacted.lifecycle().state());
+            assertNull(redacted.lifecycle().responseId());
+            assertEquals(429, redacted.statusCode());
+            assertTrue(redacted.retryable());
+            assertRedacted(redacted, "private-key", "header-secret");
+        }
     }
 
     @Test

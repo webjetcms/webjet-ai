@@ -7,8 +7,10 @@ import java.util.List;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.webjetcms.ai.AiProviderException;
+import com.webjetcms.ai.AiLifecycleListener;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiStreamListener;
+import com.webjetcms.ai.internal.LifecycleSupport;
 
 /**
  * Decodes OpenAI's server-sent Responses API events into completed responses.
@@ -24,7 +26,8 @@ final class OpenAiStreamParser {
     static AiResponse parse(BufferedReader reader, AiStreamListener listener)
         throws IOException, AiProviderException {
 
-        return parse(reader, listener, false, false);
+        return parse(reader, listener, false, false,
+            new LifecycleSupport(OpenAiProvider.PROVIDER_ID, AiLifecycleListener.none()));
     }
 
     /**
@@ -35,15 +38,18 @@ final class OpenAiStreamParser {
      * @param listener non-null recipient of text fragments
      * @param chat whether to enforce chat response validation and retain the response ID
      * @param continuation whether the chat request supplies a previous response ID
+     * @param lifecycle per-call tracker notified before completion validation or text delivery
      * @return accumulated text with completion usage, finish reason, and optional response ID
      * @throws IOException if reading the stream fails
      * @throws AiProviderException if the stream fails, is malformed or incomplete, or the listener throws
      */
-    static AiResponse parse(BufferedReader reader, AiStreamListener listener, boolean chat, boolean continuation)
-        throws IOException, AiProviderException {
+    static AiResponse parse(
+        BufferedReader reader, AiStreamListener listener, boolean chat, boolean continuation,
+        LifecycleSupport lifecycle
+    ) throws IOException, AiProviderException {
 
         StringBuilder fullText = new StringBuilder();
-        StreamState state = new StreamState(chat, continuation);
+        StreamState state = new StreamState(chat, continuation, lifecycle);
         String event = null;
         StringBuilder data = new StringBuilder();
 
@@ -125,6 +131,11 @@ final class OpenAiStreamParser {
         if (state.chat && isBlank(event) == false && chunk.hasNonNull("type")
             && event.equals(textOrNull(chunk.get("type"))) == false) {
             throw streamError("OpenAI chat streaming event type does not match its payload", data, null);
+        }
+        switch (type == null ? "" : type) {
+            case "response.created", "response.in_progress", "response.queued",
+                "response.completed", "response.failed", "response.incomplete" -> state.observe(chunk.path("response"), data);
+            default -> { }
         }
         if ("response.output_text.delta".equals(type)) {
             if (state.chat && (state.completed != null || chunk.path("delta").isTextual() == false)) {
@@ -224,11 +235,26 @@ final class OpenAiStreamParser {
     private static final class StreamState {
         private final boolean chat;
         private final boolean continuation;
+        private final LifecycleSupport lifecycle;
         private AiResponse completed;
 
-        private StreamState(boolean chat, boolean continuation) {
+        private StreamState(boolean chat, boolean continuation, LifecycleSupport lifecycle) {
             this.chat = chat;
             this.continuation = chat && continuation;
+            this.lifecycle = lifecycle;
+        }
+
+        private void observe(JsonNode response, String raw) throws AiProviderException {
+            if (response.hasNonNull("id") == false) return;
+            JsonNode id = response.path("id");
+            if (id.isTextual() == false || id.textValue().isBlank()) {
+                throw streamError("OpenAI stream returned an invalid response ID", raw, null);
+            }
+            try {
+                lifecycle.onResponseId(id.textValue());
+            } catch (AiProviderException exception) {
+                throw streamError(exception.getMessage(), raw, exception);
+            }
         }
     }
 }

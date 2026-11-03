@@ -35,6 +35,20 @@ Image-operation streaming uses Gemini's streaming endpoint, but actual support i
 model-dependent. The stream listener receives only text fragments; generated
 binary media is available in the returned `AiResponse` after completion.
 
+## Response lifecycle
+
+Since `2.1.0`, the optional lifecycle observer receives IDs from Interactions creation,
+status, and completion events before completion validation. Repeated IDs are delivered
+once; conflicting IDs fail the call. Non-streaming chat observes an ID after the JSON
+body is read, even when validation later rejects an incomplete response. Known IDs
+survive listener failures and cancellation through `AiProviderException.lifecycle()`.
+
+Generation validation failures are `NOT_SUBMITTED`. Recognized Interactions request
+error codes paired with their expected HTTP status establish `REJECTED`; ambiguous
+errors, timeouts, and server failures remain `UNKNOWN` unless an ID was observed.
+The `generateContent` API does not supply Interactions IDs. An early ID never advances
+the host's successful continuation. See the [lifecycle contract](../../README.md#response-lifecycle-and-failed-attempts).
+
 ## Response deletion
 
 Since `2.1.0`, `client.deleteResponse(responseId, config)` sends `DELETE /interactions/{id}`

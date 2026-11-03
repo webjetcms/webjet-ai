@@ -99,6 +99,34 @@ not in mutable provider fields. `AiClient` validates the shared text-only chat
 constraints and cleans echoed input blocks from responses. Direct provider calls
 must perform their own request validation. See the [chat contract](../README.md#chat-and-conversation-continuation).
 
+### Lifecycle observation in 2.1.0
+
+The new `execute(request, config, token, lifecycleListener)` and
+`stream(request, config, textListener, token, lifecycleListener)` overloads have
+compatibility defaults. They delegate to existing cancellable methods, preserving
+custom cancellation behavior, and observe IDs from returned responses or failure
+lifecycle metadata. This includes cancellation after a legacy response is returned.
+Failures without adapter-supplied facts remain unknown after delegation. No new
+method is required for existing providers.
+
+Override these overloads to report `onResponseId(id)` as soon as the protocol yields
+a reliable ID, before completion validation. Keep tracking local to one invocation,
+notify once for the same ID, and reject conflicting IDs. Record the ID before invoking
+the application listener so its failure cannot discard cleanup information. Do not
+suppress lifecycle observation merely because cancellation was requested.
+
+Attach immutable facts with `exception.withLifecycle(new AiRequestLifecycle(state, id))`.
+Use `NOT_SUBMITTED` only before submission and `REJECTED` only for an explicit protocol
+rejection. Transport errors and uncertain submission outcomes are `UNKNOWN`.
+Attach a non-blank ID for `RESPONSE_OBSERVED`; redaction may replace it with null
+while preserving the state. Observation does not establish successful completion
+or permission to store data. Preserve facts when wrapping exceptions or cancellation,
+and apply `redactSecrets(config)` before exposing failures. Category copies and
+redaction preserve lifecycle state; existing exception constructors default to unknown.
+
+The host owns persistence, cleanup, retries, and successful conversation continuation.
+See the [lifecycle contract](../README.md#response-lifecycle-and-failed-attempts).
+
 ### Response deletion
 
 Version `2.1.0` adds a default `deleteResponse(responseId, config)` implementation

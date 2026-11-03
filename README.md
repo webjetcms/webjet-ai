@@ -44,8 +44,9 @@ need the core `webjet-ai` dependency shown above.
 
 Update both artifacts to `2.1.0` when using the local runtime. Java 17 remains the
 minimum version. Existing `execute`, `stream`, and exception constructors remain
-available; custom providers inherit defaults for capabilities, cancellation, and
-response deletion. The default deletion implementation reports `UNSUPPORTED_OPERATION`.
+available; custom providers inherit defaults for capabilities, cancellation,
+lifecycle observation, and response deletion. The default deletion implementation
+reports `UNSUPPORTED_OPERATION`.
 
 Handle the new `CHAT` value in exhaustive `AiOperation` switches. `AiResponse`
 adds `responseId` as its fifth record component; its four-argument constructor
@@ -161,6 +162,64 @@ input blocks echoed by the model are removed by `AiClient`, including during
 streaming; response metadata is retained. See the [OpenAI](docs/providers/openai.md#chat)
 and [Gemini](docs/providers/gemini.md#chat) guides for protocol details and
 [stable error categories](#stable-error-categories) for continuation failures.
+
+## Response lifecycle and failed attempts
+
+Since `2.1.0`, generation calls expose optional response-ID observation independently
+of streamed text. OpenAI Responses and Gemini Interactions report IDs as soon as
+their adapters read them, including before completion validation:
+
+```java
+import java.util.ArrayList;
+import java.util.List;
+import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiProviderException;
+import com.webjetcms.ai.AiRequestLifecycle;
+
+List<String> observedIds = new ArrayList<>();
+AiCancellationToken token = new AiCancellationToken();
+try {
+    AiResponse response = client.stream(
+        providerId, request, config, System.out::print, token, observedIds::add
+    );
+    String successfulContinuationId = response.responseId();
+    // The host may now advance its successful continuation.
+} catch (AiProviderException failure) {
+    AiRequestLifecycle lifecycle = failure.lifecycle();
+    String cleanupResponseId = lifecycle.responseId();
+    // Retain cleanup information and keep the previous successful continuation.
+}
+```
+
+The same observer can be passed to `execute(providerId, request, config, token, observer)`.
+Single-provider overloads omit `providerId`. Existing methods remain available and
+also retain lifecycle metadata on failures; use `AiLifecycleListener.none()` when
+calling a new overload without an observer. `AiStreamListener` remains a functional
+interface receiving text only.
+
+The observer runs synchronously on the executing thread, once for each call's ID.
+It may run after cancellation was requested so cleanup information is not lost.
+If it throws, the call fails and retains the observed ID. Non-streaming APIs can
+observe IDs only after reading the response body. Legacy providers report IDs
+from returned responses or lifecycle metadata retained on failures, including
+cancellation after a response was returned. IDs recovered from failures may
+already be redacted. If that notification throws, its failure is retained as a
+suppressed exception on the original provider failure.
+
+`failure.lifecycle().state()` describes facts independently of `retryable()`:
+
+| State | Meaning |
+| --- | --- |
+| `NOT_SUBMITTED` | Validation or cancellation stopped the call before submission. |
+| `REJECTED` | A recognized provider error explicitly rejected the request. |
+| `UNKNOWN` | Submission may have occurred, but no response ID or confirmed rejection is available. |
+| `RESPONSE_OBSERVED` | A response ID was observed, even if generation later failed or was cancelled. `responseId()` is null if credential redaction removed the entire ID. |
+
+An ID alone does not establish successful completion, storage, or retrievability.
+Only a successfully returned `AiResponse` is eligible for conversation continuation.
+Connection failures, ambiguous errors, and uninstrumented provider failures remain
+unknown; HTTP status alone is not treated as proof of rejection. The library does
+not retry, persist observations, or choose a continuation for the application.
 
 ## Deleting stored responses
 

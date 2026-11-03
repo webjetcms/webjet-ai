@@ -29,11 +29,14 @@ import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiLifecycleListener;
 import com.webjetcms.ai.AiCapabilities;
 import com.webjetcms.ai.AiCapabilities.Continuation;
 import com.webjetcms.ai.AiCapabilities.Operation;
@@ -56,6 +59,7 @@ import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
 import com.webjetcms.ai.internal.CancellationSupport;
+import com.webjetcms.ai.internal.LifecycleSupport;
 import com.webjetcms.ai.internal.ResponseDeletionSupport;
 import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.internal.ImageOptionValidator;
@@ -272,7 +276,15 @@ public final class GeminiProvider implements AiProvider {
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
         throws AiProviderException {
-        return invokeAtBoundary(config, token, () -> generate(request, config, false, null, token));
+        return execute(request, config, token, AiLifecycleListener.none());
+    }
+
+    @Override
+    public AiResponse execute(
+        AiRequest request, AiProviderConfig config, AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
+        LifecycleSupport lifecycle = new LifecycleSupport(PROVIDER_ID, lifecycleListener);
+        return lifecycle.call(config, token, () -> generate(request, config, false, null, token, lifecycle));
     }
 
     @Override
@@ -291,8 +303,17 @@ public final class GeminiProvider implements AiProvider {
         AiStreamListener listener,
         AiCancellationToken token
     ) throws AiProviderException {
-        return invokeAtBoundary(config, token, () -> generate(
-            request, config, true, CancellationSupport.listener(PROVIDER_ID, token, listener), token
+        return stream(request, config, listener, token, AiLifecycleListener.none());
+    }
+
+    @Override
+    public AiResponse stream(
+        AiRequest request, AiProviderConfig config, AiStreamListener listener,
+        AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
+        LifecycleSupport lifecycle = new LifecycleSupport(PROVIDER_ID, lifecycleListener);
+        return lifecycle.call(config, token, () -> generate(
+            request, config, true, CancellationSupport.listener(PROVIDER_ID, token, listener), token, lifecycle
         ));
     }
 
@@ -305,6 +326,7 @@ public final class GeminiProvider implements AiProvider {
      * @param stream whether to request and parse streaming output
      * @param listener fragment recipient, required only for streaming
      * @param token non-null cancellation token for this call
+     * @param lifecycle per-call lifecycle tracker
      * @return generated content and metadata, including a continuation ID for chat
      * @throws AiProviderException if validation, transport, parsing, or listener delivery fails
      */
@@ -313,7 +335,8 @@ public final class GeminiProvider implements AiProvider {
         AiProviderConfig config,
         boolean stream,
         AiStreamListener listener,
-        AiCancellationToken token
+        AiCancellationToken token,
+        LifecycleSupport lifecycle
     ) throws AiProviderException {
         requireConfigured(config);
         validateRequest(request);
@@ -335,17 +358,20 @@ public final class GeminiProvider implements AiProvider {
             : buildRequestBody(request)).toString(), JSON_UTF_8));
 
         String failureMessage = stream ? "Gemini streaming generation failed." : "Gemini generation failed.";
+        lifecycle.submitting(token);
         try (AiCancellationToken.Registration cancellation = token.onCancel(post::abort);
             CloseableHttpResponse response = httpClient.execute(post)) {
             int statusCode = response.getStatusLine().getStatusCode();
             String payload = stream ? null : entityAsString(response.getEntity());
             if (isSuccessful(statusCode) == false) {
-                throw responseFailure(statusCode, stream ? entityAsString(response.getEntity()) : payload, failureMessage);
+                String errorPayload = stream ? entityAsString(response.getEntity()) : payload;
+                trackRejection(lifecycle, statusCode, errorPayload);
+                throw responseFailure(statusCode, errorPayload, failureMessage);
             }
 
             try {
                 if (stream == false) {
-                    return chat ? GeminiInteractionsParser.parse(payload) : GeminiResponseParser.parse(payload);
+                    return chat ? GeminiInteractionsParser.parse(payload, lifecycle) : GeminiResponseParser.parse(payload);
                 }
                 HttpEntity entity = response.getEntity();
                 if (entity == null) {
@@ -355,7 +381,7 @@ public final class GeminiProvider implements AiProvider {
                     new InputStreamReader(entity.getContent(), StandardCharsets.UTF_8)
                 )) {
                     return chat
-                        ? GeminiInteractionsParser.parseStream(reader, listener)
+                        ? GeminiInteractionsParser.parseStream(reader, listener, lifecycle)
                         : GeminiResponseParser.parseStream(reader, listener);
                 }
             } catch (IOException exception) {
@@ -370,6 +396,29 @@ public final class GeminiProvider implements AiProvider {
             }
         } catch (IOException exception) {
             throw transportFailure(failureMessage, exception);
+        }
+    }
+
+    /** Classifies only documented request-rejection codes paired with their expected HTTP status. */
+    private static void trackRejection(LifecycleSupport lifecycle, int status, String payload) {
+        try {
+            JsonNode root = MAPPER.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION).readTree(payload);
+            if (root == null || root.hasNonNull("id") || root.hasNonNull("interaction")) return;
+            String code = root.path("error").path("code").asText();
+            boolean rejected = switch (status) {
+                case 400 -> Set.of("invalid_request", "failed_precondition", "parameter_unknown").contains(code);
+                case 401 -> "authentication".equals(code);
+                case 402 -> "payment_required".equals(code);
+                case 403 -> "permission_denied".equals(code);
+                case 404 -> Set.of("not_found", "model_not_found").contains(code);
+                case 416 -> "out_of_range".equals(code);
+                case 429 -> Set.of("rate_limit_exceeded", "quota_exceeded", "too_many_requests").contains(code);
+                default -> false;
+            };
+            if (rejected) lifecycle.rejected();
+        } catch (IOException ignored) {
+            // An unrecognized error body leaves the submission outcome unknown.
         }
     }
 

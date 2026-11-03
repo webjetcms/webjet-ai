@@ -34,6 +34,14 @@ uses [Semantic Versioning](https://semver.org/).
   does not retry automatically or manage conversations or local history.
 - Adapter-level `AiCapabilities.responseDeletionSupport()` metadata. OpenAI and
   Gemini report support; OpenRouter and local providers report unsupported.
+- Optional `AiLifecycleListener` overloads for `execute` and `stream`, exposing
+  OpenAI response IDs and Gemini interaction IDs before completion validation.
+  Lifecycle observation is independent of text filtering and never advances
+  successful conversation continuation.
+- Immutable `AiRequestLifecycle` metadata on `AiProviderException`, distinguishing
+  not-submitted attempts, explicit rejections, unknown remote outcomes, and
+  observed response IDs. Known facts survive cancellation, listener failures,
+  exception category changes, and credential redaction; retryability stays separate.
 - Per-call `AiCancellationToken` overloads for synchronous `execute` and `stream`,
   aborting only the active HTTP request in OpenAI, Gemini, and OpenRouter while
   retaining existing signatures and shared transport resources.
@@ -66,6 +74,10 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Compatibility
 
+- Existing execution signatures and text-listener lambdas remain available.
+  Custom providers inherit lifecycle overloads that observe returned responses;
+  earlier IDs and precise submission outcomes require adapter support. Existing
+  exception constructors and older serialized failures default to unknown lifecycle.
 - Custom providers inherit `UNSUPPORTED_OPERATION` for deletion and need no new
   implementations. The three-argument `AiCapabilities` constructor is available
   with deletion support `UNKNOWN`. The fourth record component,

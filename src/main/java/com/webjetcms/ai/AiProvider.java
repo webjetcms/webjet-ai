@@ -5,6 +5,7 @@ import java.util.Map;
 
 import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.internal.CancellationSupport;
+import com.webjetcms.ai.internal.LifecycleSupport;
 
 /**
  * Provider contract implemented by each supported AI backend.
@@ -156,11 +157,33 @@ public interface AiProvider extends AutoCloseable {
      */
     default AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
         throws AiProviderException {
-        try {
-            return CancellationSupport.call(id(), token, () -> execute(request, config));
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
-        }
+        LifecycleSupport lifecycle = new LifecycleSupport(id(), AiLifecycleListener.none());
+        return lifecycle.call(config, token, () -> {
+            lifecycle.submitting(token);
+            return execute(request, config);
+        });
+    }
+
+    /**
+     * Executes with optional response-ID observation. Legacy implementations report IDs
+     * from returned responses or failure lifecycle metadata. Failures without lifecycle
+     * metadata leave submission outcomes unknown.
+     *
+     * @param request operation and inputs
+     * @param config credentials and transport settings
+     * @param token per-call cancellation token
+     * @param lifecycleListener non-null observer; use {@link AiLifecycleListener#none()} to ignore IDs
+     * @return successfully completed response
+     * @throws AiProviderException if execution, cancellation, or observation fails
+     */
+    default AiResponse execute(
+        AiRequest request, AiProviderConfig config, AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
+        LifecycleSupport lifecycle = new LifecycleSupport(id(), lifecycleListener);
+        return lifecycle.call(config, token, () -> {
+            lifecycle.submitting(token);
+            return execute(request, config, token);
+        });
     }
 
     /**
@@ -213,12 +236,34 @@ public interface AiProvider extends AutoCloseable {
     default AiResponse stream(
         AiRequest request, AiProviderConfig config, AiStreamListener listener, AiCancellationToken token
     ) throws AiProviderException {
-        try {
-            return CancellationSupport.call(id(), token,
-                () -> stream(request, config, CancellationSupport.listener(id(), token, listener)));
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
-        }
+        LifecycleSupport lifecycle = new LifecycleSupport(id(), AiLifecycleListener.none());
+        return lifecycle.call(config, token, () -> {
+            lifecycle.submitting(token);
+            return stream(request, config, CancellationSupport.listener(id(), token, listener));
+        });
+    }
+
+    /**
+     * Streams text with a separate response-ID observer. The compatibility default observes
+     * returned responses and failure lifecycle metadata; adapters may expose IDs before text arrives.
+     *
+     * @param request operation and inputs
+     * @param config credentials and transport settings
+     * @param listener text fragment listener
+     * @param token per-call cancellation token
+     * @param lifecycleListener non-null observer; use {@link AiLifecycleListener#none()} to ignore IDs
+     * @return successfully completed response
+     * @throws AiProviderException if streaming, cancellation, or observation fails
+     */
+    default AiResponse stream(
+        AiRequest request, AiProviderConfig config, AiStreamListener listener,
+        AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
+        LifecycleSupport lifecycle = new LifecycleSupport(id(), lifecycleListener);
+        return lifecycle.call(config, token, () -> {
+            lifecycle.submitting(token);
+            return stream(request, config, listener, token);
+        });
     }
 
     /**

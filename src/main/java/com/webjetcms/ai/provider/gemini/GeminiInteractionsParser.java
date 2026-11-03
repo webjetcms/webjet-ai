@@ -10,6 +10,7 @@ import java.util.Map;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.webjetcms.ai.AiResponse;
+import com.webjetcms.ai.AiLifecycleListener;
 import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.TokenUsage;
 
@@ -34,7 +35,13 @@ final class GeminiInteractionsParser {
      * @throws IOException if the payload is malformed, incomplete, requires a function call or has no usable text
      */
     static AiResponse parse(String payload) throws IOException {
+        return parse(payload, AiLifecycleListener.none());
+    }
+
+    /** Exposes a returned ID before checking whether the interaction completed successfully. */
+    static AiResponse parse(String payload, AiLifecycleListener lifecycle) throws IOException {
         JsonNode root = parseObject(payload);
+        if (root.path("id").isTextual()) observeId(lifecycle, root.path("id").textValue());
         rejectError(root);
         String id = requiredText(root, "id");
         requireCompleted(root);
@@ -76,7 +83,14 @@ final class GeminiInteractionsParser {
      * @throws IOException if reading fails, events are invalid, completion is missing or the listener fails
      */
     static AiResponse parseStream(BufferedReader reader, AiStreamListener listener) throws IOException {
-        Accumulator accumulator = new Accumulator(listener);
+        return parseStream(reader, listener, AiLifecycleListener.none());
+    }
+
+    /** Exposes IDs from creation, status, and completion events independently of text delivery. */
+    static AiResponse parseStream(
+        BufferedReader reader, AiStreamListener listener, AiLifecycleListener lifecycle
+    ) throws IOException {
+        Accumulator accumulator = new Accumulator(listener, lifecycle);
         StringBuilder data = new StringBuilder();
         String event = null;
         String line;
@@ -96,6 +110,15 @@ final class GeminiInteractionsParser {
         }
         accumulator.accept(event, data.toString());
         return accumulator.result();
+    }
+
+    private static void observeId(AiLifecycleListener lifecycle, String id) throws IOException {
+        if (id.isBlank()) return;
+        try {
+            lifecycle.onResponseId(id);
+        } catch (Exception exception) {
+            throw new IOException("The Gemini lifecycle listener rejected a response ID.", exception);
+        }
     }
 
     private static String fieldValue(String line, int start) {
@@ -216,14 +239,16 @@ final class GeminiInteractionsParser {
     /** Tracks active steps and completion while collecting text for a single interaction stream. */
     private static final class Accumulator {
         private final AiStreamListener listener;
+        private final AiLifecycleListener lifecycle;
         private final StringBuilder text = new StringBuilder();
         private final Map<Integer, String> activeSteps = new HashMap<>();
         private String id;
         private JsonNode completed;
         private boolean done;
 
-        private Accumulator(AiStreamListener listener) {
+        private Accumulator(AiStreamListener listener, AiLifecycleListener lifecycle) {
             this.listener = listener;
+            this.lifecycle = lifecycle;
         }
 
         /**
@@ -288,8 +313,8 @@ final class GeminiInteractionsParser {
                 }
                 case "interaction.completed" -> {
                     JsonNode interaction = root.path("interaction");
-                    requireCompleted(interaction);
                     readId(interaction);
+                    requireCompleted(interaction);
                     if (activeSteps.isEmpty() == false) {
                         throw new IOException("Gemini interaction stream completed with unfinished steps.");
                     }
@@ -305,10 +330,12 @@ final class GeminiInteractionsParser {
         }
 
         private void acceptId(String receivedId) throws IOException {
-            if (id != null && id.equals(receivedId) == false) {
+            if (id != null) {
+                if (id.equals(receivedId)) return;
                 throw new IOException("Gemini interaction stream returned inconsistent IDs.");
             }
             id = receivedId;
+            observeId(lifecycle, id);
         }
 
         private static int stepIndex(JsonNode root) throws IOException {

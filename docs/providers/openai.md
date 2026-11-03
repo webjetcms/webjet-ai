@@ -125,6 +125,20 @@ content is excluded, and tool-call or incomplete output fails with
 matches the accumulated text. `AiClient` removes echoed internal input blocks
 while preserving usage, the response ID, and the `completed` finish reason.
 
+## Response lifecycle
+
+Since `2.1.0`, the optional lifecycle observer receives IDs from Responses creation,
+progress, and terminal events before completion validation. Repeated IDs are delivered
+once; conflicting IDs fail the call. Non-streaming text/chat responses expose their ID
+after the JSON body is read, including when completion validation subsequently fails.
+Observed IDs survive text-listener failures, lifecycle-listener failures, and cancellation
+through `AiProviderException.lifecycle()`.
+
+Generation validation failures are `NOT_SUBMITTED`. Recognized structured client-error
+rejections are `REJECTED`; ambiguous bodies, timeouts, and server failures remain
+`UNKNOWN` unless an ID was already observed. An observed ID does not advance the
+host's successful continuation. See the [lifecycle contract](../../README.md#response-lifecycle-and-failed-attempts).
+
 ## Response deletion
 
 Since `2.1.0`, `client.deleteResponse(responseId, config)` sends `DELETE /responses/{id}` using

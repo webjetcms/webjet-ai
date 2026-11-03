@@ -31,11 +31,14 @@ import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiLifecycleListener;
 import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiCapabilities;
 import com.webjetcms.ai.AiCapabilities.Continuation;
@@ -58,6 +61,7 @@ import com.webjetcms.ai.GeneratedMedia;
 import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.internal.CancellationSupport;
+import com.webjetcms.ai.internal.LifecycleSupport;
 import com.webjetcms.ai.internal.ResponseDeletionSupport;
 import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.ModelInfo;
@@ -234,7 +238,15 @@ public final class OpenAiProvider implements AiProvider {
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
         throws AiProviderException {
-        return invokeAtBoundary(config, token, () -> executeInternal(request, config, token));
+        return execute(request, config, token, AiLifecycleListener.none());
+    }
+
+    @Override
+    public AiResponse execute(
+        AiRequest request, AiProviderConfig config, AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
+        LifecycleSupport lifecycle = new LifecycleSupport(PROVIDER_ID, lifecycleListener);
+        return lifecycle.call(config, token, () -> executeInternal(request, config, token, lifecycle));
     }
 
     /**
@@ -243,13 +255,15 @@ public final class OpenAiProvider implements AiProvider {
      * @param request operation and inputs to validate and send
      * @param config credentials, endpoint, and transport settings
      * @param token non-null cancellation token for the active HTTP request
+     * @param lifecycle per-call lifecycle tracker
      * @return generated content and operation-specific metadata
      * @throws AiProviderException if validation, request creation, transport, or response parsing fails
      */
     private AiResponse executeInternal(
         AiRequest request,
         AiProviderConfig config,
-        AiCancellationToken token
+        AiCancellationToken token,
+        LifecycleSupport lifecycle
     ) throws AiProviderException {
         requireRequest(request);
         ChatRequestValidator.validate(PROVIDER_ID, request);
@@ -258,9 +272,9 @@ public final class OpenAiProvider implements AiProvider {
 
         try {
             return switch (request.operation()) {
-                case TEXT, CHAT -> executeText(request, config, token);
-                case GENERATE_IMAGE -> generateImage(request, config, token);
-                case EDIT_IMAGE -> editImage(request, config, token);
+                case TEXT, CHAT -> executeText(request, config, token, lifecycle);
+                case GENERATE_IMAGE -> generateImage(request, config, token, lifecycle);
+                case EDIT_IMAGE -> editImage(request, config, token, lifecycle);
             };
         } catch (RuntimeException exception) {
             throw new AiProviderException(PROVIDER_ID, "Could not create the OpenAI request", exception);
@@ -329,8 +343,17 @@ public final class OpenAiProvider implements AiProvider {
         AiStreamListener listener,
         AiCancellationToken token
     ) throws AiProviderException {
-        return invokeAtBoundary(config, token, () -> streamInternal(
-            request, config, CancellationSupport.listener(PROVIDER_ID, token, listener), token
+        return stream(request, config, listener, token, AiLifecycleListener.none());
+    }
+
+    @Override
+    public AiResponse stream(
+        AiRequest request, AiProviderConfig config, AiStreamListener listener,
+        AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
+        LifecycleSupport lifecycle = new LifecycleSupport(PROVIDER_ID, lifecycleListener);
+        return lifecycle.call(config, token, () -> streamInternal(
+            request, config, CancellationSupport.listener(PROVIDER_ID, token, listener), token, lifecycle
         ));
     }
 
@@ -341,6 +364,7 @@ public final class OpenAiProvider implements AiProvider {
      * @param config credentials, endpoint, and transport settings
      * @param listener non-null recipient of generated text fragments
      * @param token non-null cancellation token for this call
+     * @param lifecycle per-call lifecycle tracker
      * @return accumulated text and completion metadata, including a response ID for chat
      * @throws AiProviderException if validation, transport, parsing, or listener delivery fails
      */
@@ -348,7 +372,8 @@ public final class OpenAiProvider implements AiProvider {
         AiRequest request,
         AiProviderConfig config,
         AiStreamListener listener,
-        AiCancellationToken token
+        AiCancellationToken token,
+        LifecycleSupport lifecycle
     ) throws AiProviderException {
 
         requireRequest(request);
@@ -369,11 +394,13 @@ public final class OpenAiProvider implements AiProvider {
         HttpPost post = jsonPost(endpoint(config, RESPONSES_PATH), body);
         prepare(post, config, "text/event-stream");
 
+        lifecycle.submitting(token);
         try (AiCancellationToken.Registration cancellation = token.onCancel(post::abort);
              CloseableHttpResponse response = httpClient.execute(post)) {
             int statusCode = response.getStatusLine().getStatusCode();
             if (isSuccessful(statusCode) == false) {
                 String bodyText = readEntity(response.getEntity());
+                trackRejection(lifecycle, statusCode, bodyText);
                 throw httpError(statusCode, bodyText, isContinuation(request));
             }
 
@@ -388,7 +415,8 @@ public final class OpenAiProvider implements AiProvider {
                     reader,
                     listener,
                     request.operation() == AiOperation.CHAT,
-                    isContinuation(request)
+                    isContinuation(request),
+                    lifecycle
                 );
             }
         } catch (IOException exception) {
@@ -407,18 +435,22 @@ public final class OpenAiProvider implements AiProvider {
      * @param request validated text or chat request
      * @param config credentials, endpoint, and transport settings
      * @param token cancellation token for the active HTTP request
+     * @param lifecycle per-call lifecycle tracker
      * @return generated text, usage, and completion metadata
      * @throws AiProviderException if transport or response validation fails
      */
-    private AiResponse executeText(AiRequest request, AiProviderConfig config, AiCancellationToken token)
-        throws AiProviderException {
+    private AiResponse executeText(
+        AiRequest request, AiProviderConfig config, AiCancellationToken token, LifecycleSupport lifecycle
+    ) throws AiProviderException {
         HttpPost post = jsonPost(endpoint(config, RESPONSES_PATH), buildTextBody(request));
-        String response = executeForResult(post, config, token, isContinuation(request)).body();
+        String response = executeForResult(post, config, token, isContinuation(request), lifecycle).body();
 
         try {
+            JsonNode root = MAPPER.readTree(response);
+            if (root != null && root.path("id").isTextual()) lifecycle.onResponseId(root.path("id").textValue());
             return request.operation() == AiOperation.CHAT
-                ? parseChatResponse(MAPPER.readTree(response), response, isContinuation(request))
-                : parseTextResponse(response);
+                ? parseChatResponse(root, response, isContinuation(request))
+                : parseTextResponse(root, response);
         } catch (IOException | RuntimeException exception) {
             throw invalidResponse("Could not parse the OpenAI text response", response, exception);
         }
@@ -430,11 +462,13 @@ public final class OpenAiProvider implements AiProvider {
      * @param request image-generation request with a meaningful prompt
      * @param config credentials, endpoint, and transport settings
      * @param token cancellation token for the active HTTP request
+     * @param lifecycle per-call lifecycle tracker
      * @return decoded generated images and available usage metadata
      * @throws AiProviderException if validation, transport, or response parsing fails
      */
-    private AiResponse generateImage(AiRequest request, AiProviderConfig config, AiCancellationToken token)
-        throws AiProviderException {
+    private AiResponse generateImage(
+        AiRequest request, AiProviderConfig config, AiCancellationToken token, LifecycleSupport lifecycle
+    ) throws AiProviderException {
         if (hasMeaningfulImagePrompt(request) == false) {
             throw new AiProviderException(PROVIDER_ID, "An image prompt is required");
         }
@@ -450,7 +484,7 @@ public final class OpenAiProvider implements AiProvider {
         }
 
         HttpPost post = jsonPost(endpoint(config, IMAGE_GENERATIONS_PATH), body);
-        return executeImage(post, config, (String) imageOptions.get("output_format"), token);
+        return executeImage(post, config, (String) imageOptions.get("output_format"), token, lifecycle);
     }
 
     /**
@@ -459,11 +493,13 @@ public final class OpenAiProvider implements AiProvider {
      * @param request edit request containing input media and a meaningful prompt
      * @param config credentials, endpoint, and transport settings
      * @param token cancellation token for the active HTTP request
+     * @param lifecycle per-call lifecycle tracker
      * @return decoded edited images and available usage metadata
      * @throws AiProviderException if editing is unsupported or validation, transport, or parsing fails
      */
-    private AiResponse editImage(AiRequest request, AiProviderConfig config, AiCancellationToken token)
-        throws AiProviderException {
+    private AiResponse editImage(
+        AiRequest request, AiProviderConfig config, AiCancellationToken token, LifecycleSupport lifecycle
+    ) throws AiProviderException {
         if ("dall-e-3".equals(request.model())) {
             throw new AiProviderException(PROVIDER_ID,
                 "Image editing with " + request.model() + " is not supported by this provider adapter")
@@ -483,7 +519,7 @@ public final class OpenAiProvider implements AiProvider {
         Map<String, Object> imageOptions = OpenAiImageOptions.validate(PROVIDER_ID, request);
         HttpPost post = new HttpPost(endpoint(config, IMAGE_EDITS_PATH));
         post.setEntity(buildImageEditEntity(request, input, prompt, imageOptions));
-        return executeImage(post, config, (String) imageOptions.get("output_format"), token);
+        return executeImage(post, config, (String) imageOptions.get("output_format"), token, lifecycle);
     }
 
     /**
@@ -580,6 +616,7 @@ public final class OpenAiProvider implements AiProvider {
      * @param config credentials and transport settings
      * @param requestedFormat output format used when response metadata omits it; may be {@code null}
      * @param token cancellation token for the active HTTP request
+     * @param lifecycle per-call lifecycle tracker
      * @return decoded image media and available usage metadata
      * @throws AiProviderException if transport or response parsing fails
      */
@@ -587,9 +624,10 @@ public final class OpenAiProvider implements AiProvider {
         HttpPost post,
         AiProviderConfig config,
         String requestedFormat,
-        AiCancellationToken token
+        AiCancellationToken token,
+        LifecycleSupport lifecycle
     ) throws AiProviderException {
-        String response = executeForResult(post, config, token, false).body();
+        String response = executeForResult(post, config, token, false, lifecycle).body();
         try {
             return parseImageResponse(response, requestedFormat);
         } catch (IOException | RuntimeException exception) {
@@ -672,13 +710,12 @@ public final class OpenAiProvider implements AiProvider {
     /**
      * Parses generated text and usage while rejecting explicit unsuccessful response statuses.
      *
+     * @param root parsed response object
      * @param response JSON response body
      * @return output text, which may be empty, with usage and optional finish status
-     * @throws IOException if JSON decoding fails
      * @throws AiProviderException if the response is invalid, unsuccessful, or lacks output text
      */
-    static AiResponse parseTextResponse(String response) throws IOException, AiProviderException {
-        JsonNode root = MAPPER.readTree(response);
+    static AiResponse parseTextResponse(JsonNode root, String response) throws AiProviderException {
         ensureSuccessfulResponse(root, response, false);
 
         String text = outputText(root, false);
@@ -1021,17 +1058,46 @@ public final class OpenAiProvider implements AiProvider {
         AiCancellationToken token,
         boolean continuation
     ) throws AiProviderException {
+        return executeForResult(request, config, token, continuation, null);
+    }
+
+    /** Sends generation requests with submission tracking; other operations may omit the tracker. */
+    private HttpResult executeForResult(
+        HttpRequestBase request, AiProviderConfig config, AiCancellationToken token,
+        boolean continuation, LifecycleSupport lifecycle
+    ) throws AiProviderException {
         prepare(request, config, "application/json");
+        if (lifecycle != null) lifecycle.submitting(token);
         try (AiCancellationToken.Registration cancellation = token.onCancel(request::abort);
              CloseableHttpResponse response = httpClient.execute(request)) {
             int statusCode = response.getStatusLine().getStatusCode();
             String body = readEntity(response.getEntity());
             if (isSuccessful(statusCode) == false) {
+                trackRejection(lifecycle, statusCode, body);
                 throw httpError(statusCode, body, continuation);
             }
             return new HttpResult(statusCode, body);
         } catch (IOException exception) {
             throw transportFailure("OpenAI request failed", exception);
+        }
+    }
+
+    /** Recognizes explicit client-request rejections; transport, timeout, and server failures stay unknown. */
+    private static void trackRejection(LifecycleSupport lifecycle, int status, String payload) {
+        if (lifecycle == null || (status != 400 && status != 401 && status != 403
+            && status != 404 && status != 422 && status != 429)) return;
+        try {
+            JsonNode root = MAPPER.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION).readTree(payload);
+            if (root == null || root.hasNonNull("id") || root.hasNonNull("response")) return;
+            String type = root.path("error").path("type").asText();
+            if ("invalid_request_error".equals(type) || "authentication_error".equals(type)
+                || "permission_error".equals(type) || "rate_limit_error".equals(type)
+                || "insufficient_quota".equals(type)) {
+                lifecycle.rejected();
+            }
+        } catch (IOException ignored) {
+            // An unrecognized error body cannot establish rejection before response creation.
         }
     }
 

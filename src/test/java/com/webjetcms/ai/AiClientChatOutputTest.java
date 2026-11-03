@@ -24,13 +24,15 @@ class AiClientChatOutputTest {
         AiRequest request = request(AiOperation.CHAT);
         try (AiClient client = AiClient.of(provider)) {
             var deltas = new ArrayList<String>();
-            for (AiResponse result : List.of(client.execute(request, AiProviderConfig.empty()),
-                client.stream(request, AiProviderConfig.empty(), deltas::add),
+            var ids = new ArrayList<String>();
+            for (AiResponse result : List.of(client.execute(request, AiProviderConfig.empty(), AiCancellationToken.none(), ids::add),
+                client.stream(request, AiProviderConfig.empty(), deltas::add, AiCancellationToken.none(), ids::add),
                 client.stream(request, AiProviderConfig.empty(), null))) {
                 assertEquals(new AiResponse(ANSWER, provider.response.media(), provider.response.usage(),
                     "completed", "response-id"), result);
             }
             assertEquals(ANSWER, String.join("", deltas));
+            assertEquals(List.of("response-id", "response-id"), ids);
             assertEquals(INSTRUCTIONS, request.instructions());
             assertTrue(provider.prepared.instructions().contains(INSTRUCTIONS));
             assertTrue(provider.prepared.instructions().contains("Do not echo the user's question"));
@@ -66,6 +68,53 @@ class AiClientChatOutputTest {
             assertEquals(AiErrorCategory.CANCELLED, failure.category());
             assertTrue(deltas.isEmpty());
         }
+
+        for (boolean streaming : new boolean[] {false, true}) {
+            AiCancellationToken afterReturn = new AiCancellationToken();
+            EchoingProvider completed = new EchoingProvider(ANSWER);
+            completed.beforeReturn = afterReturn::cancel;
+            List<String> ids = new ArrayList<>();
+            try (AiClient client = AiClient.of(completed)) {
+                AiProviderException failure = assertThrows(AiProviderException.class, () -> {
+                    if (streaming) client.stream(request(AiOperation.CHAT), AiProviderConfig.empty(),
+                        text -> { }, afterReturn, ids::add);
+                    else client.execute(request(AiOperation.CHAT), AiProviderConfig.empty(), afterReturn, ids::add);
+                });
+                assertEquals(AiErrorCategory.CANCELLED, failure.category());
+                assertEquals("response-id", failure.lifecycle().responseId());
+                assertEquals(List.of("response-id"), ids);
+            }
+        }
+    }
+
+    @Test
+    void preservesProviderFailureWhenARecoveredObserverCancelsAndThrows() throws Exception {
+        AiCancellationToken token = new AiCancellationToken();
+        AiProviderException original = new AiProviderException("echoing", 503, "Generation stopped", "diagnostics", true)
+            .withLifecycle(new AiRequestLifecycle(AiRequestLifecycle.State.RESPONSE_OBSERVED, "response-id"));
+        EchoingProvider provider = new EchoingProvider(ANSWER) {
+            @Override public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken cancellation)
+                throws AiProviderException {
+                throw original;
+            }
+        };
+        List<String> ids = new ArrayList<>();
+        try (AiClient client = AiClient.of(provider)) {
+            AiProviderException failure = assertThrows(AiProviderException.class,
+                () -> client.execute(request(AiOperation.CHAT), AiProviderConfig.empty(), token, id -> {
+                    ids.add(id);
+                    token.cancel();
+                    throw new Exception("Observer failed");
+                }));
+            assertEquals(List.of("response-id"), ids);
+            assertEquals(AiErrorCategory.CANCELLED, failure.category());
+            assertEquals(original.lifecycle(), failure.lifecycle());
+            assertEquals(503, failure.statusCode());
+            assertEquals(original.getMessage(), failure.getMessage());
+            assertEquals(original.rawResponse(), failure.rawResponse());
+            assertEquals(1, failure.getSuppressed().length);
+            assertEquals(0, original.getSuppressed().length);
+        }
     }
 
     @Test
@@ -76,6 +125,7 @@ class AiClientChatOutputTest {
                     delta -> { throw new Exception("private-key"); }));
             assertFalse(failure.getMessage().contains("private-key"));
             assertFalse(failure.getCause().getMessage().contains("private-key"));
+            assertEquals("response-id", failure.lifecycle().responseId());
         }
     }
 
@@ -84,10 +134,11 @@ class AiClientChatOutputTest {
             .userPrompt("Aké je hlavné mesto Slovenska?").build();
     }
 
-    private static final class EchoingProvider implements AiProvider {
+    private static class EchoingProvider implements AiProvider {
         private final AiResponse response;
         private AiRequest prepared;
         private Runnable beforeDelta = () -> { };
+        private Runnable beforeReturn = () -> { };
 
         private EchoingProvider(String text) {
             response = new AiResponse(text, List.of(), new TokenUsage(1, 2, 3, Map.of()), "completed", "response-id");
@@ -97,6 +148,7 @@ class AiClientChatOutputTest {
         @Override public List<ModelInfo> listModels(AiProviderConfig config) { return List.of(); }
         @Override public AiResponse execute(AiRequest request, AiProviderConfig config) {
             prepared = request;
+            beforeReturn.run();
             return response;
         }
         @Override public AiResponse stream(AiRequest request, AiProviderConfig config, AiStreamListener listener)
@@ -114,6 +166,7 @@ class AiClientChatOutputTest {
                     throw new AiProviderException(id(), "Listener failed", exception);
                 }
             }
+            beforeReturn.run();
             return response;
         }
     }

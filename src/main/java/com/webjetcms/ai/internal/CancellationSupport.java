@@ -3,6 +3,7 @@ package com.webjetcms.ai.internal;
 import java.util.Objects;
 
 import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiErrorCategory;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiStreamListener;
 
@@ -30,7 +31,9 @@ public final class CancellationSupport {
             T result = operation.invoke();
             token.throwIfCancelled(providerId);
             return result;
-        } catch (AiProviderException | RuntimeException exception) {
+        } catch (AiProviderException exception) {
+            throw token.isCancelled() ? exception.withCategory(AiErrorCategory.CANCELLED) : exception;
+        } catch (RuntimeException exception) {
             token.throwIfCancelled(providerId);
             throw exception;
         }

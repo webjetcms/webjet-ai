@@ -209,6 +209,7 @@ class OpenAiProviderTest {
     void rejectsMalformedOrMismatchedChatStreams() throws Exception {
         for (String stream : List.of(
             chatStream("partial", completedChat("resp_done", "complete")),
+            chatStream("Hello", completedChat("resp_done", "Hello")).replaceFirst("resp_done", "resp_other"),
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: [DONE]\n\n",
             "data: null\n\n",
             "event: response.output_text.delta\ndata: {\"type\":\"response.completed\",\"delta\":\"text\"}\n\n",
@@ -261,7 +262,14 @@ class OpenAiProviderTest {
     }
 
     private static String chatStream(String delta, String completion) {
-        return "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_created\"}}\n\n"
+        String id = "resp_created";
+        try {
+            JsonNode response = MAPPER.readTree(completion);
+            if (response != null && response.path("id").isTextual()) id = response.path("id").textValue();
+        } catch (IOException ignored) {
+            // Malformed terminal payloads intentionally have no matching ID to copy.
+        }
+        return "data: {\"type\":\"response.created\",\"response\":{\"id\":\"" + id + "\"}}\n\n"
             + "data: " + MAPPER.createObjectNode().put("type", "response.output_text.delta").put("delta", delta)
             + "\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + completion + "}\n\n";
     }
@@ -797,7 +805,7 @@ class OpenAiProviderTest {
 
     @Test
     void parsesTextAndUsageWhileIgnoringReasoningOutput() throws Exception {
-        AiResponse response = OpenAiProvider.parseTextResponse("""
+        String payload = """
             {
               "status": "completed",
               "output": [
@@ -814,7 +822,8 @@ class OpenAiProviderTest {
                 "input_tokens_details": {"cached_tokens": 3}
               }
             }
-            """);
+            """;
+        AiResponse response = OpenAiProvider.parseTextResponse(new ObjectMapper().readTree(payload), payload);
 
         assertEquals("Hello world", response.text());
         assertEquals("completed", response.finishReason());
