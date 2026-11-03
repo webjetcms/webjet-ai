@@ -20,6 +20,7 @@ public final class AiRequest {
     private final String userPrompt;
     private final BinaryContent inputMedia;
     private final boolean store;
+    private final String previousResponseId;
     private final TranslationOptions translationOptions;
     private final ImageOptions imageOptions;
     private final ProtectionResult inputTextProtection;
@@ -46,6 +47,7 @@ public final class AiRequest {
         userPrompt = builder.userPrompt;
         inputMedia = builder.inputMedia;
         store = builder.store;
+        previousResponseId = builder.previousResponseId;
         translationOptions = builder.translationOptions;
         imageOptions = builder.imageOptions;
         this.inputTextProtection = Objects.requireNonNull(inputTextProtection, "inputTextProtection");
@@ -70,6 +72,7 @@ public final class AiRequest {
             .userPrompt(source.userPromptProtection.protectedText())
             .inputMedia(source.inputMedia)
             .store(source.store)
+            .previousResponseId(source.previousResponseId)
             .translationOptions(source.translationOptions)
             .imageOptions(source.imageOptions);
         return new AiRequest(builder, source.inputTextProtection, source.userPromptProtection);
@@ -132,6 +135,13 @@ public final class AiRequest {
     public boolean store() { return store; }
 
     /**
+     * Returns the provider-specific response ID used to continue a chat.
+     *
+     * @return the previous response ID, or {@code null} to start a new conversation
+     */
+    public String previousResponseId() { return previousResponseId; }
+
+    /**
      * Returns optional settings for text translation.
      *
      * @return translation settings, or {@code null} to use provider defaults
@@ -178,6 +188,7 @@ public final class AiRequest {
         private String userPrompt;
         private BinaryContent inputMedia;
         private boolean store;
+        private String previousResponseId;
         private TranslationOptions translationOptions;
         private ImageOptions imageOptions;
 
@@ -238,6 +249,20 @@ public final class AiRequest {
          * @return this builder
          */
         public Builder store(boolean store) { this.store = store; return this; }
+
+        /**
+         * Supplies a previous {@link AiResponse#responseId()} from the same provider to continue a chat.
+         *
+         * <p>Continuation is supported only for {@link AiOperation#CHAT}, which requires
+         * explicit storage opt-in through {@link #store(boolean) store(true)}.</p>
+         *
+         * @param previousResponseId non-blank provider-specific ID, or {@code null} to start a new conversation
+         * @return this builder
+         */
+        public Builder previousResponseId(String previousResponseId) {
+            this.previousResponseId = previousResponseId;
+            return this;
+        }
 
         /**
          * Supplies optional translation settings.

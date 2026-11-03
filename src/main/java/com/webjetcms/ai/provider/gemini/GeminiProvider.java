@@ -19,6 +19,7 @@ import java.util.Set;
 import org.apache.http.HttpEntity;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpDelete;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpRequestBase;
@@ -28,16 +29,25 @@ import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiLifecycleListener;
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Operation;
+import com.webjetcms.ai.AiCapabilities.Support;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProvider;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
+import com.webjetcms.ai.AiResponseDeletion;
 import com.webjetcms.ai.AiStreamListener;
 import com.webjetcms.ai.BinaryContent;
 import com.webjetcms.ai.EmbeddingOptions;
@@ -48,11 +58,18 @@ import com.webjetcms.ai.image.ImageOptionDefinition;
 import com.webjetcms.ai.image.ImageOptions;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
+import com.webjetcms.ai.internal.CancellationSupport;
+import com.webjetcms.ai.internal.LifecycleSupport;
+import com.webjetcms.ai.internal.ResponseDeletionSupport;
+import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.internal.ImageOptionValidator;
 import com.webjetcms.ai.security.PromptInjectionDefense;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 
-/** Framework-neutral Google Gemini REST provider. */
+/**
+ * Framework-neutral Google Gemini REST provider for generation, chat, and embeddings.
+ * Reuse the provider's pooled HTTP client and close the provider when it is no longer needed.
+ */
 public final class GeminiProvider implements AiProvider {
 
     /** Stable provider identifier used by {@code AiClient}. */
@@ -93,7 +110,73 @@ public final class GeminiProvider implements AiProvider {
 
     @Override
     public List<ModelInfo> listModels(AiProviderConfig config) throws AiProviderException {
-        return invokeAtBoundary(config, () -> listModelsInternal(config));
+        return invokeAtBoundary(config, AiCancellationToken.none(), () -> listModelsInternal(config));
+    }
+
+    @Override
+    public AiResponseDeletion deleteResponse(String responseId, AiProviderConfig config) throws AiProviderException {
+        return deleteResponse(responseId, config, AiCancellationToken.none());
+    }
+
+    @Override
+    public AiResponseDeletion deleteResponse(
+        String responseId, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        return invokeAtBoundary(config, token, () -> deleteResponseInternal(responseId, config, token));
+    }
+
+    /** Deletes one Interactions resource, requiring the documented empty success or explicit resource absence. */
+    private AiResponseDeletion deleteResponseInternal(
+        String responseId, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        requireConfigured(config);
+        HttpDelete request = new HttpDelete(URI.create(interactionsUri(config).toString()
+            + "/" + ResponseDeletionSupport.encodedId(PROVIDER_ID, responseId)));
+        configure(request, config, false);
+        try (AiCancellationToken.Registration cancellation = token.onCancel(request::abort);
+             CloseableHttpResponse response = httpClient.execute(request)) {
+            int status = response.getStatusLine().getStatusCode();
+            String payload;
+            try {
+                payload = ResponseDeletionSupport.readBody(response.getEntity());
+            } catch (ResponseDeletionSupport.ResponseTooLargeException exception) {
+                throw new AiProviderException(PROVIDER_ID, status, exception.getMessage(), null,
+                    isRetryable(status), exception);
+            }
+            JsonNode body;
+            try {
+                body = payload.isBlank() ? MAPPER.createObjectNode() : ResponseDeletionSupport.readObject(payload);
+            } catch (IOException exception) {
+                if (isSuccessful(status) == false) {
+                    throw responseFailure(status, payload, "Gemini response deletion failed.");
+                }
+                throw invalidResponse(status, "Gemini did not confirm response deletion.", payload, exception);
+            }
+            if ((status == 200 || status == 204) && body.isEmpty()) {
+                return AiResponseDeletion.DELETED;
+            }
+            if (status == 404 && isDeletedInteractionAbsent(body.path("error"), responseId)) {
+                return AiResponseDeletion.ALREADY_ABSENT;
+            }
+            if (isSuccessful(status) == false) {
+                throw responseFailure(status, payload, "Gemini response deletion failed.");
+            }
+            throw invalidResponse(status, "Gemini did not confirm response deletion.", payload, null);
+        } catch (IOException exception) {
+            throw transportFailure("Gemini response deletion was not confirmed.", exception);
+        }
+    }
+
+    /** Generic NOT_FOUND codes require an exact diagnostic identifying a missing interaction. */
+    private static boolean isDeletedInteractionAbsent(JsonNode error, String responseId) {
+        boolean notFound = "not_found".equals(error.path("code").asText())
+            || (error.path("code").isIntegralNumber() && error.path("code").canConvertToInt()
+                && error.path("code").intValue() == 404
+                && "NOT_FOUND".equals(error.path("status").asText()));
+        String message = error.path("message").asText();
+        return notFound && ("Interaction not found.".equals(message)
+            || "Failed to get completed interaction: Result not found.".equals(message)
+            || ("Interaction with id '" + responseId + "' not found.").equals(message));
     }
 
     @Override
@@ -102,6 +185,33 @@ public final class GeminiProvider implements AiProvider {
         return GeminiImageOptions.definitions(normalizeModelId(model), operation);
     }
 
+    @Override
+    public AiCapabilities capabilities(String model) {
+        AiProvider.super.capabilities(model);
+        String normalizedModel = normalizeModelId(model);
+        Support generation = GeminiImageOptions.definitions(normalizedModel, AiOperation.GENERATE_IMAGE).isEmpty()
+            ? Support.UNKNOWN : Support.SUPPORTED;
+        Support editing = GeminiImageOptions.definitions(normalizedModel, AiOperation.EDIT_IMAGE).isEmpty()
+            ? Support.UNKNOWN : Support.SUPPORTED;
+        return new AiCapabilities(Map.of(
+            AiOperation.TEXT, new Operation(
+                Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED, Continuation.NONE),
+            AiOperation.CHAT, new Operation(
+                Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED, Continuation.PROVIDER_STORAGE_REQUIRED),
+            AiOperation.GENERATE_IMAGE, new Operation(
+                Support.SUPPORTED, generation, Support.SUPPORTED, Continuation.NONE),
+            AiOperation.EDIT_IMAGE, new Operation(
+                Support.SUPPORTED, editing, Support.SUPPORTED, Continuation.NONE)
+        ), Support.SUPPORTED, Support.UNKNOWN, Support.SUPPORTED);
+    }
+
+    /**
+     * Loads every catalogue page and rejects repeated pagination tokens.
+     *
+     * @param config credentials, endpoint, and transport settings
+     * @return immutable model list sorted by identifier
+     * @throws AiProviderException if configuration, transport, or catalogue parsing fails
+     */
     private List<ModelInfo> listModelsInternal(AiProviderConfig config) throws AiProviderException {
         requireConfigured(config);
         List<ModelInfo> result = new ArrayList<>();
@@ -120,10 +230,8 @@ public final class GeminiProvider implements AiProvider {
                 if (isSuccessful(statusCode) == false) {
                     throw responseFailure(statusCode, payload, "Unable to list Gemini models.");
                 }
-            } catch (AiProviderException exception) {
-                throw exception.redactSecrets(config);
             } catch (IOException exception) {
-                throw transportFailure("Unable to list Gemini models.", exception).redactSecrets(config);
+                throw transportFailure("Unable to list Gemini models.", exception);
             }
 
             try {
@@ -152,8 +260,7 @@ public final class GeminiProvider implements AiProvider {
                 }
                 pageToken = nextPageToken;
             } catch (IOException | RuntimeException exception) {
-                throw invalidResponse(statusCode, "Unable to parse the Gemini model catalogue.", payload, exception)
-                    .redactSecrets(config);
+                throw invalidResponse(statusCode, "Unable to parse the Gemini model catalogue.", payload, exception);
             }
         }
 
@@ -163,25 +270,120 @@ public final class GeminiProvider implements AiProvider {
 
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
-        return invokeAtBoundary(config, () -> executeInternal(request, config));
+        return execute(request, config, AiCancellationToken.none());
     }
 
-    private AiResponse executeInternal(AiRequest request, AiProviderConfig config) throws AiProviderException {
+    @Override
+    public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
+        return execute(request, config, token, AiLifecycleListener.none());
+    }
+
+    @Override
+    public AiResponse execute(
+        AiRequest request, AiProviderConfig config, AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
+        LifecycleSupport lifecycle = new LifecycleSupport(PROVIDER_ID, lifecycleListener);
+        return lifecycle.call(config, token, () -> generate(request, config, false, null, token, lifecycle));
+    }
+
+    @Override
+    public AiResponse stream(
+        AiRequest request,
+        AiProviderConfig config,
+        AiStreamListener listener
+    ) throws AiProviderException {
+        return stream(request, config, listener, AiCancellationToken.none());
+    }
+
+    @Override
+    public AiResponse stream(
+        AiRequest request,
+        AiProviderConfig config,
+        AiStreamListener listener,
+        AiCancellationToken token
+    ) throws AiProviderException {
+        return stream(request, config, listener, token, AiLifecycleListener.none());
+    }
+
+    @Override
+    public AiResponse stream(
+        AiRequest request, AiProviderConfig config, AiStreamListener listener,
+        AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
+        LifecycleSupport lifecycle = new LifecycleSupport(PROVIDER_ID, lifecycleListener);
+        return lifecycle.call(config, token, () -> generate(
+            request, config, true, CancellationSupport.listener(PROVIDER_ID, token, listener), token, lifecycle
+        ));
+    }
+
+    /**
+     * Executes generation or chat using either a complete JSON response or an SSE stream.
+     * Cancellation aborts this request without closing the shared HTTP client.
+     *
+     * @param request generation or chat request to validate and send
+     * @param config credentials, endpoint, and transport settings
+     * @param stream whether to request and parse streaming output
+     * @param listener fragment recipient, required only for streaming
+     * @param token non-null cancellation token for this call
+     * @param lifecycle per-call lifecycle tracker
+     * @return generated content and metadata, including a continuation ID for chat
+     * @throws AiProviderException if validation, transport, parsing, or listener delivery fails
+     */
+    private AiResponse generate(
+        AiRequest request,
+        AiProviderConfig config,
+        boolean stream,
+        AiStreamListener listener,
+        AiCancellationToken token,
+        LifecycleSupport lifecycle
+    ) throws AiProviderException {
         requireConfigured(config);
         validateRequest(request);
+        if (stream && listener == null) {
+            throw new AiProviderException(PROVIDER_ID, "Gemini stream listener is required.");
+        }
 
-        HttpPost post = new HttpPost(operationUri(config, request.model(), "generateContent", false));
+        boolean chat = request.operation() == AiOperation.CHAT;
+        HttpPost post = new HttpPost(chat
+            ? interactionsUri(config)
+            : operationUri(config, request.model(), stream ? "streamGenerateContent" : "generateContent", stream));
         configure(post, config, true);
-        post.setEntity(new StringEntity(buildRequestBody(request).toString(), JSON_UTF_8));
+        if (stream) {
+            post.setHeader("Accept", "text/event-stream");
+            post.setHeader("Accept-Encoding", "identity");
+        }
+        post.setEntity(new StringEntity((chat
+            ? buildChatRequestBody(request, stream)
+            : buildRequestBody(request)).toString(), JSON_UTF_8));
 
-        try (CloseableHttpResponse response = httpClient.execute(post)) {
-            String payload = entityAsString(response.getEntity());
+        String failureMessage = stream ? "Gemini streaming generation failed." : "Gemini generation failed.";
+        lifecycle.submitting(token);
+        try (AiCancellationToken.Registration cancellation = token.onCancel(post::abort);
+            CloseableHttpResponse response = httpClient.execute(post)) {
             int statusCode = response.getStatusLine().getStatusCode();
+            String payload = stream ? null : entityAsString(response.getEntity());
             if (isSuccessful(statusCode) == false) {
-                throw responseFailure(statusCode, payload, "Gemini generation failed.");
+                String errorPayload = stream ? entityAsString(response.getEntity()) : payload;
+                trackRejection(lifecycle, statusCode, errorPayload);
+                throw responseFailure(statusCode, errorPayload, failureMessage);
             }
+
             try {
-                return GeminiResponseParser.parse(payload);
+                if (stream == false) {
+                    return chat ? GeminiInteractionsParser.parse(payload, lifecycle) : GeminiResponseParser.parse(payload);
+                }
+                HttpEntity entity = response.getEntity();
+                if (entity == null) {
+                    throw new AiProviderException(PROVIDER_ID, "Gemini returned an empty stream.");
+                }
+                try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(entity.getContent(), StandardCharsets.UTF_8)
+                )) {
+                    return chat
+                        ? GeminiInteractionsParser.parseStream(reader, listener, lifecycle)
+                        : GeminiResponseParser.parseStream(reader, listener);
+                }
             } catch (IOException exception) {
                 throw new AiProviderException(
                     PROVIDER_ID,
@@ -192,77 +394,48 @@ public final class GeminiProvider implements AiProvider {
                     exception
                 );
             }
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
         } catch (IOException exception) {
-            throw transportFailure("Gemini generation failed.", exception).redactSecrets(config);
+            throw transportFailure(failureMessage, exception);
         }
     }
 
-    @Override
-    public AiResponse stream(
-        AiRequest request,
-        AiProviderConfig config,
-        AiStreamListener listener
-    ) throws AiProviderException {
-        return invokeAtBoundary(config, () -> streamInternal(request, config, listener));
-    }
-
-    private AiResponse streamInternal(
-        AiRequest request,
-        AiProviderConfig config,
-        AiStreamListener listener
-    ) throws AiProviderException {
-        requireConfigured(config);
-        validateRequest(request);
-        if (listener == null) {
-            throw new AiProviderException(PROVIDER_ID, "Gemini stream listener is required.");
-        }
-
-        HttpPost post = new HttpPost(operationUri(config, request.model(), "streamGenerateContent", true));
-        configure(post, config, true);
-        post.setHeader("Accept", "text/event-stream");
-        post.setHeader("Accept-Encoding", "identity");
-        post.setEntity(new StringEntity(buildRequestBody(request).toString(), JSON_UTF_8));
-
-        try (CloseableHttpResponse response = httpClient.execute(post)) {
-            int statusCode = response.getStatusLine().getStatusCode();
-            if (isSuccessful(statusCode) == false) {
-                String payload = entityAsString(response.getEntity());
-                throw responseFailure(statusCode, payload, "Gemini streaming generation failed.");
-            }
-
-            HttpEntity entity = response.getEntity();
-            if (entity == null) {
-                throw new AiProviderException(PROVIDER_ID, "Gemini returned an empty stream.");
-            }
-            try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(entity.getContent(), StandardCharsets.UTF_8)
-            )) {
-                return GeminiResponseParser.parseStream(reader, listener);
-            } catch (IOException exception) {
-                throw new AiProviderException(
-                    PROVIDER_ID,
-                    statusCode,
-                    exception.getMessage(),
-                    null,
-                    false,
-                    exception
-                );
-            }
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
-        } catch (IOException exception) {
-            throw transportFailure("Gemini streaming generation failed.", exception).redactSecrets(config);
+    /** Classifies only documented request-rejection codes paired with their expected HTTP status. */
+    private static void trackRejection(LifecycleSupport lifecycle, int status, String payload) {
+        try {
+            JsonNode root = MAPPER.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION).readTree(payload);
+            if (root == null || root.hasNonNull("id") || root.hasNonNull("interaction")) return;
+            String code = root.path("error").path("code").asText();
+            boolean rejected = switch (status) {
+                case 400 -> Set.of("invalid_request", "failed_precondition", "parameter_unknown").contains(code);
+                case 401 -> "authentication".equals(code);
+                case 402 -> "payment_required".equals(code);
+                case 403 -> "permission_denied".equals(code);
+                case 404 -> Set.of("not_found", "model_not_found").contains(code);
+                case 416 -> "out_of_range".equals(code);
+                case 429 -> Set.of("rate_limit_exceeded", "quota_exceeded", "too_many_requests").contains(code);
+                default -> false;
+            };
+            if (rejected) lifecycle.rejected();
+        } catch (IOException ignored) {
+            // An unrecognized error body leaves the submission outcome unknown.
         }
     }
 
     @Override
     public EmbeddingResponse embed(EmbeddingRequest request, AiProviderConfig config)
         throws AiProviderException {
-        return invokeAtBoundary(config, () -> embedInternal(request, config));
+        return invokeAtBoundary(config, AiCancellationToken.none(), () -> embedInternal(request, config));
     }
 
+    /**
+     * Requests a batch of embeddings and validates the returned vectors.
+     *
+     * @param request input texts, model, and optional output dimensions
+     * @param config credentials, endpoint, and transport settings
+     * @return embeddings in input order with available usage metadata
+     * @throws AiProviderException if validation, transport, or response parsing fails
+     */
     private EmbeddingResponse embedInternal(EmbeddingRequest request, AiProviderConfig config)
         throws AiProviderException {
         requireConfigured(config);
@@ -311,13 +484,23 @@ public final class GeminiProvider implements AiProvider {
                     exception
                 );
             }
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
         } catch (IOException exception) {
-            throw transportFailure("Gemini embedding request failed.", exception).redactSecrets(config);
+            throw transportFailure("Gemini embedding request failed.", exception);
         }
     }
 
+    /**
+     * Validates embedding counts, dimensions, and finite values, normalizing reduced Gemini embedding-001 vectors.
+     *
+     * @param model requested model identifier
+     * @param expectedCount number of input texts
+     * @param payload original JSON response body
+     * @param requestedDimensions required vector size, or {@code null} to infer it from the first vector
+     * @param statusCode HTTP status retained in validation failures
+     * @return validated vectors in response order and prompt-token usage
+     * @throws IOException if JSON decoding fails
+     * @throws AiProviderException if the embedding payload is invalid or normalization fails
+     */
     private static EmbeddingResponse parseEmbeddingResponse(
         String model,
         int expectedCount,
@@ -396,6 +579,14 @@ public final class GeminiProvider implements AiProvider {
         return dimensions < 3072 && "gemini-embedding-001".equals(normalizeModelId(model));
     }
 
+    /**
+     * Normalizes a nonzero vector to unit Euclidean length in place.
+     *
+     * @param vector finite embedding values to normalize
+     * @param statusCode HTTP status retained in validation failures
+     * @param payload original response retained for diagnostics
+     * @throws AiProviderException if the vector has a zero or non-finite norm
+     */
     private static void normalize(float[] vector, int statusCode, String payload)
         throws AiProviderException {
         double sumOfSquares = 0;
@@ -426,6 +617,42 @@ public final class GeminiProvider implements AiProvider {
         }
     }
 
+    /**
+     * Builds a text-only Interactions payload with protected inputs and explicit storage settings.
+     *
+     * @param request validated chat request, optionally containing a previous interaction ID
+     * @param stream whether to request streaming output
+     * @return Interactions request body with hardened instructions
+     */
+    static ObjectNode buildChatRequestBody(AiRequest request, boolean stream) {
+        ObjectNode root = MAPPER.createObjectNode();
+        root.put("model", normalizeModelId(request.model()));
+        root.put("system_instruction", PromptInjectionDefense.hardenChatInstructions(request.instructions()));
+        root.put("store", request.store());
+        root.put("stream", stream);
+        if (request.previousResponseId() != null) {
+            root.put("previous_interaction_id", request.previousResponseId());
+        }
+        ArrayNode input = root.putArray("input");
+        addChatInput(input, request.inputText(), UntrustedSource.INPUT_TEXT);
+        addChatInput(input, request.userPrompt(), UntrustedSource.USER_PROMPT);
+        root.putArray("response_format").addObject().put("type", "text").put("mime_type", "text/plain");
+        return root;
+    }
+
+    private static void addChatInput(ArrayNode input, String value, UntrustedSource source) {
+        if (PromptInjectionDefense.hasUntrustedText(value, source)) {
+            input.addObject().put("type", "text").put("text",
+                PromptInjectionDefense.protectUntrustedText(value, source).protectedText());
+        }
+    }
+
+    /**
+     * Builds a generateContent payload with protected text, optional media, and operation-specific options.
+     *
+     * @param request validated text or image request
+     * @return request body with separated system instructions and user content
+     */
     static ObjectNode buildRequestBody(AiRequest request) {
         ObjectNode root = MAPPER.createObjectNode();
         ArrayNode contents = root.putArray("contents");
@@ -499,6 +726,13 @@ public final class GeminiProvider implements AiProvider {
         inlineData.put("data", Base64.getEncoder().encodeToString(media.data()));
     }
 
+    /**
+     * Applies transport settings and trusted headers before setting required Gemini headers.
+     *
+     * @param request HTTP request to configure
+     * @param config credentials, timeouts, and trusted headers
+     * @param hasJsonBody whether to set the JSON content type
+     */
     private void configure(HttpRequestBase request, AiProviderConfig config, boolean hasJsonBody) {
         request.setConfig(requestConfig(config));
         for (Entry<String, String> header : config.trustedHeaders().entrySet()) {
@@ -519,6 +753,12 @@ public final class GeminiProvider implements AiProvider {
             .build();
     }
 
+    /**
+     * Resolves the model collection base while accepting an already-suffixed models URI.
+     *
+     * @param config configuration containing an optional custom endpoint
+     * @return models base URI with a trailing slash
+     */
     private static URI modelsBaseUri(AiProviderConfig config) {
         URI baseUri = config.baseUri() == null ? DEFAULT_BASE_URI : config.baseUri();
         String value = baseUri.toString();
@@ -531,6 +771,13 @@ public final class GeminiProvider implements AiProvider {
         return URI.create(value).resolve("models/");
     }
 
+    /**
+     * Builds a catalogue page URI with an encoded pagination token.
+     *
+     * @param config configuration containing an optional custom endpoint
+     * @param pageToken next-page token, or {@code null} for the first page
+     * @return catalogue URI requesting up to 1,000 models
+     */
     private static URI modelsCollectionUri(AiProviderConfig config, String pageToken) {
         String modelsUri = modelsBaseUri(config).toString();
         StringBuilder value = new StringBuilder(modelsUri.substring(0, modelsUri.length() - 1))
@@ -541,6 +788,19 @@ public final class GeminiProvider implements AiProvider {
         return URI.create(value.toString());
     }
 
+    private static URI interactionsUri(AiProviderConfig config) {
+        return modelsBaseUri(config).resolve("../interactions");
+    }
+
+    /**
+     * Builds a model-operation URI, encoding each model path segment separately.
+     *
+     * @param config configuration containing an optional custom endpoint
+     * @param model model identifier, optionally prefixed with {@code models/}
+     * @param operation Gemini operation suffix
+     * @param sse whether to request SSE transport with {@code alt=sse}
+     * @return URI for the requested model operation
+     */
     private static URI operationUri(
         AiProviderConfig config,
         String model,
@@ -575,12 +835,22 @@ public final class GeminiProvider implements AiProvider {
         return normalized;
     }
 
+    /**
+     * Validates the model, chat constraints, and operation-specific image requirements.
+     *
+     * @param request request to validate
+     * @throws AiProviderException if the request, prompt, media, or image options are invalid
+     */
     private static void validateRequest(AiRequest request) throws AiProviderException {
         if (request == null) {
             throw new AiProviderException(PROVIDER_ID, "Gemini request is required.");
         }
+        ChatRequestValidator.validate(PROVIDER_ID, request);
         if (isNotBlank(normalizeModelId(request.model())) == false) {
             throw new AiProviderException(PROVIDER_ID, "Gemini model is required.");
+        }
+        if (request.operation() == AiOperation.CHAT) {
+            return;
         }
         if (request.operation() == AiOperation.EDIT_IMAGE
             && (request.inputMedia() == null || request.inputMedia().data().length == 0)) {
@@ -605,6 +875,12 @@ public final class GeminiProvider implements AiProvider {
         }
     }
 
+    /**
+     * Checks for task instructions or meaningful prompt data, excluding {@code inputText} for image editing.
+     *
+     * @param request image request to inspect
+     * @return whether content beyond the security instructions defines an image task
+     */
     private static boolean hasMeaningfulImagePrompt(AiRequest request) {
         return PromptInjectionDefense.hasTaskInstructions(request.instructions())
             || PromptInjectionDefense.hasUntrustedText(
@@ -618,6 +894,13 @@ public final class GeminiProvider implements AiProvider {
                 ));
     }
 
+    /**
+     * Validates the embedding model and every input before returning the request options.
+     *
+     * @param request embedding request to validate
+     * @return configured embedding options
+     * @throws AiProviderException if the request, model, or input texts are missing or blank
+     */
     private static EmbeddingOptions requireEmbeddingRequest(EmbeddingRequest request)
         throws AiProviderException {
         if (request == null) {
@@ -651,6 +934,14 @@ public final class GeminiProvider implements AiProvider {
         return statusCode >= 200 && statusCode < 300;
     }
 
+    /**
+     * Builds an HTTP failure using the provider error message and status-based retry classification.
+     *
+     * @param statusCode unsuccessful HTTP status
+     * @param payload original response body retained for diagnostics
+     * @param fallbackMessage message used when the body contains no usable error description
+     * @return failure awaiting credential redaction at the public boundary
+     */
     private static AiProviderException responseFailure(int statusCode, String payload, String fallbackMessage) {
         String message = extractErrorMessage(payload);
         if (message == null || message.isBlank()) {
@@ -665,6 +956,12 @@ public final class GeminiProvider implements AiProvider {
         );
     }
 
+    /**
+     * Extracts an error message from a JSON object or the first element of a response array.
+     *
+     * @param payload response body to inspect
+     * @return nonblank error message, or {@code null} when absent or undecodable
+     */
     private static String extractErrorMessage(String payload) {
         if (payload == null || payload.isBlank()) {
             return null;
@@ -689,21 +986,28 @@ public final class GeminiProvider implements AiProvider {
         return new AiProviderException(PROVIDER_ID, -1, message, null, true, exception);
     }
 
-    private static <T> T invokeAtBoundary(AiProviderConfig config, ProviderCall<T> call)
-        throws AiProviderException {
+    /**
+     * Applies cancellation checks and redacts credentials before a failure leaves the provider.
+     * Unexpected runtime failures are wrapped as provider exceptions.
+     *
+     * @param config configuration whose API key and trusted-header values must be redacted
+     * @param token non-null cancellation token checked before and after the call
+     * @param call operation to run within the provider boundary
+     * @param <T> operation result type
+     * @return operation result when cancellation has not been observed
+     * @throws AiProviderException if cancelled or the operation fails, with configured secrets redacted
+     */
+    private static <T> T invokeAtBoundary(
+        AiProviderConfig config, AiCancellationToken token, CancellationSupport.Call<T> call
+    ) throws AiProviderException {
         try {
-            return call.invoke();
+            return CancellationSupport.call(PROVIDER_ID, token, call);
         } catch (AiProviderException exception) {
             throw exception.redactSecrets(config);
         } catch (RuntimeException exception) {
             throw new AiProviderException(PROVIDER_ID, "Unexpected Gemini provider failure", exception)
                 .redactSecrets(config);
         }
-    }
-
-    @FunctionalInterface
-    private interface ProviderCall<T> {
-        T invoke() throws AiProviderException;
     }
 
     private static AiProviderException invalidResponse(

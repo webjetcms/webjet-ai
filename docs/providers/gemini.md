@@ -1,6 +1,6 @@
 # Google Gemini provider
 
-`GeminiProvider` implements text embeddings, text and multimodal generation,
+`GeminiProvider` implements text embeddings, text chat, text and multimodal generation,
 image generation, and image editing through the Google Gemini REST API. Its
 provider identifier is `gemini` when it is selected from a client containing
 multiple providers.
@@ -9,15 +9,23 @@ This guide describes the WebJET AI adapter. The selected Gemini model must
 support the requested input and output modalities. `listModels` does not filter
 models by operation or capability.
 
-Gemini ignores `store`. Supported image resolution and aspect-ratio controls are
+Gemini ignores `store` for `TEXT` and image operations. `CHAT` uses Interactions
+and requires explicit `store(true)` for provider-managed conversation context.
+Supported image resolution and aspect-ratio controls are
 published through `AiClient.imageOptions(...)`; Gemini image models do not
 advertise portable `count` or `quality` controls.
 
 ## Capabilities
 
+`client.capabilities("gemini", model)` describes adapter support without making a
+request and accepts the optional `models/` prefix. Known image support comes from
+the existing image-option catalogue; text/chat and embedding model support remains
+unknown. Adapter streaming support does not establish model streaming support.
+
 | Task | Request | Non-streaming call | `stream` | Important requirements |
 | --- | --- | --- | --- | --- |
 | Text generation or transformation | `AiRequest` with `TEXT` | `execute` | Yes | A non-blank model |
+| Continue a text conversation | `AiRequest` with `CHAT` | `execute` | Yes | Explicit `store(true)`; optional `previousResponseId` from the same provider |
 | Analyze text and media | `AiRequest` with `TEXT` | `execute` | Yes | A model that accepts the supplied media |
 | Generate images | `AiRequest` with `GENERATE_IMAGE` | `execute` | Adapter allows it | A model that produces image output |
 | Edit an image | `AiRequest` with `EDIT_IMAGE` | `execute` | Adapter allows it | A model that edits images and non-empty `inputMedia` |
@@ -26,6 +34,43 @@ advertise portable `count` or `quality` controls.
 Image-operation streaming uses Gemini's streaming endpoint, but actual support is
 model-dependent. The stream listener receives only text fragments; generated
 binary media is available in the returned `AiResponse` after completion.
+
+## Response lifecycle
+
+Since `2.1.0`, the optional lifecycle observer receives IDs from Interactions creation,
+status, and completion events before completion validation. Repeated IDs are delivered
+once; conflicting IDs fail the call. Non-streaming chat observes an ID after the JSON
+body is read, even when validation later rejects an incomplete response. Known IDs
+survive listener failures and cancellation through `AiProviderException.lifecycle()`.
+
+Generation validation failures are `NOT_SUBMITTED`. Recognized Interactions request
+error codes paired with their expected HTTP status establish `REJECTED`; ambiguous
+errors, timeouts, and server failures remain `UNKNOWN` unless an ID was observed.
+The `generateContent` API does not supply Interactions IDs. An early ID never advances
+the host's successful continuation. See the [lifecycle contract](../../README.md#response-lifecycle-and-failed-attempts).
+
+## Response deletion
+
+Since `2.1.0`, `client.deleteResponse(responseId, config)` sends `DELETE /interactions/{id}`
+under the configured API base, using the existing `x-goog-api-key` authentication,
+trusted headers, and timeouts. Bases ending in `/models/` are supported just as
+for chat. The ID is encoded as one path segment. A cancellation-token overload
+aborts only that HTTP request; redirects and automatic retries remain disabled.
+
+`DELETED` requires HTTP 200 or 204 with an empty body or empty JSON object, following
+the [Gemini Interactions deletion contract](https://ai.google.dev/api/interactions-api).
+`ALREADY_ABSENT` requires HTTP 404, a structured `not_found` code (or numeric 404
+with status `NOT_FOUND`), and one of these exact resource-specific diagnostics:
+
+- `Interaction not found.`
+- `Interaction with id '<requested ID>' not found.`
+- `Failed to get completed interaction: Result not found.`
+
+Generic missing-route errors and other ambiguous responses remain failures.
+Malformed, duplicate-key, trailing, oversized, and nonempty success responses
+also fail. A timeout or cancellation cannot confirm whether remote deletion
+occurred. The host owns conversation membership, retries, and local history
+cleanup; this API deletes only the requested interaction.
 
 ## Configuration and client
 
@@ -99,6 +144,26 @@ For `TEXT`, hardened `instructions` become Gemini `systemInstruction`.
 `inputText` and `userPrompt` become protected user content parts. Optional
 `inputMedia` is appended as Base64 `inlineData`.
 
+## Chat
+
+Use `AiOperation.CHAT` for text conversations through the `interactions` endpoint.
+The [chat example](../../README.md#chat-and-conversation-continuation) also works
+with `AiProviders.GEMINI` and a Gemini model that supports Interactions.
+`previousResponseId` is sent as `previous_interaction_id`; the returned interaction
+ID becomes `responseId()`. Omit the ID for a fresh conversation.
+
+Each turn sends hardened `instructions` as `system_instruction` and the current
+protected `inputText` and `userPrompt` as text input parts, requesting a text
+response. Every turn requires `store(true)` and meaningful user/source text.
+Binary input, image options, translation options, and continuation IDs on other
+operations are rejected before transport.
+
+Only `model_output` text is returned; thoughts and non-text content are excluded.
+The interaction must finish as `completed` with a non-blank ID and usable text.
+Streams must include `interaction.completed` after all steps stop. Function calls,
+incomplete interactions, and malformed streams fail with `AiProviderException`.
+`AiClient` removes echoed input blocks and retains usage and the interaction ID.
+
 ## Multimodal text request
 
 Use `TEXT` when media is input and the expected response is text.
@@ -131,7 +196,8 @@ AiResponse completed = client.stream(
 
 The listener must not be null. It receives text deltas only. The returned response
 contains the accumulated text, generated media, usage, and terminal finish reason.
-A successful stream must end with Gemini's `STOP` finish reason.
+A successful `TEXT` or image stream must end with Gemini's `STOP` finish reason;
+`CHAT` uses the separate Interactions lifecycle described [above](#chat).
 
 The adapter does not restrict streaming to `TEXT`, but image generation/editing
 over the streaming endpoint still depends on the selected model.
@@ -249,8 +315,10 @@ GeneratedMedia editedImage = response.media().get(0);
 
 ## `AiRequest` fields
 
-This table applies to generation requests. Embeddings use `EmbeddingRequest`
-with the separate `model`, `inputs`, and `options` components.
+This table covers `TEXT` and image requests; [chat](#chat) uses Interactions with
+its own storage and text-only requirements. `previousResponseId` is rejected for
+all operations in this table. Embeddings use `EmbeddingRequest` with separate
+`model`, `inputs`, and `options` components.
 
 | Field | `TEXT` | `GENERATE_IMAGE` | `EDIT_IMAGE` |
 | --- | --- | --- | --- |
@@ -281,7 +349,7 @@ The provider follows Gemini catalogue pagination, removes the `models/` prefix,
 and sorts results by model identifier. The result does not describe whether a
 model supports embeddings, text, image input, image output, or editing.
 
-Gemini may return text and media in the same response:
+For `TEXT` and image operations, Gemini may return text and media in the same response:
 
 - only the first response candidate is consumed;
 - all text parts in that candidate are concatenated into `response.text()`;

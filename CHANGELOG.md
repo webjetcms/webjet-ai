@@ -3,12 +3,91 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.1.0]
+
+### Added
+
+- Text-only `AiOperation.CHAT` with provider-managed conversation history through
+  OpenAI Responses and Gemini Interactions, supporting both completed responses
+  and streamed text. OpenRouter and local providers do not support `CHAT`.
+- Conversation continuation through `AiRequest.Builder.previousResponseId(...)`
+  using the same provider's `AiResponse.responseId()`, without replaying prior
+  messages. Continuation IDs are accepted only for `CHAT` requests.
+- Explicit `store(true)` opt-in for every `CHAT` request; provider-side storage
+  remains disabled by default. Chat requests reject binary input, image options,
+  translation options, and blank text.
+- Chat-specific prompt defenses that allow conversational questions while keeping
+  untrusted content subordinate to security rules and trusted task instructions.
+- Immutable `AiCapabilities` metadata through `AiClient.capabilities(...)` and
+  backward-compatible provider defaults, without credentials, network access, or
+  inference during lookup.
+- Separate adapter and model support, per-operation streaming, continuation storage
+  requirements, and embedding capabilities for remote and local providers. Unknown
+  remote models retain their existing execution behavior.
+- Provider-neutral `AiClient.deleteResponse(...)` and compatible `AiProvider`
+  defaults, with optional per-call cancellation and `AiResponseDeletion` results
+  distinguishing `DELETED` from `ALREADY_ABSENT`.
+- OpenAI Responses and Gemini Interactions deletion using existing pooled
+  transports, authentication, timeouts, credential redaction, and request-level
+  cancellation. Confirmation is conservative: generic 404s, malformed or
+  oversized bodies, and unexpected success responses remain failures. Deletion
+  does not retry automatically or manage conversations or local history.
+- Adapter-level `AiCapabilities.responseDeletionSupport()` metadata. OpenAI and
+  Gemini report support; OpenRouter and local providers report unsupported.
+- Optional `AiLifecycleListener` overloads for `execute` and `stream`, exposing
+  OpenAI response IDs and Gemini interaction IDs before completion validation.
+  Lifecycle observation is independent of text filtering and never advances
+  successful conversation continuation.
+- Immutable `AiRequestLifecycle` metadata on `AiProviderException`, distinguishing
+  not-submitted attempts, explicit rejections, unknown remote outcomes, and
+  observed response IDs. Known facts survive cancellation, listener failures,
+  exception category changes, and credential redaction; retryability stays separate.
+- Per-call `AiCancellationToken` overloads for synchronous `execute` and `stream`,
+  aborting only the active HTTP request in OpenAI, Gemini, and OpenRouter while
+  retaining existing signatures and shared transport resources.
+- Non-retryable `AiErrorCategory.CANCELLED` failures preserved through credential
+  redaction. Existing exception constructors use `UNKNOWN`.
+- Compatibility defaults for custom and local providers that check cancellation
+  around blocking execution and streamed callbacks without closing shared resources.
+- Stable `INVALID_CONTINUATION` and `UNSUPPORTED_OPERATION` error categories,
+  including conservative OpenAI HTTP and SSE continuation classification and
+  explicit unsupported-operation failures across bundled providers.
+- `AiProviderException.withCategory(...)` preserves diagnostics and credential
+  redaction behavior. Ambiguous provider errors retain `UNKNOWN`; categories
+  do not trigger retries, conversation resets, or storage changes.
+
+### Fixed
+
+- Chat instructions explicitly exclude internal input boundaries from answers.
+  `AiClient` removes echoed untrusted input blocks from completed chat responses
+  and streamed text, including markers split across chunks, while preserving
+  response IDs, usage, media and completion metadata.
+  Leading whitespace is handled consistently across chunk boundaries without
+  changing answer indentation.
 
 ### Changed
 
+- The development build defaults to `2.1.0-SNAPSHOT`; release builds use
+  `-PreleaseVersion=2.1.0` for both artifacts.
 - Maven Central releases now wait for manual publication in Central Portal after
   validation, while the GitHub Release is still created automatically.
+
+### Compatibility
+
+- Existing execution signatures and text-listener lambdas remain available.
+  Custom providers inherit lifecycle overloads that observe returned responses;
+  earlier IDs and precise submission outcomes require adapter support. Existing
+  exception constructors and older serialized failures default to unknown lifecycle.
+- Custom providers inherit `UNSUPPORTED_OPERATION` for deletion and need no new
+  implementations. The three-argument `AiCapabilities` constructor is available
+  with deletion support `UNKNOWN`. The fourth record component,
+  `responseDeletionSupport`, participates in equality and record-based serialization.
+- Existing execution methods, provider implementations, and the four-argument
+  `AiResponse` constructor remain supported. `AiResponse` now has a fifth record
+  component, `responseId`, which participates in equality and record-based
+  serialization.
+- Exhaustive switches over `AiOperation` must handle `CHAT`. See the
+  [2.1 upgrade notes](README.md#upgrading-from-20x) for host integration details.
 
 ## [2.0.4]
 
@@ -134,6 +213,8 @@ uses [Semantic Versioning](https://semver.org/).
 - Prompt-injection defense utilities.
 - Java 17 build, tests, API documentation, and Maven Central publication.
 
+[2.1.0]: https://github.com/webjetcms/webjet-ai/compare/v2.0.4...v2.1.0
+[2.0.4]: https://github.com/webjetcms/webjet-ai/releases/tag/v2.0.4
 [2.0.0]: https://github.com/webjetcms/webjet-ai/compare/v1.2.0...v2.0.0
 [1.2.0]: https://github.com/webjetcms/webjet-ai/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/webjetcms/webjet-ai/compare/v1.1.0...v1.1.1

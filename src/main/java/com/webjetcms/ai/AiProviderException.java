@@ -38,6 +38,19 @@ public final class AiProviderException extends Exception {
     private final boolean retryable;
 
     /**
+     * Stable failure classification, independent of provider message text.
+     *
+     * @serial failure category, or {@code null} in older serialized exceptions
+     */
+    private final AiErrorCategory category;
+
+    /**
+     * Known lifecycle facts for the failed attempt.
+     * @serial lifecycle snapshot, or null in older serialized exceptions
+     */
+    private final AiRequestLifecycle lifecycle;
+
+    /**
      * Creates a non-retryable provider failure without an HTTP response.
      *
      * @param providerId stable identifier of the provider that failed
@@ -82,11 +95,39 @@ public final class AiProviderException extends Exception {
      * @param cause underlying validation, transport, parsing, or callback failure
      */
     public AiProviderException(String providerId, int statusCode, String message, String rawResponse, boolean retryable, Throwable cause) {
+        this(providerId, statusCode, message, rawResponse, retryable, cause, AiErrorCategory.UNKNOWN);
+    }
+
+    /**
+     * Creates a categorized provider failure while preserving HTTP diagnostics.
+     * Cancellation failures are always non-retryable.
+     *
+     * @param providerId stable identifier of the provider that failed
+     * @param statusCode HTTP status code, or {@code -1} if unavailable
+     * @param message human-readable failure description
+     * @param rawResponse unparsed provider response, or {@code null} if unavailable
+     * @param retryable whether retrying the same operation may succeed
+     * @param cause underlying failure
+     * @param category stable category, or {@code null} for {@link AiErrorCategory#UNKNOWN}
+     */
+    public AiProviderException(
+        String providerId, int statusCode, String message, String rawResponse,
+        boolean retryable, Throwable cause, AiErrorCategory category
+    ) {
+        this(providerId, statusCode, message, rawResponse, retryable, cause, category, AiRequestLifecycle.unknown());
+    }
+
+    private AiProviderException(
+        String providerId, int statusCode, String message, String rawResponse,
+        boolean retryable, Throwable cause, AiErrorCategory category, AiRequestLifecycle lifecycle
+    ) {
         super(message, cause);
         this.providerId = providerId;
         this.statusCode = statusCode;
         this.rawResponse = rawResponse;
-        this.retryable = retryable;
+        this.category = category == null ? AiErrorCategory.UNKNOWN : category;
+        this.retryable = this.category != AiErrorCategory.CANCELLED && retryable;
+        this.lifecycle = lifecycle;
     }
 
     /**
@@ -120,10 +161,62 @@ public final class AiProviderException extends Exception {
     public boolean retryable() { return retryable; }
 
     /**
+     * Returns the stable failure category, including for older serialized exceptions.
+     *
+     * @return category, or {@link AiErrorCategory#UNKNOWN} when no classification is available
+     */
+    public AiErrorCategory category() { return category == null ? AiErrorCategory.UNKNOWN : category; }
+
+    /**
+     * Returns facts about submission and any observed response, independently of retryability.
+     * @return immutable metadata, unknown when none was attached or serialized
+     */
+    public AiRequestLifecycle lifecycle() { return lifecycle == null ? AiRequestLifecycle.unknown() : lifecycle; }
+
+    /**
+     * Copies this failure with lifecycle facts, preserving its diagnostics and classification.
+     * @param lifecycle snapshot, or null for an unknown outcome
+     * @return this exception if unchanged, otherwise a copy
+     */
+    public AiProviderException withLifecycle(AiRequestLifecycle lifecycle) {
+        AiRequestLifecycle resolved = lifecycle == null ? AiRequestLifecycle.unknown() : lifecycle;
+        if (lifecycle().equals(resolved)) return this;
+        return copyDiagnostics(new AiProviderException(
+            providerId, statusCode, getMessage(), rawResponse, retryable, getCause(), category(), resolved));
+    }
+
+    /**
+     * Returns a categorized failure without changing its HTTP or exception diagnostics.
+     * The original failure is unchanged. Selecting {@link AiErrorCategory#CANCELLED}
+     * makes the returned failure non-retryable.
+     *
+     * @param category stable category, or {@code null} for {@link AiErrorCategory#UNKNOWN}
+     * @return this exception when the category matches, otherwise a copy retaining
+     *         its cause, suppressed exceptions, and stack trace
+     */
+    public AiProviderException withCategory(AiErrorCategory category) {
+        AiErrorCategory resolved = category == null ? AiErrorCategory.UNKNOWN : category;
+        if (category() == resolved) return this;
+        AiProviderException categorized = new AiProviderException(
+            providerId, statusCode, getMessage(), rawResponse, retryable, getCause(), resolved, lifecycle()
+        );
+        return copyDiagnostics(categorized);
+    }
+
+    private AiProviderException copyDiagnostics(AiProviderException copy) {
+        copy.setStackTrace(getStackTrace());
+        for (Throwable suppressed : getSuppressed()) {
+            copy.addSuppressed(suppressed);
+        }
+        return copy;
+    }
+
+    /**
      * Returns an equivalent failure with configured credentials removed from every
      * exposed text field, cause, suppressed exception, and stack-trace element.
      * Provider implementations should call this before a failure crosses their
-     * public boundary.
+     * public boundary. Fully redacted response IDs become null while retaining
+     * the observed lifecycle state.
      *
      * @param config provider configuration whose API key and trusted-header values must be protected
      * @return this exception when no sensitive value exists, otherwise a redacted copy
@@ -133,13 +226,17 @@ public final class AiProviderException extends Exception {
 
         Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
         visited.add(this);
+        String responseId = config.redactSensitiveValue(lifecycle().responseId());
+        if (responseId != null && responseId.isBlank()) responseId = null;
         AiProviderException redacted = new AiProviderException(
             config.redactSensitiveValue(providerId),
             statusCode,
             config.redactSensitiveValue(getMessage()),
             config.redactSensitiveValue(rawResponse),
             retryable,
-            redactThrowable(getCause(), config, visited)
+            redactThrowable(getCause(), config, visited),
+            category(),
+            new AiRequestLifecycle(lifecycle().state(), responseId)
         );
         redacted.setStackTrace(redactStackTrace(getStackTrace(), config));
         for (Throwable suppressed : getSuppressed()) {
