@@ -1,6 +1,6 @@
 # OpenAI provider
 
-`OpenAiProvider` implements text, multimodal text, image generation, image
+`OpenAiProvider` implements text, text chat, multimodal text, image generation, image
 editing, and text embeddings through OpenAI's REST APIs. Its provider identifier
 is `openai` when it is selected from a client containing multiple providers.
 
@@ -11,9 +11,15 @@ option each model supports.
 
 ## Capabilities
 
+`client.capabilities("openai", model)` describes adapter support and per-operation
+streaming without making a request. Text/chat and embedding model support remains
+unknown; image model support uses the existing image-option catalogue and explicit
+adapter restrictions. Metadata does not guarantee current model availability.
+
 | Task | Request | Non-streaming call | `stream` | Important requirements |
 | --- | --- | --- | --- | --- |
 | Text generation or transformation | `AiRequest` with `TEXT` | `execute` | Yes | A non-blank model |
+| Continue a text conversation | `AiRequest` with `CHAT` | `execute` | Yes | Explicit `store(true)`; optional `previousResponseId` from the same provider |
 | Analyze text and an image | `AiRequest` with `TEXT` | `execute` | Yes | A model that accepts image input |
 | Generate images | `AiRequest` with `GENERATE_IMAGE` | `execute` | No | An image-generation model; callers should supply a meaningful prompt |
 | Edit an image | `AiRequest` with `EDIT_IMAGE` | `execute` | No | A non-empty `inputMedia`; DALL-E 3 is generation-only |
@@ -97,7 +103,62 @@ For `TEXT`, OpenAI receives:
 3. protected `userPrompt` as another user input;
 4. optional `inputMedia` as an inline data URL.
 
-`store` is forwarded only for text requests. It defaults to `false`.
+`store` is forwarded for `TEXT` and `CHAT` requests. It defaults to `false`;
+`CHAT` requires an explicit `true` value.
+
+## Chat
+
+Use `AiOperation.CHAT` for text conversations through the Responses endpoint.
+The [chat example](../../README.md#chat-and-conversation-continuation) shows a first
+turn followed by a streamed continuation. Set `previousResponseId` to the latest
+successful `responseId()`; the adapter sends it as `previous_response_id` and
+returns the new response's `id`. Omit it to start a fresh conversation.
+
+Each turn sends hardened `instructions` and only the current protected `inputText`
+and `userPrompt`. It requires `store(true)` and meaningful user/source text, and
+rejects binary input, image options, and translation options. Continuation IDs
+are rejected on other operations.
+
+Chat requires a completed response with a non-blank ID and usable text. Reasoning
+content is excluded, and tool-call or incomplete output fails with
+`AiProviderException`. Streaming additionally validates that the terminal response
+matches the accumulated text. `AiClient` removes echoed internal input blocks
+while preserving usage, the response ID, and the `completed` finish reason.
+
+## Response lifecycle
+
+Since `2.1.0`, the optional lifecycle observer receives IDs from Responses creation,
+progress, and terminal events before completion validation. Repeated IDs are delivered
+once; conflicting IDs fail the call. Non-streaming text/chat responses expose their ID
+after the JSON body is read, including when completion validation subsequently fails.
+Observed IDs survive text-listener failures, lifecycle-listener failures, and cancellation
+through `AiProviderException.lifecycle()`.
+
+Generation validation failures are `NOT_SUBMITTED`. Recognized structured client-error
+rejections are `REJECTED`; ambiguous bodies, timeouts, and server failures remain
+`UNKNOWN` unless an ID was already observed. An observed ID does not advance the
+host's successful continuation. See the [lifecycle contract](../../README.md#response-lifecycle-and-failed-attempts).
+
+## Response deletion
+
+Since `2.1.0`, `client.deleteResponse(responseId, config)` sends `DELETE /responses/{id}` using
+the configured base URI, Bearer authentication, trusted headers, and timeouts.
+The ID is encoded as one path segment. A cancellation-token overload aborts only
+that HTTP request; redirects and automatic retries remain disabled.
+
+`DELETED` requires HTTP 200 with a JSON object containing the exact string `id`,
+`object: "response.deleted"`, and boolean `deleted: true`, without an error field.
+This follows the [OpenAI deletion contract](https://developers.openai.com/api/reference/resources/responses/methods/delete).
+`ALREADY_ABSENT` requires HTTP 404 with `error.code: "response_not_found"`, or
+an `invalid_request_error` without a conflicting code containing the exact diagnostic
+`Response with id '<requested ID>' not found.`. Generic or differently worded
+404s remain failures so an incorrect endpoint cannot silently confirm cleanup.
+
+Malformed, duplicate-key, trailing, oversized, mismatched, and otherwise
+unconfirmed responses throw `AiProviderException`. A transport failure or
+cancellation leaves the remote deletion outcome unconfirmed. The host owns
+conversation membership, retries, and local history cleanup; deleting one
+response does not confirm deletion of other responses in its continuation chain.
 
 ## Multimodal text request
 
@@ -120,7 +181,7 @@ type or image input.
 
 ## Streaming text
 
-Streaming is available only for `TEXT` requests. The listener receives decoded
+Streaming is available for `TEXT` and `CHAT` requests. The listener receives decoded
 text fragments in provider order, and the returned response contains the complete
 text and final usage information.
 
@@ -229,8 +290,10 @@ This adapter does not expose an image mask option.
 
 ## `AiRequest` fields
 
-This table applies to generation requests. Embeddings use `EmbeddingRequest`
-with the separate `model`, `inputs`, and `options` components.
+This table covers `TEXT` and image requests; [chat](#chat) has additional storage
+and text-only requirements. `previousResponseId` is rejected for all operations
+in this table. Embeddings use `EmbeddingRequest` with separate `model`, `inputs`,
+and `options` components.
 
 | Field | `TEXT` | `GENERATE_IMAGE` | `EDIT_IMAGE` |
 | --- | --- | --- | --- |

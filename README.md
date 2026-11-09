@@ -22,7 +22,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.webjetcms:webjet-ai:2.0.4'
+    implementation 'com.webjetcms:webjet-ai:2.1.0'
 }
 ```
 
@@ -32,13 +32,32 @@ Maven:
 <dependency>
     <groupId>com.webjetcms</groupId>
     <artifactId>webjet-ai</artifactId>
-    <version>2.0.4</version>
+    <version>2.1.0</version>
 </dependency>
 ```
 
-Version `2.0.4` also publishes the optional local runtime as the separate
-`com.webjetcms:webjet-ai-local:2.0.4` artifact. Cloud-provider applications only
+Version `2.1.0` also publishes the optional local runtime as the separate
+`com.webjetcms:webjet-ai-local:2.1.0` artifact. Cloud-provider applications only
 need the core `webjet-ai` dependency shown above.
+
+### Upgrading from 2.0.x
+
+Update both artifacts to `2.1.0` when using the local runtime. Java 17 remains the
+minimum version. Existing `execute`, `stream`, and exception constructors remain
+available; custom providers inherit defaults for capabilities, cancellation,
+lifecycle observation, and response deletion. The default deletion implementation
+reports `UNSUPPORTED_OPERATION`.
+
+Handle the new `CHAT` value in exhaustive `AiOperation` switches. `AiResponse`
+adds `responseId` as its fifth record component; its four-argument constructor
+still works and sets this field to `null`. Review code that reflects over record
+components or serializes responses into a fixed schema. Record equality now
+includes the continuation ID.
+
+Existing requests still default to `TEXT` and `store(false)`. Chat is an explicit
+opt-in and requires permission to store context with the selected provider.
+Capability lookup does not grant that permission. Treat unrecognized future
+error categories as the generic error path.
 
 ## Minimal usage
 
@@ -94,6 +113,155 @@ The example's `selectConfiguredProvider(...)` and `selectTextGenerationModel(...
 calls represent host UI or policy. A catalogue entry does not describe model
 capabilities, so use provider capability metadata or documentation rather than list
 position when selecting a model for an operation.
+
+## Chat and conversation continuation
+
+OpenAI and Gemini support text-only `CHAT` through provider-managed history.
+Within an open client, use a configuration for the selected provider and a model
+that supports its chat endpoint:
+
+```java
+import com.webjetcms.ai.AiOperation;
+import com.webjetcms.ai.AiProviders;
+import com.webjetcms.ai.AiRequest;
+import com.webjetcms.ai.AiResponse;
+
+String providerId = AiProviders.OPENAI; // Or AiProviders.GEMINI
+String chatModel = "your-chat-model";
+String instructions = "Answer questions about the supplied report.";
+
+AiResponse first = client.execute(providerId, AiRequest.builder()
+    .operation(AiOperation.CHAT).model(chatModel)
+    .instructions(instructions).inputText("The report says sales doubled.")
+    .userPrompt("What changed?").store(true).build(), config);
+
+AiResponse next = client.stream(providerId, AiRequest.builder()
+    .operation(AiOperation.CHAT).model(chatModel)
+    .instructions(instructions).userPrompt("Summarize that in one sentence.")
+    .previousResponseId(first.responseId()).store(true).build(), config, System.out::print);
+
+String continuationId = next.responseId();
+```
+
+Send trusted instructions on every turn. Send only the current turn's source text
+and question; the provider retrieves earlier context using the supplied ID. Keep
+the latest successful `responseId()` with the conversation's provider and account
+configuration. IDs are provider-specific and must not be reused across providers
+or unrelated conversations. Omit `previousResponseId` to start a new conversation.
+The client keeps no conversation history or current ID of its own.
+
+Every chat turn requires explicit `store(true)` and non-blank `inputText` or
+`userPrompt`; instructions alone are insufficient. Binary input, image options,
+translation options, and blank continuation IDs are rejected. `previousResponseId`
+is rejected on operations other than `CHAT`. OpenRouter and local providers do not
+support `CHAT`; use `TEXT` for independent text requests without stored history.
+
+Successful chat responses include text, usage, `finishReason` equal to `completed`,
+and a continuation ID. Tool calls and incomplete responses are rejected. Internal
+input blocks echoed by the model are removed by `AiClient`, including during
+streaming; response metadata is retained. See the [OpenAI](docs/providers/openai.md#chat)
+and [Gemini](docs/providers/gemini.md#chat) guides for protocol details and
+[stable error categories](#stable-error-categories) for continuation failures.
+
+## Response lifecycle and failed attempts
+
+Since `2.1.0`, generation calls expose optional response-ID observation independently
+of streamed text. OpenAI Responses and Gemini Interactions report IDs as soon as
+their adapters read them, including before completion validation:
+
+```java
+import java.util.ArrayList;
+import java.util.List;
+import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiProviderException;
+import com.webjetcms.ai.AiRequestLifecycle;
+
+List<String> observedIds = new ArrayList<>();
+AiCancellationToken token = new AiCancellationToken();
+try {
+    AiResponse response = client.stream(
+        providerId, request, config, System.out::print, token, observedIds::add
+    );
+    String successfulContinuationId = response.responseId();
+    // The host may now advance its successful continuation.
+} catch (AiProviderException failure) {
+    AiRequestLifecycle lifecycle = failure.lifecycle();
+    String cleanupResponseId = lifecycle.responseId();
+    // Retain cleanup information and keep the previous successful continuation.
+}
+```
+
+The same observer can be passed to `execute(providerId, request, config, token, observer)`.
+Single-provider overloads omit `providerId`. Existing methods remain available and
+also retain lifecycle metadata on failures; use `AiLifecycleListener.none()` when
+calling a new overload without an observer. `AiStreamListener` remains a functional
+interface receiving text only.
+
+The observer runs synchronously on the executing thread, once for each call's ID.
+It may run after cancellation was requested so cleanup information is not lost.
+If it throws, the call fails and retains the observed ID. Non-streaming APIs can
+observe IDs only after reading the response body. Legacy providers report IDs
+from returned responses or lifecycle metadata retained on failures, including
+cancellation after a response was returned. IDs recovered from failures may
+already be redacted. If that notification throws, its failure is retained as a
+suppressed exception on the original provider failure.
+
+`failure.lifecycle().state()` describes facts independently of `retryable()`:
+
+| State | Meaning |
+| --- | --- |
+| `NOT_SUBMITTED` | Validation or cancellation stopped the call before submission. |
+| `REJECTED` | A recognized provider error explicitly rejected the request. |
+| `UNKNOWN` | Submission may have occurred, but no response ID or confirmed rejection is available. |
+| `RESPONSE_OBSERVED` | A response ID was observed, even if generation later failed or was cancelled. `responseId()` is null if credential redaction removed the entire ID. |
+
+An ID alone does not establish successful completion, storage, or retrievability.
+Only a successfully returned `AiResponse` is eligible for conversation continuation.
+Connection failures, ambiguous errors, and uninstrumented provider failures remain
+unknown; HTTP status alone is not treated as proof of rejection. The library does
+not retry, persist observations, or choose a continuation for the application.
+
+## Deleting stored responses
+
+Since `2.1.0`, OpenAI and Gemini support deletion of one provider-managed response by ID:
+
+```java
+import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiResponseDeletion;
+
+AiResponseDeletion deletion = client.deleteResponse(
+    providerId, responseId, config, new AiCancellationToken()
+);
+```
+
+Use the same provider, account, and endpoint that created the response. No model
+or generation request is required. The cancellation token is optional, and
+clients containing one provider also offer `deleteResponse(responseId, config)`.
+
+The result is `DELETED` when the provider confirms deletion, or `ALREADY_ABSENT`
+when it explicitly identifies the requested resource as missing. Unsupported
+providers throw `AiProviderException` with category `UNSUPPORTED_OPERATION`.
+Other failures, including generic HTTP 404s and unconfirmed success responses,
+also throw; they must not be treated as confirmed cleanup. A timeout or
+cancellation can occur after remote deletion. The library never retries the
+operation automatically or deletes related responses or local history.
+
+`client.capabilities(providerId, model).responseDeletionSupport()` describes
+adapter support independently of the selected model: OpenAI and Gemini report
+`SUPPORTED`, OpenRouter and local providers report `UNSUPPORTED`, and existing
+custom providers default to `UNKNOWN`. Metadata does not establish account access
+or compatibility with a custom endpoint.
+
+`AiCapabilities` now includes a fourth record component, `responseDeletionSupport`.
+The existing three-argument constructor remains available and sets it to `UNKNOWN`.
+Consumers reflecting over record components or using fixed serialization schemas
+should account for the additional field; record equality includes it.
+
+The host remains responsible for authorization, choosing which IDs belong to a
+conversation, retaining unresolved cleanup work, and removing its local history.
+Provider-specific confirmation rules are documented in the
+[OpenAI](docs/providers/openai.md#response-deletion) and
+[Gemini](docs/providers/gemini.md#response-deletion) guides.
 
 ## Image capability lookup
 
@@ -157,6 +325,56 @@ List<String> bundledProviders = AiProviders.builtIns();
 String openAi = AiProviders.OPENAI;
 ```
 
+### Provider and model capabilities
+
+Query locally known capabilities without credentials or network requests. Use
+`client.capabilities(model)` when the client contains only one provider.
+
+```java
+import com.webjetcms.ai.AiCapabilities;
+import com.webjetcms.ai.AiCapabilities.Continuation;
+import com.webjetcms.ai.AiCapabilities.Support;
+import com.webjetcms.ai.AiOperation;
+
+AiCapabilities capabilities = client.capabilities(providerId, model);
+AiCapabilities.Operation chat = capabilities.operation(AiOperation.CHAT);
+boolean canOfferChat = chat.adapterSupport() == Support.SUPPORTED
+    && chat.modelSupport() != Support.UNSUPPORTED;
+boolean canOfferStreaming = canOfferChat && chat.adapterStreaming() == Support.SUPPORTED;
+boolean requiresStorage = chat.continuation() == Continuation.PROVIDER_STORAGE_REQUIRED;
+```
+
+`adapterSupport()` describes what the library adapter implements. `modelSupport()`
+describes what its metadata knows about the selected model; `UNKNOWN` is not a
+rejection. `support()` combines both: either unsupported value yields
+`UNSUPPORTED`, two supported values yield `SUPPORTED`, and all other combinations
+yield `UNKNOWN`. Thus an uncatalogued text model can still be offered by CMS even
+when combined support is unknown. The returned operation map and values are
+immutable, with operations ordered by `AiOperation`.
+
+`adapterStreaming()` describes the adapter's streaming path for that operation.
+It does not guarantee that the selected model accepts streaming. Listeners receive
+text fragments; image media is returned in the completed response where supported.
+Embeddings have separate `embeddingSupport()` and `embeddingModelSupport()` values
+because they use `EmbeddingRequest` and `embed(...)`, rather than `AiOperation`.
+
+OpenAI and Gemini describe `CHAT` continuation as `PROVIDER_STORAGE_REQUIRED`.
+CMS must still explicitly permit storage before setting `store(true)`; lookup
+never changes the request or grants storage consent. OpenRouter and current local
+providers report `CHAT` as unsupported. Other operations report no continuation.
+
+Remote text/chat and embedding model support remains `UNKNOWN`; model names and
+prefixes are not guessed. Known image capabilities reuse the existing static
+catalogues and adapter restrictions. OpenRouter's image-generation catalogue does
+not establish editing support, so editing remains unknown except for explicitly
+excluded models. Local providers recognize the aliases of their loaded model and
+reject other model IDs in their metadata, without loading or running another model.
+
+Metadata is advisory and does not verify model availability, account access, or
+custom endpoint behavior. Execution retains its existing validation and permits
+unknown remote models. Custom providers inherit unknown metadata until they
+override `capabilities(model)`; `ModelInfo` and existing APIs remain unchanged.
+
 Add an application-owned provider directly during discovery:
 
 ```java
@@ -200,8 +418,8 @@ select it automatically. Use their provider-ID overloads when the client contain
 multiple providers. Identifier-free calls fail clearly if the client contains zero or
 multiple providers.
 
-Embeddings use a dedicated request and response API, so the existing
-`AiOperation` and `AiResponse` contracts remain unchanged:
+Embeddings use a dedicated request and response API rather than an
+`AiOperation` value or `AiResponse`:
 
 ```java
 import java.util.List;
@@ -257,7 +475,7 @@ build prefix and run `./gradlew :webjet-ai-local:localModelTool --args='...'`.
 Prepare the portable FP32 bundle:
 
 ```shell
-java -jar webjet-ai-local-2.0.1.jar prepare \
+java -jar webjet-ai-local-2.1.0.jar prepare \
   --model multilingual-e5-base \
   --output /path/to/multilingual-e5-base-fp32.zip
 ```
@@ -270,7 +488,7 @@ unless `--overwrite` is specified.
 Use the same command for the smaller 384-value model:
 
 ```shell
-java -jar webjet-ai-local-2.0.1.jar prepare \
+java -jar webjet-ai-local-2.1.0.jar prepare \
   --model multilingual-e5-small
 ```
 
@@ -280,7 +498,7 @@ Its default FP32 output is `multilingual-e5-small-fp32.zip`; the canonical
 An explicitly selected quantized bundle is available for CPUs with AVX-512 VNNI:
 
 ```shell
-java -jar webjet-ai-local-2.0.1.jar prepare \
+java -jar webjet-ai-local-2.1.0.jar prepare \
   --model multilingual-e5-base \
   --variant int8-avx512-vnni
 ```
@@ -317,7 +535,7 @@ JAR version.
 Prepare the portable quantized M2M100 translation bundle in the same way:
 
 ```shell
-java -jar webjet-ai-local-2.0.1.jar prepare \
+java -jar webjet-ai-local-2.1.0.jar prepare \
   --model facebook/m2m100_418M \
   --variant int8
 ```
@@ -332,7 +550,7 @@ read from that tokenizer rather than hardcoded by the library.
 Prepare EuroLLM-1.7B-Instruct for local multilingual text generation:
 
 ```shell
-java -jar webjet-ai-local-2.0.1.jar prepare \
+java -jar webjet-ai-local-2.1.0.jar prepare \
   --model utter-project/EuroLLM-1.7B-Instruct
 ```
 
@@ -360,7 +578,7 @@ graph is resolved. Copying only `webjet-ai-local.jar` is not sufficient.
 
 ```gradle
 dependencies {
-    implementation 'com.webjetcms:webjet-ai-local:2.0.4'
+    implementation 'com.webjetcms:webjet-ai-local:2.1.0'
 }
 ```
 
@@ -546,8 +764,8 @@ end with `.` to indicate a potentially unfinished sentence.
 
 ## Provider guides
 
-Each provider guide shows how to build requests for text, streaming, multimodal
-input, image generation, image editing, and text embeddings. The capability
+Each provider guide shows how to build requests for text, chat where supported,
+streaming, multimodal input, image generation, image editing, and text embeddings. The capability
 tables also identify fields that a particular adapter forwards or ignores.
 
 - [OpenAI](docs/providers/openai.md)
@@ -561,6 +779,15 @@ Pass the immutable `AiRequest` directly to `AiClient.execute(...)` or
 `AiClient.stream(...)`. The client automatically prepares a protected copy before
 delegating to the provider: it hardens trusted instructions and protects untrusted
 input text and user prompts. The original request keeps its readable input values.
+
+For `CHAT`, the client also removes echoed `BEGIN_UNTRUSTED_*` input blocks from
+completed responses and streamed text, even when a marker spans multiple chunks.
+The enclosed source text is omitted together with its markers; the generated
+answer and response metadata are retained. Other operations keep their original
+response text. This is output cleanup, not a substitute for prompt-injection
+defenses. Responses already saved by a host application are not rewritten.
+Streaming may buffer marker fragments and leading whitespace; concatenated text
+retains the same answer indentation as the completed response.
 
 An `AiProvider` may explicitly select literal handling when boundary markers would
 change the result. The local M2M100 provider uses it for deterministic translation.
@@ -587,6 +814,92 @@ AiPromptTemplate.ExpansionResult expanded = AiPromptTemplate.expand(
 Expansion is single-pass and repeat-safe: placeholders introduced inside an
 untrusted value remain literal, canonical untrusted-data blocks are not scanned
 again, and consumed or suspicious fields are reported to the host.
+
+## Cancelling a request
+
+Create one `AiCancellationToken` per call and pass it to the `execute` or `stream`
+overload. Both remain synchronous; the host owns its executor and task registry.
+The overloads are also available with an explicit provider ID.
+
+```java
+AiCancellationToken cancellation = new AiCancellationToken();
+Future<AiResponse> future = executor.submit(
+    () -> client.execute(request, config, cancellation)
+);
+
+// In the Stop, New chat, or editor-close handler for this task:
+cancellation.cancel(); // Abort the AI request through its provider
+future.cancel(true);   // Cancel the task and request thread interruption
+```
+
+For streaming, pass the token after the listener:
+
+```java
+AiResponse response = client.stream(request, config, listener, cancellation);
+```
+
+Use `com.webjetcms.ai.AiCancellationToken` and `java.util.concurrent.Future` in the
+first example. Create the token before submitting the task so Stop can also cancel
+work that has not started yet. The token is thread-safe and cannot be reset;
+repeated `cancel()` calls are harmless. Sharing a token intentionally cancels all
+calls using it, so use a fresh token for every independent task.
+
+OpenAI, Gemini, and OpenRouter abort the individual HTTP request, including blocked
+reads and streaming responses. Text, chat, and image requests use the same mechanism
+where supported by the adapter. Other concurrent calls and the shared client remain
+usable. Cancellation does not close the provider, create threads, or change storage
+consent. `embed` and `listModels` retain their existing APIs without token overloads.
+
+When observed before the final result check, cancellation throws
+`AiProviderException` with `category() == AiErrorCategory.CANCELLED` and
+`retryable() == false`, including after credential redaction. A cancelled call does
+not return a successful partial response. Existing exception constructors default
+to `AiErrorCategory.UNKNOWN`; ordinary timeouts are not classified as cancellation.
+If the host also cancels its `Future`, `Future.get()` reports Java's
+`CancellationException` instead of exposing the worker's provider exception.
+
+Cancellation after the final check cannot retract a successful result. An already
+dispatched listener callback may finish, so the host must discard stale callbacks
+and results when a chat or editor has changed. Aborting HTTP cannot guarantee that
+the remote provider stops generation, avoids charges, or deletes stored context.
+
+Existing custom and local providers remain compatible through default methods that
+check cancellation before and after blocking execution and around listener calls.
+These defaults cannot interrupt blocked transport or native inference; a provider
+must override the token overloads to implement active cancellation. Existing
+token-free methods retain their signatures and behavior.
+
+## Stable error categories
+
+Use `AiProviderException.category()` for recovery decisions, together with
+`statusCode()` and `retryable()`. Message text remains diagnostic and is not a
+stable API.
+
+| Category | Meaning |
+| --- | --- |
+| `CANCELLED` | Explicit caller cancellation; never automatically retry. |
+| `INVALID_CONTINUATION` | A supplied chat continuation ID is blank or a structured provider error identifies it as unusable. The host can offer to start a new conversation. |
+| `UNSUPPORTED_OPERATION` | A known provider adapter or model limitation, including unsupported streaming or embeddings. The host can offer a supported operation or provider. |
+| `UNKNOWN` | No reliable specific classification; use the existing status and retryability information. |
+
+OpenAI classifies continuation failures only for a continuing `CHAT` request and
+an explicit error code or parameter identifying `previous_response_id`. This
+applies to HTTP errors, failed response payloads, and SSE error events. Arbitrary
+model output, message text, and generic HTTP 400/404 responses are not used for
+classification. Gemini's documented error schema currently provides no reliable
+continuation-specific discriminator, so its remote continuation failures remain
+`UNKNOWN`.
+
+Existing constructors still default to `UNKNOWN`. Custom adapters can use the
+categorized constructor or `exception.withCategory(category)`, which preserves
+the original diagnostics. Credential redaction preserves all categories. Missing
+storage consent and unrelated input validation remain `UNKNOWN`; the library
+does not reset conversations, retry requests, or enable storage in response to
+these categories.
+
+Hosts can expose `category().name()`, `statusCode()`, and `retryable()` in their
+error DTOs while keeping `rawResponse()` and exception causes out of frontend
+responses. Treat unknown future category names as the generic recovery path.
 
 ## Media and response values
 
@@ -630,6 +943,13 @@ The `checkStandaloneBoundary` verification rejects imports from WebJET CMS,
 Spring, servlet APIs, and JPA. Build outputs include the main, sources, and
 Javadoc JARs.
 
+Without a `releaseVersion` property, development artifacts use `2.1.0-SNAPSHOT`.
+Verify the release version and both modules' publication metadata explicitly:
+
+```shell
+./gradlew clean check javadoc -PreleaseVersion=2.1.0
+```
+
 For simultaneous local development with a consuming Gradle project, use a
 composite build instead of publishing to `mavenLocal()`:
 
@@ -637,15 +957,15 @@ composite build instead of publishing to `mavenLocal()`:
 ./gradlew --include-build ../webjet-ai test
 ```
 
-To test the `2.0.4` release candidate through a normal Maven dependency graph
+To test the `2.1.0` release candidate through a normal Maven dependency graph
 instead:
 
 ```shell
-./gradlew -PreleaseVersion=2.0.4 publishToMavenLocal
+./gradlew -PreleaseVersion=2.1.0 publishToMavenLocal
 ```
 
 Then add `mavenLocal()` and depend on
-`com.webjetcms:webjet-ai-local:2.0.4` in the consuming project.
+`com.webjetcms:webjet-ai-local:2.1.0` in the consuming project.
 
 The opt-in production-bundle smoke test performs no download:
 
@@ -673,7 +993,7 @@ keyring, matching traditional Maven `gpg:sign-and-deploy-file` usage. Keep
 these properties in `~/.gradle/gradle.properties` or CI secrets, for example:
 
 ```properties
-releaseVersion=2.0.4
+releaseVersion=2.1.0
 signingKeyId=0x36F2327F
 ```
 
@@ -681,7 +1001,7 @@ If you sign with an in-memory exported private key instead, also provide
 `signingPassword`. To create the Central bundle locally, run:
 
 ```shell
-./gradlew centralBundle -PreleaseVersion=2.0.4 -PsigningKeyId=0x36F2327F
+./gradlew centralBundle -PreleaseVersion=2.1.0 -PsigningKeyId=0x36F2327F
 ```
 
 During a local interactive run, Gradle prints the resolved `releaseVersion` and
@@ -694,7 +1014,7 @@ both stable and `-SNAPSHOT` semantic versions. Configure `githubUsername` and
 `GITHUB_TOKEN`, then run:
 
 ```shell
-./gradlew publishAllPublicationsToGitHubPackagesRepository -PreleaseVersion=2.0.4-SNAPSHOT
+./gradlew publishAllPublicationsToGitHubPackagesRepository -PreleaseVersion=2.1.0-SNAPSHOT
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development rules,

@@ -84,7 +84,7 @@ class CatalogueAndResponseValueTypesTest {
     void responseTextCanBeReplacedWithoutLosingMetadata() {
         GeneratedMedia media = new GeneratedMedia(new byte[] {1}, "image/png");
         TokenUsage usage = new TokenUsage(2, 3, 5, Map.of("cached", 1L));
-        AiResponse original = new AiResponse("encoded", List.of(media), usage, "stop");
+        AiResponse original = new AiResponse("encoded", List.of(media), usage, "stop", "response-id");
 
         AiResponse restored = original.withText("restored");
 
@@ -92,9 +92,12 @@ class CatalogueAndResponseValueTypesTest {
         assertEquals(List.of(media), restored.media());
         assertSame(usage, restored.usage());
         assertEquals("stop", restored.finishReason());
+        assertEquals("response-id", restored.responseId());
         assertEquals(
-            List.of("text", "media", "usage", "finishReason"),
+            List.of("text", "media", "usage", "finishReason", "responseId"),
             Arrays.stream(AiResponse.class.getRecordComponents()).map(component -> component.getName()).toList()
         );
+        assertNull(new AiResponse("answer", null, null, "stop").withText("replacement").responseId());
+        assertNull(AiResponse.text("answer").responseId());
     }
 }

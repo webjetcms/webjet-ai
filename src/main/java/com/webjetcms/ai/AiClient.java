@@ -10,6 +10,10 @@ import java.util.Objects;
 import java.util.Set;
 
 import com.webjetcms.ai.image.ImageOptionDefinition;
+import com.webjetcms.ai.internal.ChatRequestValidator;
+import com.webjetcms.ai.internal.CancellationSupport;
+import com.webjetcms.ai.internal.ResponseDeletionSupport;
+import com.webjetcms.ai.internal.LifecycleSupport;
 
 /**
  * Owns a fixed set of AI provider instances and selects them by exact identifier.
@@ -250,6 +254,35 @@ public final class AiClient implements AutoCloseable {
     }
 
     /**
+     * Describes capabilities using the only registered provider, without credentials or I/O.
+     *
+     * @param model non-blank provider-specific model identifier
+     * @return immutable advisory adapter and model capabilities
+     * @throws IllegalStateException if exactly one provider is not registered
+     * @throws IllegalArgumentException if the model is null or blank
+     */
+    public AiCapabilities capabilities(String model) {
+        return capabilities(soleProviderId(), model);
+    }
+
+    /**
+     * Describes locally known capabilities without loading a model catalogue or making requests.
+     * Metadata does not grant storage consent or change request validation. Unknown model
+     * support must not be treated as a definitive rejection.
+     *
+     * @param providerId registered provider identifier
+     * @param model non-blank provider-specific model identifier
+     * @return immutable advisory adapter and model capabilities
+     * @throws IllegalArgumentException if the provider or model is invalid
+     */
+    public AiCapabilities capabilities(String providerId, String model) {
+        if (model == null || model.isBlank()) {
+            throw new IllegalArgumentException("Capability model must not be blank");
+        }
+        return Objects.requireNonNull(provider(providerId).capabilities(model), "AI provider capabilities");
+    }
+
+    /**
      * Returns static image option metadata from the only registered provider.
      * This call does not require credentials or perform network I/O.
      *
@@ -307,6 +340,82 @@ public final class AiClient implements AutoCloseable {
     }
 
     /**
+     * Deletes one stored response using the only registered provider.
+     *
+     * @param responseId opaque provider response ID
+     * @param config configuration for the account and endpoint that created the response
+     * @return confirmed deletion or confirmed absence
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws AiProviderException if unsupported, invalid, failed, or unconfirmed
+     */
+    public AiResponseDeletion deleteResponse(String responseId, AiProviderConfig config) throws AiProviderException {
+        return deleteResponse(soleProviderId(), responseId, config);
+    }
+
+    /**
+     * Deletes one stored response using a registered provider, without automatic retries.
+     * The host owns authorization, conversation membership, and local history cleanup.
+     *
+     * @param providerId registered provider identifier
+     * @param responseId opaque provider response ID
+     * @param config configuration for the account and endpoint that created the response
+     * @return confirmed deletion or confirmed absence
+     * @throws IllegalArgumentException if the provider is not registered
+     * @throws AiProviderException if unsupported, invalid, failed, or unconfirmed
+     */
+    public AiResponseDeletion deleteResponse(String providerId, String responseId, AiProviderConfig config)
+        throws AiProviderException {
+        return deleteResponse(providerId, responseId, config, AiCancellationToken.none());
+    }
+
+    /**
+     * Deletes one stored response using the only registered provider and a cancellation token.
+     *
+     * @param responseId opaque provider response ID
+     * @param config configuration for the account and endpoint that created the response
+     * @param token non-null cancellation token for this call
+     * @return confirmed deletion or confirmed absence
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws AiProviderException if cancelled, unsupported, invalid, failed, or unconfirmed
+     */
+    public AiResponseDeletion deleteResponse(
+        String responseId, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        return deleteResponse(soleProviderId(), responseId, config, token);
+    }
+
+    /**
+     * Deletes one stored response with cancellation and credential redaction. A failure,
+     * including cancellation, may occur after remote deletion and never confirms absence.
+     * Successful deletion of one response does not imply deletion of related responses.
+     *
+     * @param providerId registered provider identifier
+     * @param responseId opaque provider response ID
+     * @param config configuration for the account and endpoint that created the response
+     * @param token non-null cancellation token for this call
+     * @return confirmed deletion or confirmed absence
+     * @throws IllegalArgumentException if the provider is not registered
+     * @throws AiProviderException if cancelled, unsupported, invalid, failed, or unconfirmed
+     */
+    public AiResponseDeletion deleteResponse(
+        String providerId, String responseId, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        AiProvider selectedProvider = provider(providerId);
+        Objects.requireNonNull(token, "token");
+        try {
+            return CancellationSupport.call(providerId, token, () -> {
+                ResponseDeletionSupport.encodedId(providerId, responseId);
+                return Objects.requireNonNull(selectedProvider.deleteResponse(responseId, config, token),
+                    "AI provider deletion result");
+            });
+        } catch (AiProviderException exception) {
+            throw exception.redactSecrets(config);
+        } catch (RuntimeException exception) {
+            throw unexpectedProviderFailure(providerId, exception, config);
+        }
+    }
+
+    /**
      * Executes a non-streaming request using the only registered provider.
      * The provider receives an immutable copy with prompt defenses applied.
      *
@@ -333,14 +442,85 @@ public final class AiClient implements AutoCloseable {
      */
     public AiResponse execute(String providerId, AiRequest request, AiProviderConfig config)
         throws AiProviderException {
+        return execute(providerId, request, config, AiCancellationToken.none());
+    }
+
+    /**
+     * Executes a cancellable request using the only registered provider.
+     *
+     * @param request operation and inputs to execute
+     * @param config provider credentials and connection settings
+     * @param token non-null token created for this call
+     * @return completed response if cancellation was not observed at the final check
+     * @throws IllegalStateException if exactly one provider is not registered
+     * @throws AiProviderException if cancelled or execution fails
+     */
+    public AiResponse execute(AiRequest request, AiProviderConfig config, AiCancellationToken token)
+        throws AiProviderException {
+        return execute(soleProviderId(), request, config, token);
+    }
+
+    /**
+     * Executes a cancellable request with the same prompt defenses as the original API.
+     * Built-in HTTP providers abort only this request; legacy providers may finish their
+     * blocking work before cancellation is observed. A later cancellation cannot retract
+     * a response that passed the final cancellation check.
+     *
+     * @param providerId registered provider identifier
+     * @param request operation and inputs to execute
+     * @param config provider credentials and connection settings
+     * @param token non-null token created for this call
+     * @return completed response if cancellation was not observed at the final check
+     * @throws IllegalArgumentException if the provider is not registered
+     * @throws AiProviderException if cancelled or execution fails
+     */
+    public AiResponse execute(
+        String providerId, AiRequest request, AiProviderConfig config, AiCancellationToken token
+    ) throws AiProviderException {
+        return execute(providerId, request, config, token, AiLifecycleListener.none());
+    }
+
+    /**
+     * Executes with response-ID observation using the only registered provider.
+     * @param request operation and inputs
+     * @param config credentials and transport settings
+     * @param token per-call cancellation token
+     * @param lifecycleListener non-null response-ID observer
+     * @return successfully completed response
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws AiProviderException if execution or observation fails
+     */
+    public AiResponse execute(
+        AiRequest request, AiProviderConfig config, AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
+        return execute(soleProviderId(), request, config, token, lifecycleListener);
+    }
+
+    /**
+     * Executes with response-ID observation and lifecycle facts on failures. An early
+     * ID does not establish successful continuation; retain only the returned response
+     * as the next successful turn. Observer failures retain the observed ID.
+     * @param providerId registered provider identifier
+     * @param request operation and inputs
+     * @param config credentials and transport settings
+     * @param token per-call cancellation token
+     * @param lifecycleListener non-null response-ID observer
+     * @return successfully completed response
+     * @throws IllegalArgumentException if the provider is not registered
+     * @throws AiProviderException if execution or observation fails
+     */
+    public AiResponse execute(
+        String providerId, AiRequest request, AiProviderConfig config,
+        AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
         AiProvider selectedProvider = provider(providerId);
-        try {
-            return selectedProvider.execute(prepareRequest(selectedProvider, request), config);
-        } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
-        } catch (RuntimeException exception) {
-            throw unexpectedProviderFailure(providerId, exception, config);
-        }
+        Objects.requireNonNull(token, "token");
+        LifecycleSupport lifecycle = new LifecycleSupport(providerId, lifecycleListener);
+        return lifecycle.call(config, token, () -> {
+            AiRequest prepared = prepareRequest(selectedProvider, request);
+            lifecycle.submitting(token);
+            return cleanChatResponse(request, selectedProvider.execute(prepared, config, token, lifecycle));
+        });
     }
 
     /**
@@ -425,13 +605,113 @@ public final class AiClient implements AutoCloseable {
         AiProviderConfig config,
         AiStreamListener listener
     ) throws AiProviderException {
+        return stream(providerId, request, config, listener, AiCancellationToken.none());
+    }
+
+    /**
+     * Streams a cancellable request using the only registered provider.
+     *
+     * @param request operation and inputs to execute
+     * @param config provider credentials and connection settings
+     * @param listener callback receiving text fragments
+     * @param token non-null token created for this call
+     * @return completed response if cancellation was not observed at the final check
+     * @throws IllegalStateException if exactly one provider is not registered
+     * @throws AiProviderException if cancelled or streaming fails
+     */
+    public AiResponse stream(
+        AiRequest request, AiProviderConfig config, AiStreamListener listener, AiCancellationToken token
+    ) throws AiProviderException {
+        return stream(soleProviderId(), request, config, listener, token);
+    }
+
+    /**
+     * Streams a cancellable request with prompt defenses and guarded listener delivery.
+     * Built-in HTTP providers abort this request's I/O. An already-dispatched callback
+     * may finish, and legacy providers may only stop when their blocking work returns.
+     *
+     * @param providerId registered provider identifier
+     * @param request operation and inputs to execute
+     * @param config provider credentials and connection settings
+     * @param listener callback receiving text fragments
+     * @param token non-null token created for this call
+     * @return completed response if cancellation was not observed at the final check
+     * @throws IllegalArgumentException if the provider is not registered
+     * @throws AiProviderException if cancelled or streaming fails
+     */
+    public AiResponse stream(
+        String providerId, AiRequest request, AiProviderConfig config,
+        AiStreamListener listener, AiCancellationToken token
+    ) throws AiProviderException {
+        return stream(providerId, request, config, listener, token, AiLifecycleListener.none());
+    }
+
+    /**
+     * Streams text with a separate response-ID observer using the only provider.
+     * @param request operation and inputs
+     * @param config credentials and transport settings
+     * @param listener text fragment listener
+     * @param token per-call cancellation token
+     * @param lifecycleListener non-null response-ID observer
+     * @return successfully completed response
+     * @throws IllegalStateException if the client does not contain exactly one provider
+     * @throws AiProviderException if streaming or observation fails
+     */
+    public AiResponse stream(
+        AiRequest request, AiProviderConfig config, AiStreamListener listener,
+        AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
+        return stream(soleProviderId(), request, config, listener, token, lifecycleListener);
+    }
+
+    /**
+     * Streams text while exposing response IDs independently of text filtering and
+     * cancellation. Failures retain known lifecycle facts, not a continuation result.
+     * @param providerId registered provider identifier
+     * @param request operation and inputs
+     * @param config credentials and transport settings
+     * @param listener text fragment listener
+     * @param token per-call cancellation token
+     * @param lifecycleListener non-null response-ID observer
+     * @return successfully completed response
+     * @throws IllegalArgumentException if the provider is not registered
+     * @throws AiProviderException if streaming or observation fails
+     */
+    public AiResponse stream(
+        String providerId, AiRequest request, AiProviderConfig config, AiStreamListener listener,
+        AiCancellationToken token, AiLifecycleListener lifecycleListener
+    ) throws AiProviderException {
         AiProvider selectedProvider = provider(providerId);
+        Objects.requireNonNull(token, "token");
+        LifecycleSupport lifecycle = new LifecycleSupport(providerId, lifecycleListener);
+        return lifecycle.call(config, token, () -> {
+            AiRequest prepared = prepareRequest(selectedProvider, request);
+            AiStreamListener guarded = CancellationSupport.listener(providerId, token, listener);
+            ChatResponseText filter = request != null && request.operation() == AiOperation.CHAT
+                ? new ChatResponseText() : null;
+            AiStreamListener filtered = filter == null || guarded == null ? guarded : CancellationSupport.listener(providerId, token,
+                delta -> emitChatText(providerId, guarded, filter.append(delta)));
+            lifecycle.submitting(token);
+            AiResponse response = selectedProvider.stream(prepared, config, filtered, token, lifecycle);
+            if (response != null) lifecycle.onResponseId(response.responseId());
+            if (filter != null) emitChatText(providerId, guarded, filter.finish());
+            return cleanChatResponse(request, response);
+        });
+    }
+
+    private static AiResponse cleanChatResponse(AiRequest request, AiResponse response) {
+        if (request == null || request.operation() != AiOperation.CHAT || response == null) return response;
+        return response.withText(ChatResponseText.clean(response.text()));
+    }
+
+    private static void emitChatText(String providerId, AiStreamListener listener, String text) throws AiProviderException {
+        if (listener == null || text.isEmpty()) return;
         try {
-            return selectedProvider.stream(prepareRequest(selectedProvider, request), config, listener);
+            listener.onTextDelta(text);
         } catch (AiProviderException exception) {
-            throw exception.redactSecrets(config);
-        } catch (RuntimeException exception) {
-            throw unexpectedProviderFailure(providerId, exception, config);
+            throw exception;
+        } catch (Exception exception) {
+            throw new AiProviderException(providerId, "The stream listener rejected a chat response fragment.", exception);
         }
     }
 
@@ -444,8 +724,9 @@ public final class AiClient implements AutoCloseable {
             .redactSecrets(config);
     }
 
-    private static AiRequest prepareRequest(AiProvider provider, AiRequest request) {
+    private static AiRequest prepareRequest(AiProvider provider, AiRequest request) throws AiProviderException {
         if (request == null) return null;
+        ChatRequestValidator.validate(provider.id(), request);
         AiInputHandling handling = Objects.requireNonNull(
             provider.inputHandling(request.operation()),
             "provider.inputHandling"
