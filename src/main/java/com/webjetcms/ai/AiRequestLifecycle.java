@@ -1,5 +1,6 @@
 package com.webjetcms.ai;
 
+import java.io.ObjectStreamField;
 import java.io.Serializable;
 import java.util.Objects;
 
@@ -15,6 +16,19 @@ import java.util.Objects;
  */
 public record AiRequestLifecycle(State state, String responseId) implements Serializable {
     private static final long serialVersionUID = 1L;
+
+    /**
+     * Documents the serialized fields for Java 17 Javadoc, which cannot read comments
+     * on implicit record fields. Record serialization itself always uses the components.
+     *
+     * @serialField state com.webjetcms.ai.AiRequestLifecycle.State known submission outcome
+     * @serialField responseId java.lang.String observed provider response ID, or null when absent or fully redacted
+     */
+    private static final ObjectStreamField[] serialPersistentFields = {
+        new ObjectStreamField("state", State.class),
+        new ObjectStreamField("responseId", String.class)
+    };
+
     private static final AiRequestLifecycle UNKNOWN = new AiRequestLifecycle(State.UNKNOWN, null);
 
     /**
