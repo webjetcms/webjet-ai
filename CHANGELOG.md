@@ -3,6 +3,14 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
+## [2.1.1]
+
+### Fixed
+
+- New OpenAI `gpt-image-*` models reuse GPT Image 2 option definitions and size
+  validation for generation and editing, while known earlier models retain their
+  existing options.
+
 ## [2.1.0]
 
 ### Added

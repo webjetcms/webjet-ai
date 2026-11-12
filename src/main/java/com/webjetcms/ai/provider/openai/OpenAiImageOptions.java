@@ -147,8 +147,9 @@ final class OpenAiImageOptions {
         return Collections.unmodifiableMap(options);
     }
 
+    /** Defaults new GPT Image variants to GPT Image 2 options, except known earlier models. */
     private static boolean isGptImage2(String model) {
-        return "gpt-image-2".equals(model) || "gpt-image-2-2026-04-21".equals(model);
+        return model != null && model.startsWith("gpt-image-") && !isEarlierGptImage(model);
     }
 
     private static boolean isEarlierGptImage(String model) {

@@ -80,6 +80,8 @@ class AiCapabilitiesTest {
     @ParameterizedTest
     @CsvSource({
         "openai, gpt-image-2, SUPPORTED, SUPPORTED",
+        "openai, gpt-image-2.6-sunburst, SUPPORTED, SUPPORTED",
+        "openai, gpt-image-3, SUPPORTED, SUPPORTED",
         "openai, dall-e-3, SUPPORTED, UNSUPPORTED",
         "gemini, models/gemini-3.1-flash-image, SUPPORTED, SUPPORTED",
         "openrouter, openai/gpt-image-2, SUPPORTED, UNKNOWN",

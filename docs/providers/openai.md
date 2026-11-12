@@ -258,8 +258,13 @@ the immutable option definitions before constructing a request. Explicit values
 are validated against that model and operation before transport. Unset values are
 omitted so OpenAI defaults apply.
 
-An uncatalogued model ID returns an empty option map. For compatibility with
-custom OpenAI-compatible endpoints and future aliases, the adapter still forwards
+New `gpt-image-*` model IDs reuse GPT Image 2 option definitions and size
+validation for generation and editing. Known earlier models (`gpt-image-1`,
+`gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-1.5-2025-12-16`, and
+`chatgpt-image-latest`) retain their existing definitions.
+
+Other uncatalogued model IDs return an empty option map. For compatibility with
+custom OpenAI-compatible endpoints, the adapter still forwards
 the portable `count`, `size`, and `quality` fields for those IDs without applying
 model-specific validation. Provider-specific options require a catalogued model.
 

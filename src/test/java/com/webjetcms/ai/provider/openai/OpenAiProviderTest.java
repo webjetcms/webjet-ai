@@ -292,8 +292,42 @@ class OpenAiProviderTest {
         }
     }
 
-    @Test
-    void sendsValidatedGenerationOptions() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "gpt-image-2", "gpt-image-2-2026-04-21", "gpt-image-2.6-sunburst",
+        "gpt-image-2.6-flare", "gpt-image-3", "gpt-image-3-mini"
+    })
+    void exposesDefaultImageOptionsForNewGptImageModels(String model) throws Exception {
+        try (OpenAiProvider provider = new OpenAiProvider()) {
+            for (AiOperation operation : List.of(AiOperation.GENERATE_IMAGE, AiOperation.EDIT_IMAGE)) {
+                Map<String, ImageOptionDefinition> options = provider.imageOptions(model, operation);
+                assertFalse(options.isEmpty());
+                assertEquals(provider.imageOptions("gpt-image-2", operation), options);
+            }
+            assertThrows(IllegalArgumentException.class, () -> provider.imageOptions(model, AiOperation.TEXT));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "gpt-image-1", "gpt-image-1-mini", "gpt-image-1.5",
+        "gpt-image-1.5-2025-12-16", "chatgpt-image-latest"
+    })
+    void preservesEarlierGptImageOptions(String model) throws Exception {
+        try (OpenAiProvider provider = new OpenAiProvider()) {
+            for (AiOperation operation : List.of(AiOperation.GENERATE_IMAGE, AiOperation.EDIT_IMAGE)) {
+                Map<String, ImageOptionDefinition> options = provider.imageOptions(model, operation);
+                assertEquals(ImageOptionValueType.CHOICE, options.get("size").valueType());
+                assertEquals(List.of("auto", "1024x1024", "1024x1536", "1536x1024"),
+                    options.get("size").allowedValues());
+                assertEquals(operation == AiOperation.EDIT_IMAGE, options.containsKey("input_fidelity"));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"gpt-image-1.5", "gpt-image-2.6-sunburst", "gpt-image-3"})
+    void sendsValidatedGenerationOptions(String model) throws Exception {
         String encoded = Base64.getEncoder().encodeToString(new byte[] {1, 2, 3});
         RecordingHttpClient transport = new RecordingHttpClient(
             200,
@@ -301,7 +335,7 @@ class OpenAiProviderTest {
         );
         AiRequest request = AiRequest.builder()
             .operation(AiOperation.GENERATE_IMAGE)
-            .model("gpt-image-1.5")
+            .model(model)
             .inputText("A mountain at sunrise")
             .imageOptions(ImageOptions.builder()
                 .count(2)
@@ -317,6 +351,7 @@ class OpenAiProviderTest {
 
         JsonNode body = MAPPER.readTree(transport.requestBody);
         assertEquals("https://example.test/custom/v1/images/generations", transport.uri);
+        assertEquals(model, body.path("model").asText());
         assertEquals(2, body.path("n").asInt());
         assertEquals("webp", body.path("output_format").asText());
         assertEquals(80, body.path("output_compression").asInt());
@@ -369,14 +404,15 @@ class OpenAiProviderTest {
         assertEquals(0, transport.calls);
     }
 
-    @Test
-    void rejectsInvalidImageDimensionsBeforeTransport() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"gpt-image-2", "gpt-image-2.6-sunburst", "gpt-image-3"})
+    void rejectsInvalidImageDimensionsBeforeTransport(String model) throws Exception {
         RecordingHttpClient transport = new RecordingHttpClient(200, "{}");
         try (OpenAiProvider provider = new OpenAiProvider(transport)) {
             assertThrows(AiProviderException.class, () -> provider.execute(
                 AiRequest.builder()
                     .operation(AiOperation.GENERATE_IMAGE)
-                    .model("gpt-image-2")
+                    .model(model)
                     .inputText("Generate an image")
                     .imageOptions(new ImageOptions(1, "1025x1024", "high"))
                     .build(),
