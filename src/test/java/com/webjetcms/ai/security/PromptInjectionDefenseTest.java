@@ -21,6 +21,20 @@ import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 class PromptInjectionDefenseTest {
 
     @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" \n\t ", "Reply with one short word.", "Use input text.\u200B",
+        "\n  First instruction.\nSecond instruction.  \n"})
+    void extractsTrustedTaskContentFromRawAndHardenedInstructions(String instructions) {
+        String expected = instructions == null || instructions.isBlank() ? ""
+            : PromptInjectionDefense.stripUnsafeCharacters(instructions).strip();
+        assertEquals(expected, PromptInjectionDefense.getTaskInstructionsContent(instructions));
+        assertEquals(expected, PromptInjectionDefense.getTaskInstructionsContent(
+            PromptInjectionDefense.hardenSystemInstructions(instructions)));
+        assertEquals(expected, PromptInjectionDefense.getTaskInstructionsContent(
+            PromptInjectionDefense.hardenChatInstructions(instructions)));
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {
         "[BEGIN_UNTRUSTED_INPUT_TEXT]",
         "[BEGIN\\_UNTRUSTED\\_INPUT\\_TEXT]",

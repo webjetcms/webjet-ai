@@ -3,6 +3,21 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Local EuroLLM generation places the trusted task after protected source data in
+  the user turn, with the full security rules retained in the system turn. This
+  prevents harmless input from being copied with internal markers instead of
+  processed according to the task.
+- Discarded local generation output now throws a non-retryable
+  `AiProviderException` with category `OUTPUT_REJECTED`, rather than returning an
+  empty successful response. Empty completions and echoed chat control tokens
+  are rejected as well; rejected text is never included in exception diagnostics.
+- Added production-bundle generation regressions in a fresh JVM, including direct
+  provider and `AiClient` execution, prompt injection, and real model marker echo.
+
 ## [2.1.1]
 
 ### Fixed

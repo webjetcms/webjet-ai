@@ -755,9 +755,13 @@ metadata indicates prompt injection, and rejects reserved chat control tokens. A
 any additional host content policy before inference.
 
 If generated output contains a library safety marker such as
-`[BEGIN_UNTRUSTED_INPUT_TEXT]`, the provider discards the entire completion and returns
-an empty string through both `AiResponse.text()` and `generate(...)`. This also covers
-closing markers, security/task markers, and Markdown-escaped forms of the tags.
+`[BEGIN_UNTRUSTED_INPUT_TEXT]`, the provider discards the entire completion and throws
+a non-retryable `AiProviderException` with category `AiErrorCategory.OUTPUT_REJECTED`.
+This also covers closing markers, security/task markers, Markdown-escaped forms of
+the tags, and reserved chat control tokens. Empty completions produce the same
+category. Both `execute(...)` and `generate(...)` report the failure; neither returns
+an empty success. Rejected output is omitted from the exception message, raw response,
+and cause.
 
 The provider trims generated text and appends `...` to non-empty answers that do not
 end with `.` to indicate a potentially unfinished sentence.
@@ -880,6 +884,7 @@ stable API.
 | `CANCELLED` | Explicit caller cancellation; never automatically retry. |
 | `INVALID_CONTINUATION` | A supplied chat continuation ID is blank or a structured provider error identifies it as unusable. The host can offer to start a new conversation. |
 | `UNSUPPORTED_OPERATION` | A known provider adapter or model limitation, including unsupported streaming or embeddings. The host can offer a supported operation or provider. |
+| `OUTPUT_REJECTED` | Local generation discarded unsafe or empty output. No generated text is returned; the failure is non-retryable. |
 | `UNKNOWN` | No reliable specific classification; use the existing status and retryability information. |
 
 OpenAI classifies continuation failures only for a continuing `CHAT` request and
@@ -973,6 +978,19 @@ The opt-in production-bundle smoke test performs no download:
 ./gradlew :webjet-ai-local:localModelSmokeTest \
   -PlocalModelBundle=/path/multilingual-e5-base-fp32.zip
 ```
+
+The generation regression uses a production EuroLLM Q4_K_M bundle in a fresh test
+JVM. It checks task following through the provider and `AiClient`, injection
+rejection, and explicit failure when the real model echoes an internal marker:
+
+```shell
+./gradlew --no-daemon :webjet-ai-local:localGenerationModelSmokeTest \
+  -PlocalModelBundle=/path/eurollm-1.7b-instruct-q4-k-m.zip
+```
+
+This task performs no download and runs even if a previous invocation passed.
+It opens the native model once per test JVM; it does not reload a web application
+or test native-library reinitialization across application class loaders.
 
 ## Releases
 

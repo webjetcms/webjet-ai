@@ -56,6 +56,20 @@ jobs:
           ./gradlew --no-daemon :webjet-ai-local:localModelSmokeTest
           -PlocalModelBundle=webjet-ai-local/build/local-smoke/model.zip
 
+      - name: Prepare EuroLLM generation bundle on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: >-
+          ./gradlew --no-daemon :webjet-ai-local:localModelTool
+          --args='prepare --model eurollm-1.7b-instruct --output build/local-generation-smoke/model.zip'
+
+      - name: Run native generation regressions in a fresh JVM on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: >-
+          ./gradlew --no-daemon :webjet-ai-local:localGenerationModelSmokeTest
+          -PlocalModelBundle=webjet-ai-local/build/local-generation-smoke/model.zip
+
       - name: Confirm the build did not modify sources
         run: git diff --exit-code
 

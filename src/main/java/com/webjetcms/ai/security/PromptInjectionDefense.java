@@ -180,6 +180,19 @@ public final class PromptInjectionDefense {
     }
 
     /**
+     * Returns trusted task text without its internal boundary markers.
+     *
+     * @param instructions raw or hardened trusted instructions, never untrusted input
+     * @return stripped task content with unsafe characters removed, or an empty string for blank input
+     */
+    public static String getTaskInstructionsContent(String instructions) {
+        String safeInstructions = stripUnsafeCharacters(instructions);
+        if (isBlank(safeInstructions)) return "";
+        String task = extractMarkedContent(safeInstructions, TASK_BEGIN, TASK_END);
+        return (task == null ? safeInstructions : task).strip();
+    }
+
+    /**
      * Indicates whether raw or hardened instructions contain meaningful trusted task content.
      * Security rules and an empty task envelope do not count as task instructions.
      *

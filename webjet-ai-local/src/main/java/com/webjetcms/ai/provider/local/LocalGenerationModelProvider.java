@@ -120,8 +120,9 @@ public final class LocalGenerationModelProvider implements AiProvider {
 
     /** Generates text from a normal string prompt without provider connection settings.
      * @param prompt non-blank end-user prompt
-     * @return generated string, or an empty string when output contains a safety marker
-     * @throws AiProviderException when validation or local inference fails
+     * @return non-blank generated string
+     * @throws AiProviderException when validation or local inference fails, or with category
+     *         {@link AiErrorCategory#OUTPUT_REJECTED} when output is unsafe or empty
      */
     public String generate(String prompt) throws AiProviderException {
         return execute(prepareDirectRequest(prompt), AiProviderConfig.empty()).text();
@@ -137,9 +138,9 @@ public final class LocalGenerationModelProvider implements AiProvider {
     /** Executes protected, non-streaming local text generation.
      * @param request normal text request containing instructions, input text, or a user prompt
      * @param config ignored because local execution requires no credentials or endpoint
-     * @return text-only response containing the generated string, or empty text when
-     *         output contains a safety marker
-     * @throws AiProviderException when validation or local inference fails
+     * @return text-only response containing non-blank generated text
+     * @throws AiProviderException when validation or local inference fails, or with category
+     *         {@link AiErrorCategory#OUTPUT_REJECTED} when output is unsafe or empty
      */
     @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
@@ -169,10 +170,18 @@ public final class LocalGenerationModelProvider implements AiProvider {
         });
     }
 
-    static AiResponse generationResponse(String generated) {
-        if (PromptInjectionDefense.containsSafetyMarker(generated)) return AiResponse.text("");
+    static AiResponse generationResponse(String generated) throws AiProviderException {
+        if (PromptInjectionDefense.containsSafetyMarker(generated)
+            || generated.contains(CHAT_START) || generated.contains(CHAT_END)) {
+            throw invalid("Local generation output contains internal safety or chat markers")
+                .withCategory(AiErrorCategory.OUTPUT_REJECTED);
+        }
         String text = generated.trim();
-        if (text.isEmpty() == false && text.endsWith(".") == false) text += "...";
+        if (text.isEmpty()) {
+            throw invalid("Local generation returned no text")
+                .withCategory(AiErrorCategory.OUTPUT_REJECTED);
+        }
+        if (text.endsWith(".") == false) text += "...";
         return AiResponse.text(text);
     }
 
@@ -229,9 +238,13 @@ public final class LocalGenerationModelProvider implements AiProvider {
             .protectUntrustedText(request.inputText(), UntrustedSource.INPUT_TEXT).protectedText()));
         append(user, chatContent(PromptInjectionDefense
             .protectUntrustedText(request.userPrompt(), UntrustedSource.USER_PROMPT).protectedText()));
+        append(user, chatContent(PromptInjectionDefense.getTaskInstructionsContent(instructions)));
 
         StringBuilder prompt = new StringBuilder();
-        prompt.append(CHAT_START).append("system\n").append(instructions).append(CHAT_END).append('\n');
+        // EuroLLM can echo data when the task is embedded in a marked system block.
+        // Keep all security rules in system; put the trusted task after protected source data.
+        prompt.append(CHAT_START).append("system\n")
+            .append(PromptInjectionDefense.getSecurityInstructions(instructions)).append(CHAT_END).append('\n');
         appendMessage(prompt, "user", user.toString());
         prompt.append(CHAT_START).append("assistant\n");
         return prompt.toString();

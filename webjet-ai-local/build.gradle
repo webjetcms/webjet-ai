@@ -54,6 +54,36 @@ tasks.register('localModelSmokeTest', Test) {
         systemProperty 'localModelBundle', bundleFile.absolutePath
     }
 }
+tasks.register('localGenerationModelSmokeTest', Test) {
+    group = 'verification'
+    description = 'Runs opt-in generation regressions against a supplied production bundle in a fresh JVM.'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    workingDir = layout.buildDirectory.get().asFile
+    forkEvery = 1
+    useJUnitPlatform { includeTags 'local-model-smoke' }
+    filter {
+        includeTestsMatching 'com.webjetcms.ai.provider.local.LocalGenerationModelSmokeTest'
+        failOnNoMatchingTests = true
+    }
+    outputs.upToDateWhen { false }
+    shouldRunAfter test
+    doFirst {
+        String bundle = providers.gradleProperty('localModelBundle').orNull
+        if (bundle == null || bundle.isBlank()) {
+            throw new GradleException(
+                'localGenerationModelSmokeTest requires -PlocalModelBundle=/path/model.zip'
+            )
+        }
+        File bundleFile = rootProject.file(bundle)
+        if (bundleFile.isFile() == false) {
+            throw new GradleException(
+                "localGenerationModelSmokeTest bundle does not exist or is not a file: ${bundleFile}"
+            )
+        }
+        systemProperty 'localModelBundle', bundleFile.absolutePath
+    }
+}
 rootProject.ext.configurePublication(project, 'webjet-ai-local', 'WebJET AI Local', 'info@interway.sk', false)
 def checkStandaloneBoundary = rootProject.ext.registerStandaloneBoundary(project,
     'Rejects host-framework imports from the local runtime artifact.',

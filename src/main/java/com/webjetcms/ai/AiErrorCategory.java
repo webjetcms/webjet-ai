@@ -12,5 +12,8 @@ public enum AiErrorCategory {
     INVALID_CONTINUATION,
 
     /** The provider adapter or selected model does not support the requested operation. */
-    UNSUPPORTED_OPERATION
+    UNSUPPORTED_OPERATION,
+
+    /** Generated output was discarded because it was unsafe or empty. */
+    OUTPUT_REJECTED
 }

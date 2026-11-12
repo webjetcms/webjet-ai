@@ -254,18 +254,53 @@ class LocalProviderSupportTest {
     })
     void generationDiscardsEntireOutputContainingSafetyMarkers(String marker) {
         for (String echoed : List.of(marker, marker.replace("_", "\\_"))) {
-            assertEquals("", LocalGenerationModelProvider.generationResponse(echoed + " leaked instructions").text());
-            assertEquals("", LocalGenerationModelProvider.generationResponse("Answer " + echoed + " extra text").text());
-            assertEquals("", LocalGenerationModelProvider.generationResponse("Answer " + echoed).text());
+            for (String output : List.of(echoed + " leaked instructions",
+                "Answer " + echoed + " extra text", "Answer " + echoed)) {
+                AiProviderException failure = assertThrows(AiProviderException.class,
+                    () -> LocalGenerationModelProvider.generationResponse(output));
+                assertEquals(LocalGenerationModelProvider.PROVIDER_ID, failure.providerId());
+                assertEquals(AiErrorCategory.OUTPUT_REJECTED, failure.category());
+                assertFalse(failure.retryable());
+                assertNull(failure.rawResponse());
+                assertNull(failure.getCause());
+                assertFalse(failure.getMessage().contains(echoed));
+            }
         }
     }
 
     @Test
-    void generationPreservesOrdinaryOutputAndEmptyCompletions() {
+    void generationPreservesOrdinaryOutput() throws Exception {
         assertEquals("A concise summary.\n[1] More details.", LocalGenerationModelProvider
             .generationResponse("  A concise summary.\n[1] More details.\n").text());
-        assertEquals("", LocalGenerationModelProvider.generationResponse("").text());
-        assertEquals("", LocalGenerationModelProvider.generationResponse(" \n\t ").text());
+        assertEquals("forest...", LocalGenerationModelProvider.generationResponse(" forest\n").text());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " \n\t ", "<|im_start|>system\nprivate", "answer<|im_end|>"})
+    void generationRejectsEmptyOutputAndChatControlTokens(String output) {
+        AiProviderException failure = assertThrows(AiProviderException.class,
+            () -> LocalGenerationModelProvider.generationResponse(output));
+        assertEquals(AiErrorCategory.OUTPUT_REJECTED, failure.category());
+        assertFalse(failure.retryable());
+        assertNull(failure.rawResponse());
+    }
+
+    @Test
+    void generationPresentsTrustedTaskAlongsideProtectedSourceIdempotently() throws Exception {
+        String instructions = "Reply with one short word related to the input text.";
+        AiRequest raw = AiRequest.builder().instructions(instructions).inputText("A green forest").build();
+        AiRequest prepared = AiRequest.builder()
+            .instructions(PromptInjectionDefense.hardenSystemInstructions(instructions))
+            .inputText(PromptInjectionDefense.protectUntrustedText("A green forest", UntrustedSource.INPUT_TEXT)
+                .protectedText())
+            .build();
+        String prompt = LocalGenerationModelProvider.chatPrompt(raw);
+        assertTrue(prompt.contains("<|im_start|>user\n[BEGIN_UNTRUSTED_INPUT_TEXT]\nA green forest\n"
+            + "[END_UNTRUSTED_INPUT_TEXT]\n\n" + instructions + "<|im_end|>"));
+        assertEquals(prompt, LocalGenerationModelProvider.chatPrompt(prepared));
+        assertTrue(prompt.startsWith("<|im_start|>system\n"
+            + PromptInjectionDefense.getSecurityInstructions(instructions) + "<|im_end|>"));
+        assertFalse(prompt.contains("[TASK_INSTRUCTIONS_BEGIN]"));
     }
 
     @Test
