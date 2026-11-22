@@ -17,6 +17,7 @@ public final class AiRequest {
 
     private final List<AiTool> tools;
     private final AiToolResult toolResult;
+    private final boolean reportRejectedToolCalls;
     private final AiOperation operation;
     private final String model;
     private final String instructions;
@@ -47,6 +48,7 @@ public final class AiRequest {
         operation = Objects.requireNonNullElse(builder.operation, AiOperation.TEXT);
         tools = builder.tools;
         toolResult = builder.toolResult;
+        reportRejectedToolCalls = builder.reportRejectedToolCalls;
         model = builder.model;
         instructions = builder.instructions;
         inputText = builder.inputText;
@@ -74,6 +76,7 @@ public final class AiRequest {
             .operation(source.operation)
             .model(source.model)
             .toolResult(source.toolResult)
+            .reportRejectedToolCalls(source.reportRejectedToolCalls)
             .instructions(preparedInstructions)
             .inputText(source.inputTextProtection.protectedText())
             .userPrompt(source.userPromptProtection.protectedText())
@@ -193,11 +196,15 @@ public final class AiRequest {
     /** {@return the previous function call's output, or null} */
     public AiToolResult toolResult() { return toolResult; }
 
+    /** {@return whether a provider may return a rejected call for host-managed correction} */
+    public boolean reportRejectedToolCalls() { return reportRejectedToolCalls; }
+
     /** Builds an immutable {@link AiRequest}. */
     public static final class Builder {
         private AiOperation operation = AiOperation.TEXT;
         private List<AiTool> tools = List.of();
         private AiToolResult toolResult;
+        private boolean reportRejectedToolCalls;
         private String model;
         private String instructions;
         private String inputText;
@@ -224,6 +231,13 @@ public final class AiRequest {
             this.tools = selected;
             return this;
         }
+
+        /**
+         * Allows tool steps to report a malformed call separately from an answer or executable call.
+         * @param report true if the caller handles {@link AiToolStep#rejectedCall()}
+         * @return this builder
+         */
+        public Builder reportRejectedToolCalls(boolean report) { reportRejectedToolCalls = report; return this; }
 
         /**
          * Supplies the previous call's output. Pair it with previousResponseId on a stored chat.

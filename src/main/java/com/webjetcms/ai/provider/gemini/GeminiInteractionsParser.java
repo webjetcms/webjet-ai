@@ -46,18 +46,20 @@ final class GeminiInteractionsParser {
     static AiToolStep parseChatStep(String payload, AiLifecycleListener lifecycle) throws IOException {
         JsonNode root = parseObject(payload);
         if (root.path("id").isTextual()) observeId(lifecycle, root.path("id").textValue());
-        return parseStep(root, List.of());
+        return parseStep(root, List.of(), false);
     }
 
     /** Exposes a returned ID before checking whether the interaction completed successfully. */
-    static AiToolStep parseStep(String payload, AiLifecycleListener lifecycle, List<AiTool> tools) throws IOException {
-        return parseStep(ToolJson.readResponse(payload, lifecycle), tools);
+    static AiToolStep parseStep(String payload, AiLifecycleListener lifecycle, List<AiTool> tools,
+            boolean reportRejectedCalls) throws IOException {
+        return parseStep(ToolJson.readResponse(payload, lifecycle), tools, reportRejectedCalls);
     }
 
-    private static AiToolStep parseStep(JsonNode root, List<AiTool> tools) throws IOException {
+    private static AiToolStep parseStep(JsonNode root, List<AiTool> tools, boolean reportRejectedCalls) throws IOException {
         rejectError(root);
         String id = requiredText(root, "id");
         AiToolCall call = null;
+        AiToolStep.RejectedCall rejected = null;
         JsonNode steps = root.path("steps");
         if (steps.isArray() == false) {
             throw new IOException("Gemini interaction response does not contain a steps array.");
@@ -70,12 +72,18 @@ final class GeminiInteractionsParser {
             String stepType = requiredText(step, "type");
             if ("function_call".equals(stepType)) {
                 String name = requiredText(step, "name");
-                if (call != null || tools.stream().noneMatch(tool -> tool.name().equals(name))) {
+                if (call != null || rejected != null || tools.stream().noneMatch(tool -> tool.name().equals(name))) {
                     throw new IOException("Gemini returned multiple calls or a function that was not offered.");
                 }
                 JsonNode arguments = step.path("arguments");
-                if (!arguments.isObject()) throw new IOException("Gemini function arguments must be a JSON object.");
-                call = new AiToolCall(requiredText(step, "id"), name, arguments.toString());
+                String callId = step.path("id").textValue();
+                if (callId != null && !callId.isBlank() && arguments.isObject()) {
+                    call = new AiToolCall(callId, name, arguments.toString());
+                } else if (reportRejectedCalls) {
+                    rejected = new AiToolStep.RejectedCall(callId);
+                } else {
+                    throw new IOException("Gemini function calls require a call ID and a JSON arguments object.");
+                }
             } else if ("model_output".equals(stepType)) {
                 JsonNode content = step.path("content");
                 if (content.isArray() == false) {
@@ -91,10 +99,13 @@ final class GeminiInteractionsParser {
                 }
             }
         }
-        if (call == null) {
+        if (call == null && rejected == null) {
             requireCompleted(root);
         } else if (!"requires_action".equals(requiredText(root, "status"))) {
             throw new IOException("Gemini function calls require an interaction with status requires_action.");
+        }
+        if (rejected != null) {
+            return new AiToolStep(new AiResponse(null, List.of(), parseUsage(root.path("usage")), "requires_action", id), null, rejected);
         }
         return new AiToolStep(response(text, root, id, call != null), call);
     }

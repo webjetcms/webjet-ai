@@ -569,7 +569,7 @@ public final class AiClient implements AutoCloseable {
             AiRequest prepared = prepareRequest(selected, request, true);
             lifecycle.submitting(token);
             AiToolStep step = selected.executeToolStep(prepared, config, token, lifecycle);
-            return new AiToolStep(cleanChatResponse(request, step.response()), step.toolCall());
+            return new AiToolStep(cleanChatResponse(request, step.response()), step.toolCall(), step.rejectedCall());
         });
     }
 

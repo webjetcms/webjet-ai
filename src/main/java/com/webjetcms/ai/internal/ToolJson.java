@@ -1,10 +1,12 @@
 package com.webjetcms.ai.internal;
 
 import java.io.IOException;
+import java.util.Map;
 
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,7 +18,39 @@ public final class ToolJson {
         DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY, DeserializationFeature.FAIL_ON_TRAILING_TOKENS,
         DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
 
+    private static final TypeReference<Map<String, Object>> FIELDS = new TypeReference<>() {};
+
     private ToolJson() { }
+
+    /**
+     * Reads a single JSON value, rejecting trailing tokens and duplicate fields.
+     * @param value serialized JSON
+     * @return decoded value
+     * @throws JsonProcessingException for malformed or ambiguous input
+     */
+    public static JsonNode readTree(String value) throws JsonProcessingException {
+        return JSON.readTree(value);
+    }
+
+    /**
+     * Decodes object fields into ordinary Java values.
+     * @param object parsed JSON object
+     * @return decoded fields, retaining decimal precision and JSON nulls
+     */
+    public static Map<String, Object> fields(JsonNode object) {
+        return JSON.convertValue(object, FIELDS);
+    }
+
+    /**
+     * Compares JSON values by content, including numerically equal values with different scales.
+     * @param left first JSON value
+     * @param right second JSON value
+     * @return whether both represent the same JSON value
+     */
+    public static boolean equalValues(Object left, Object right) {
+        return JSON.valueToTree(left).equals((a, b) -> a.isNumber() && b.isNumber()
+            ? a.decimalValue().compareTo(b.decimalValue()) : a.equals(b) ? 0 : 1, JSON.valueToTree(right));
+    }
 
     /**
      * Parses one complete JSON object and rejects duplicate fields.
@@ -27,7 +61,7 @@ public final class ToolJson {
     public static JsonNode object(String value) {
         if (value != null) {
             try {
-                JsonNode node = JSON.readTree(value);
+                JsonNode node = readTree(value);
                 if (node != null && node.isObject()) return node;
             } catch (JsonProcessingException invalid) {
                 // Parser diagnostics may contain untrusted arguments.

@@ -475,7 +475,7 @@ public final class OpenAiProvider implements AiProvider {
                 if (root != null && root.path("id").isTextual()) lifecycle.onResponseId(root.path("id").textValue());
             }
             return request.operation() == AiOperation.CHAT
-                ? parseChatResponse(root, response, isContinuation(request), request.tools())
+                ? parseChatResponse(root, response, isContinuation(request), request.tools(), toolStep && request.reportRejectedToolCalls())
                 : new AiToolStep(parseTextResponse(root, response), null);
         } catch (IOException | RuntimeException exception) {
             throw invalidResponse("Could not parse the OpenAI text response", response, exception);
@@ -775,10 +775,11 @@ public final class OpenAiProvider implements AiProvider {
      * @throws AiProviderException if completion, output, or continuation validation fails
      */
     static AiResponse parseChatResponse(JsonNode root, String response, boolean continuation) throws AiProviderException {
-        return parseChatResponse(root, response, continuation, List.of()).response();
+        return parseChatResponse(root, response, continuation, List.of(), false).response();
     }
 
-    private static AiToolStep parseChatResponse(JsonNode root, String response, boolean continuation, List<AiTool> tools)
+    private static AiToolStep parseChatResponse(JsonNode root, String response, boolean continuation, List<AiTool> tools,
+            boolean reportRejectedCalls)
             throws AiProviderException {
         ensureSuccessfulResponse(root, response, continuation);
         if ("completed".equals(textOrNull(root.get("status"))) == false || root.hasNonNull("error")) {
@@ -796,17 +797,20 @@ public final class OpenAiProvider implements AiProvider {
             throw invalidResponse("OpenAI chat response contains invalid output", response, null);
         }
         AiToolCall call = null;
+        AiToolStep.RejectedCall rejected = null;
         for (JsonNode output : outputs) {
             String type = textOrNull(output.get("type"));
             if ("function_call".equals(type)) {
                 String name = output.path("name").textValue();
-                if (call != null || tools.stream().noneMatch(tool -> tool.name().equals(name))) {
+                if (call != null || rejected != null || tools.stream().noneMatch(tool -> tool.name().equals(name))) {
                     throw invalidResponse("Unexpected OpenAI function call", response, null);
                 }
+                String callId = output.path("call_id").textValue();
                 try {
-                    call = new AiToolCall(output.path("call_id").textValue(), name, output.path("arguments").textValue());
+                    call = new AiToolCall(callId, name, output.path("arguments").textValue());
                 } catch (IllegalArgumentException invalid) {
-                    throw invalidResponse("Malformed OpenAI function call", response, invalid);
+                    if (!reportRejectedCalls) throw invalidResponse("Malformed OpenAI function call", response, invalid);
+                    rejected = new AiToolStep.RejectedCall(callId);
                 }
             } else if ("message".equals(type) == false && "reasoning".equals(type) == false) {
                 throw invalidResponse("OpenAI chat response contains an unsupported output action", response, null);
@@ -817,11 +821,11 @@ public final class OpenAiProvider implements AiProvider {
             }
         }
 
-        String text = outputText(root, true);
-        if (call == null && isBlank(text)) {
+        String text = rejected == null ? outputText(root, true) : null;
+        if (rejected == null && call == null && isBlank(text)) {
             throw invalidResponse("OpenAI chat response does not contain usable output text", response, null);
         }
-        return new AiToolStep(new AiResponse(text, List.of(), parseUsage(root.path("usage")), "completed", id.textValue()), call);
+        return new AiToolStep(new AiResponse(text, List.of(), parseUsage(root.path("usage")), "completed", id.textValue()), call, rejected);
     }
 
     /**

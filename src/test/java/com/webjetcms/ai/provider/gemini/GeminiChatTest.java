@@ -104,7 +104,26 @@ class GeminiChatTest {
         for (String payload : List.of(pending(""), pending(CALL + "," + CALL), pending(CALL.replace("lookup", "other")),
                 pending(CALL.replace("call-7", "")), pending(CALL.replace("{\"key\":7}", "null")),
                 pending(CALL.replace("\"key\":7", "\"key\":7,\"key\":9")), pending(CALL).replace("requires_action", "failed"))) {
-            assertThrows(IOException.class, () -> GeminiInteractionsParser.parseStep(payload, AiLifecycleListener.none(), List.of(LOOKUP)));
+            assertThrows(IOException.class, () -> GeminiInteractionsParser.parseStep(payload, AiLifecycleListener.none(), List.of(LOOKUP), false));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void reportsAnUnambiguousRejectedToolCall(boolean missingId) throws IOException {
+        String malformed = missingId ? CALL.replace("\"id\":\"call-7\",", "") : CALL.replace("{\"key\":7}", "[]");
+        var ids = new ArrayList<String>();
+        var rejected = GeminiInteractionsParser.parseStep(pending(malformed), ids::add, List.of(LOOKUP), true);
+        assertEquals(List.of("turn-7"), ids);
+        assertEquals("turn-7", rejected.response().responseId());
+        assertEquals(12, rejected.response().usage().totalTokens());
+        assertNull(rejected.response().text());
+        assertNull(rejected.toolCall());
+        assertEquals(missingId ? null : "call-7", rejected.rejectedCall().callId());
+        for (String payload : List.of(pending(malformed + "," + CALL), pending(CALL + "," + malformed),
+                pending(malformed.replace("lookup", "other")), pending(malformed).replace("requires_action", "completed"),
+                pending(CALL.replace("\"key\":7", "\"key\":7,\"key\":9")))) {
+            assertThrows(IOException.class, () -> GeminiInteractionsParser.parseStep(payload, ids::add, List.of(LOOKUP), true));
         }
     }
 
@@ -115,7 +134,7 @@ class GeminiChatTest {
              {"type":"model_output","content":[{"type":"text","text":"Done"}]}]}
             """.formatted(CALL);
         var observed = new ArrayList<String>();
-        assertThrows(IOException.class, () -> GeminiInteractionsParser.parseStep(payload, observed::add, List.of(LOOKUP)));
+        assertThrows(IOException.class, () -> GeminiInteractionsParser.parseStep(payload, observed::add, List.of(LOOKUP), true));
         assertEquals(List.of("turn-1"), observed);
     }
 

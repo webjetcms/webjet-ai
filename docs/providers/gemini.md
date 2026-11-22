@@ -178,6 +178,13 @@ step. A result alone is sufficient. Offer tools again if the model can request
 another call. See the [shared API example](openai.md#native-function-calling)
 and [Gemini Interactions reference](https://aistudio.google.com/api-reference/interactions-api).
 
+Set `reportRejectedToolCalls(true)` to receive a rejected call when a single offered
+function in a `requires_action` interaction has a missing call ID or non-object
+arguments. The step retains the interaction ID and usage. If the call ID exists,
+return correction feedback as its result. If the call ID is missing, repeat the
+previous model request within the same attempt budget. Ambiguous interactions,
+multiple calls and unoffered functions still fail.
+
 ## Multimodal text request
 
 Use `TEXT` when media is input and the expected response is text.

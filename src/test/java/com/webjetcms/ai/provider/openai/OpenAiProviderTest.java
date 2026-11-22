@@ -3,6 +3,7 @@ package com.webjetcms.ai.provider.openai;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -303,6 +304,31 @@ class OpenAiProviderTest {
             case "incomplete" -> call.put("status", "in_progress");
         }
         assertToolStepRejected(LOOKUP_REQUEST, root.toString(), "resp_1");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void reportsOnlyAnUnambiguousCompletedRejectedCall(boolean missingId) throws Exception {
+        var request = AiRequest.builder().operation(AiOperation.CHAT).model("gpt-test").store(true)
+            .userPrompt("Look it up").tools(LOOKUP_REQUEST.tools()).reportRejectedToolCalls(true).build();
+        var root = (ObjectNode) MAPPER.readTree(LOOKUP_RESPONSE);
+        var output = root.withArray("output");
+        var call = (ObjectNode) output.get(0);
+        if (missingId) call.remove("call_id");
+        else call.put("arguments", "{} {}");
+        try (var client = AiClient.of(new OpenAiProvider(new RecordingHttpClient(200, root.toString())))) {
+            var step = client.executeToolStep("openai", request, embeddingConfig("key", "trusted"));
+            assertNull(step.toolCall());
+            assertNull(step.response().text());
+            assertEquals("resp_1", step.response().responseId());
+            assertEquals(9, step.response().usage().totalTokens());
+            assertEquals(missingId ? null : "call_1", step.rejectedCall().callId());
+        }
+        call.put("status", "in_progress");
+        assertToolStepRejected(request, root.toString(), "resp_1");
+        call.put("status", "completed");
+        output.add(call.deepCopy());
+        assertToolStepRejected(request, root.toString(), "resp_1");
     }
 
     @ParameterizedTest

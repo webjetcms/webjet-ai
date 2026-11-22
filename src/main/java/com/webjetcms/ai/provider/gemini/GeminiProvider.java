@@ -388,7 +388,7 @@ public final class GeminiProvider implements AiProvider {
             try {
                 if (stream == false) {
                     if (mode == ResponseMode.TOOL_STEP) {
-                        return GeminiInteractionsParser.parseStep(payload, lifecycle, request.tools());
+                        return GeminiInteractionsParser.parseStep(payload, lifecycle, request.tools(), request.reportRejectedToolCalls());
                     }
                     return chat ? GeminiInteractionsParser.parseChatStep(payload, lifecycle)
                         : new AiToolStep(GeminiResponseParser.parse(payload), null);

@@ -169,6 +169,35 @@ request. Both [OpenAI Responses](docs/providers/openai.md#native-function-callin
 and [Gemini Interactions](docs/providers/gemini.md#native-function-calling) implement
 this non-streaming API.
 
+### Validating tool arguments
+
+Call `AiToolArgumentValidator.validate(tool, call)` after selecting the offered function
+and before executing it. An `InvalidArguments` exception provides correction text
+using only fields and constraints from the registered schema. For already decoded JSON,
+use `validate(schema, arguments)`. Applications still authorize the operation.
+
+The validator supports `type` (including nullable unions), `enum`, `minimum`,
+`properties`, `required`, `additionalProperties`, `patternProperties`, `items`,
+`oneOf`, `anyOf`, boolean subschemas and local references to entries in `$defs`.
+It accepts the `description` and `default` annotations. Unsupported schema keywords
+raise `IllegalArgumentException`. Validation is opt-in for applications using this subset.
+Local references use URI fragment and JSON Pointer escaping. Recursive definitions may
+refer back to themselves through child properties or array items. A reference cycle
+that evaluates the same argument is a schema error. Arguments may be nested up to 80
+levels below the root. Beyond that limit, `validate` throws `InvalidArguments` and
+`matches` returns `false`.
+
+### Tools with text-only models
+
+Include `AiTextToolProtocol.instructions()` and the descriptions of the functions
+you offer in the request instructions. Pass the complete response to
+`AiTextToolProtocol.parse(text, maxChars)`. An `Answer` contains the final text,
+a `Call` contains the proposed name and a deeply immutable snapshot of its decoded arguments, and an `Invalid`
+contains correction feedback. Check the offered name, validate the arguments and
+authorize the call before dispatch. The application supplies the result as untrusted
+input on the next request and controls the maximum number of attempts. Use this
+parser only for turns where you supplied these text-protocol instructions.
+
 ## Response lifecycle and failed attempts
 
 Since `2.1.0`, generation calls expose optional response-ID observation independently

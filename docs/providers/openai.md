@@ -57,6 +57,12 @@ conversation history, and the call ID associates the output with the requested f
 A result-only request can finish without offering further tools. For additional steps,
 supply the current tool list again. The caller controls execution, retries and budgets.
 
+Set `reportRejectedToolCalls(true)` when the caller handles `step.rejectedCall()` before
+reading the answer. A rejection carries the completed response ID and usage. If the
+rejection has a call ID, return corrective feedback as its tool result. If the ID is
+missing, repeat the previous request with its existing input. Count both paths against
+the same attempt limit. A rejected call has no executable arguments.
+
 ## Configuration and client
 
 ```java
