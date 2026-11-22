@@ -10,6 +10,7 @@ import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequestLifecycle;
 import com.webjetcms.ai.AiRequestLifecycle.State;
 import com.webjetcms.ai.AiResponse;
+import com.webjetcms.ai.AiToolStep;
 
 /** Per-call lifecycle tracking; instances must never be stored in shared providers. */
 public final class LifecycleSupport implements AiLifecycleListener {
@@ -68,11 +69,29 @@ public final class LifecycleSupport implements AiLifecycleListener {
     public AiResponse call(
         AiProviderConfig config, AiCancellationToken token, CancellationSupport.Call<AiResponse> operation
     ) throws AiProviderException {
+        return tracked(config, token, operation, AiResponse::responseId);
+    }
+
+    /**
+     * Tracks the same lifecycle for a native function-calling response.
+     * @param config provider credentials and connection settings
+     * @param token per-call cancellation token
+     * @param operation operation returning a completed tool step
+     * @return completed tool step
+     * @throws AiProviderException if the operation fails or is cancelled
+     */
+    public AiToolStep callStep(AiProviderConfig config, AiCancellationToken token, CancellationSupport.Call<AiToolStep> operation)
+            throws AiProviderException {
+        return tracked(config, token, operation, step -> step.response().responseId());
+    }
+
+    private <T> T tracked(AiProviderConfig config, AiCancellationToken token, CancellationSupport.Call<T> operation,
+            java.util.function.Function<T, String> responseId) throws AiProviderException {
         try {
             return CancellationSupport.call(providerId, token, () -> {
-                AiResponse response = operation.invoke();
-                if (response != null) onResponseId(response.responseId());
-                return response;
+                T result = operation.invoke();
+                if (result != null) onResponseId(responseId.apply(result));
+                return result;
             });
         } catch (AiProviderException exception) {
             exception = observeFailure(exception);

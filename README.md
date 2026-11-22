@@ -150,7 +150,7 @@ configuration. IDs are provider-specific and must not be reused across providers
 or unrelated conversations. Omit `previousResponseId` to start a new conversation.
 The client keeps no conversation history or current ID of its own.
 
-Every chat turn requires explicit `store(true)` and non-blank `inputText` or
+Ordinary chat turns require explicit `store(true)` and non-blank `inputText` or
 `userPrompt`; instructions alone are insufficient. Binary input, image options,
 translation options, and blank continuation IDs are rejected. `previousResponseId`
 is rejected on operations other than `CHAT`. OpenRouter and local providers do not
@@ -162,6 +162,12 @@ input blocks echoed by the model are removed by `AiClient`, including during
 streaming; response metadata is retained. See the [OpenAI](docs/providers/openai.md#chat)
 and [Gemini](docs/providers/gemini.md#chat) guides for protocol details and
 [stable error categories](#stable-error-categories) for continuation failures.
+
+For caller-executed functions, use `executeToolStep` with a stored chat request.
+Pass the returned call ID with the tool result and the response ID with the next
+request. Both [OpenAI Responses](docs/providers/openai.md#native-function-calling)
+and [Gemini Interactions](docs/providers/gemini.md#native-function-calling) implement
+this non-streaming API.
 
 ## Response lifecycle and failed attempts
 

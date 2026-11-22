@@ -17,6 +17,16 @@ import org.junit.jupiter.api.Test;
 class CatalogueAndResponseValueTypesTest {
 
     @Test
+    void toolCallAndResultDiagnosticsOmitPayloads() {
+        String secret = "private-tool-payload";
+        var call = new AiToolCall("call-1", "lookup", "{\"token\":\"" + secret + "\"}");
+        var result = new AiToolResult("call-1", secret);
+        assertFalse(call.toString().contains(secret));
+        assertFalse(result.toString().contains(secret));
+        assertFalse(new AiToolStep(AiResponse.text(""), call).toString().contains(secret));
+    }
+
+    @Test
     void modelDisplayLabelFallsBackToIdentifier() {
         assertEquals("Readable name", new ModelInfo("model-id", "Readable name").displayLabel());
         assertEquals("model-id", new ModelInfo("model-id", " ").displayLabel());

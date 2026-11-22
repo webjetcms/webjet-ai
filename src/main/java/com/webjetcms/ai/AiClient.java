@@ -517,9 +517,59 @@ public final class AiClient implements AutoCloseable {
         Objects.requireNonNull(token, "token");
         LifecycleSupport lifecycle = new LifecycleSupport(providerId, lifecycleListener);
         return lifecycle.call(config, token, () -> {
-            AiRequest prepared = prepareRequest(selectedProvider, request);
+            AiRequest prepared = prepareRequest(selectedProvider, request, false);
             lifecycle.submitting(token);
             return cleanChatResponse(request, selectedProvider.execute(prepared, config, token, lifecycle));
+        });
+    }
+
+    /**
+     * Reports whether this adapter implements non-streaming tool steps for the selected chat model.
+     * @param providerId registered provider identifier
+     * @param model selected model identifier
+     * @return whether the adapter supports native tool steps
+     */
+    public boolean supportsToolCalling(String providerId, String model) {
+        return provider(providerId).supportsToolCalling(model);
+    }
+
+    /**
+     * Executes one stored chat step. The application handles any returned tool call.
+     * @param providerId registered provider identifier
+     * @param request stored chat request, including the selected tools or a previous result
+     * @param config provider credentials and connection settings
+     * @return completed step with an optional tool call
+     * @throws AiProviderException if validation or execution fails
+     */
+    public AiToolStep executeToolStep(String providerId, AiRequest request, AiProviderConfig config) throws AiProviderException {
+        return executeToolStep(providerId, request, config, AiCancellationToken.none(), AiLifecycleListener.none());
+    }
+
+    /**
+     * Executes one tool step with the usual cancellation and response-ID lifecycle.
+     * @param providerId registered provider identifier
+     * @param request stored chat request, including the selected tools or a previous result
+     * @param config provider credentials and connection settings
+     * @param token per-call cancellation token
+     * @param listener observer for provider response IDs
+     * @return completed step with an optional tool call
+     * @throws AiProviderException if validation, cancellation, or execution prevents completion
+     */
+    public AiToolStep executeToolStep(String providerId, AiRequest request, AiProviderConfig config,
+            AiCancellationToken token, AiLifecycleListener listener) throws AiProviderException {
+        AiProvider selected = provider(providerId);
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(token, "token");
+        var lifecycle = new LifecycleSupport(providerId, listener);
+        return lifecycle.callStep(config, token, () -> {
+            if (!selected.supportsToolCalling(request.model())) {
+                throw new AiProviderException(providerId, "Native function calling is unsupported")
+                    .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
+            }
+            AiRequest prepared = prepareRequest(selected, request, true);
+            lifecycle.submitting(token);
+            AiToolStep step = selected.executeToolStep(prepared, config, token, lifecycle);
+            return new AiToolStep(cleanChatResponse(request, step.response()), step.toolCall());
         });
     }
 
@@ -685,7 +735,7 @@ public final class AiClient implements AutoCloseable {
         Objects.requireNonNull(token, "token");
         LifecycleSupport lifecycle = new LifecycleSupport(providerId, lifecycleListener);
         return lifecycle.call(config, token, () -> {
-            AiRequest prepared = prepareRequest(selectedProvider, request);
+            AiRequest prepared = prepareRequest(selectedProvider, request, false);
             AiStreamListener guarded = CancellationSupport.listener(providerId, token, listener);
             ChatResponseText filter = request != null && request.operation() == AiOperation.CHAT
                 ? new ChatResponseText() : null;
@@ -724,9 +774,9 @@ public final class AiClient implements AutoCloseable {
             .redactSecrets(config);
     }
 
-    private static AiRequest prepareRequest(AiProvider provider, AiRequest request) throws AiProviderException {
+    private static AiRequest prepareRequest(AiProvider provider, AiRequest request, boolean nativeTools) throws AiProviderException {
         if (request == null) return null;
-        ChatRequestValidator.validate(provider.id(), request);
+        ChatRequestValidator.validate(provider.id(), request, nativeTools);
         AiInputHandling handling = Objects.requireNonNull(
             provider.inputHandling(request.operation()),
             "provider.inputHandling"

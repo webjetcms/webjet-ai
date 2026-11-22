@@ -24,6 +24,28 @@ import com.webjetcms.ai.internal.LifecycleSupport;
 public interface AiProvider extends AutoCloseable {
 
     /**
+     * Reports adapter support for caller-executed functions on non-streaming stored chat.
+     * @param model selected model identifier
+     * @return whether the adapter supports native tool steps
+     */
+    default boolean supportsToolCalling(String model) { return false; }
+
+    /**
+     * Executes one native function-calling step without invoking application tools.
+     * @param request stored chat request, including the selected tools or a previous result
+     * @param config provider credentials and connection settings
+     * @param token per-call cancellation token
+     * @param listener observer for provider response IDs
+     * @return completed step with an optional tool call
+     * @throws AiProviderException if unsupported, interrupted or rejected
+     */
+    default AiToolStep executeToolStep(AiRequest request, AiProviderConfig config, AiCancellationToken token,
+            AiLifecycleListener listener) throws AiProviderException {
+        throw new AiProviderException(id(), "Native function calling is unsupported")
+            .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
+    }
+
+    /**
      * Returns the stable identifier used to register and select this provider.
      * The value is matched exactly and case-sensitively and is not normalized.
      *

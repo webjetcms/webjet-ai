@@ -12,13 +12,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiLifecycleListener;
 import com.webjetcms.ai.AiStreamListener;
+import com.webjetcms.ai.AiTool;
+import com.webjetcms.ai.AiToolCall;
+import com.webjetcms.ai.AiToolStep;
 import com.webjetcms.ai.TokenUsage;
+import com.webjetcms.ai.internal.ToolJson;
 
 /**
  * Decodes Gemini Interactions responses for text chat with provider-managed continuation.
  *
  * <p>Reads interaction steps, IDs and lifecycle events; generateContent candidate payloads
- * are handled by {@link GeminiResponseParser}. Only model output text is returned.</p>
+ * are handled by {@link GeminiResponseParser}. Native tool steps also expose one caller-executed function.</p>
  */
 final class GeminiInteractionsParser {
 
@@ -35,16 +39,25 @@ final class GeminiInteractionsParser {
      * @throws IOException if the payload is malformed, incomplete, requires a function call or has no usable text
      */
     static AiResponse parse(String payload) throws IOException {
-        return parse(payload, AiLifecycleListener.none());
+        return parseChatStep(payload, AiLifecycleListener.none()).response();
+    }
+
+    /** Parses an ordinary chat interaction and observes its ID before validating the answer. */
+    static AiToolStep parseChatStep(String payload, AiLifecycleListener lifecycle) throws IOException {
+        JsonNode root = parseObject(payload);
+        if (root.path("id").isTextual()) observeId(lifecycle, root.path("id").textValue());
+        return parseStep(root, List.of());
     }
 
     /** Exposes a returned ID before checking whether the interaction completed successfully. */
-    static AiResponse parse(String payload, AiLifecycleListener lifecycle) throws IOException {
-        JsonNode root = parseObject(payload);
-        if (root.path("id").isTextual()) observeId(lifecycle, root.path("id").textValue());
+    static AiToolStep parseStep(String payload, AiLifecycleListener lifecycle, List<AiTool> tools) throws IOException {
+        return parseStep(ToolJson.readResponse(payload, lifecycle), tools);
+    }
+
+    private static AiToolStep parseStep(JsonNode root, List<AiTool> tools) throws IOException {
         rejectError(root);
         String id = requiredText(root, "id");
-        requireCompleted(root);
+        AiToolCall call = null;
         JsonNode steps = root.path("steps");
         if (steps.isArray() == false) {
             throw new IOException("Gemini interaction response does not contain a steps array.");
@@ -55,8 +68,15 @@ final class GeminiInteractionsParser {
                 throw new IOException("Gemini returned an invalid interaction step.");
             }
             String stepType = requiredText(step, "type");
-            rejectFunctionCall(stepType);
-            if ("model_output".equals(stepType)) {
+            if ("function_call".equals(stepType)) {
+                String name = requiredText(step, "name");
+                if (call != null || tools.stream().noneMatch(tool -> tool.name().equals(name))) {
+                    throw new IOException("Gemini returned multiple calls or a function that was not offered.");
+                }
+                JsonNode arguments = step.path("arguments");
+                if (!arguments.isObject()) throw new IOException("Gemini function arguments must be a JSON object.");
+                call = new AiToolCall(requiredText(step, "id"), name, arguments.toString());
+            } else if ("model_output".equals(stepType)) {
                 JsonNode content = step.path("content");
                 if (content.isArray() == false) {
                     throw new IOException("Gemini model output does not contain a content array.");
@@ -71,7 +91,12 @@ final class GeminiInteractionsParser {
                 }
             }
         }
-        return response(text, root, id);
+        if (call == null) {
+            requireCompleted(root);
+        } else if (!"requires_action".equals(requiredText(root, "status"))) {
+            throw new IOException("Gemini function calls require an interaction with status requires_action.");
+        }
+        return new AiToolStep(response(text, root, id, call != null), call);
     }
 
     /**
@@ -182,11 +207,11 @@ final class GeminiInteractionsParser {
         }
     }
 
-    private static AiResponse response(StringBuilder text, JsonNode interaction, String id) throws IOException {
-        if (text.toString().isBlank()) {
+    private static AiResponse response(StringBuilder text, JsonNode interaction, String id, boolean hasCall) throws IOException {
+        if (!hasCall && text.toString().isBlank()) {
             throw new IOException("Gemini interaction returned no usable text.");
         }
-        return new AiResponse(text.toString(), List.of(), parseUsage(interaction.path("usage")), "completed", id);
+        return new AiResponse(text.toString(), List.of(), parseUsage(interaction.path("usage")), requiredText(interaction, "status"), id);
     }
 
     /**
@@ -378,7 +403,7 @@ final class GeminiInteractionsParser {
             if (completed == null) {
                 throw new IOException("Gemini interaction stream ended before completion.");
             }
-            return response(text, completed, id);
+            return response(text, completed, id, false);
         }
     }
 }

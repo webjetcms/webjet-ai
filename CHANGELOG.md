@@ -3,6 +3,11 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- OpenAI Responses and Gemini Interactions support optional caller-executed functions in non-streaming stored chat. Requests can declare functions and submit a correlated result. The new `executeToolStep` method returns the function call alongside the ordinary `AiResponse`.
+- Tool steps reject ambiguous JSON responses and retain a unique response ID for cleanup when nested fields are duplicated. Gemini returns a function call only for interactions with status `requires_action`. Tool call and result diagnostic strings omit their payloads.
+
 ## [2.1.2]
 
 ### Fixed

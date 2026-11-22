@@ -154,7 +154,7 @@ ID becomes `responseId()`. Omit the ID for a fresh conversation.
 
 Each turn sends hardened `instructions` as `system_instruction` and the current
 protected `inputText` and `userPrompt` as text input parts, requesting a text
-response. Every turn requires `store(true)` and meaningful user/source text.
+response. Ordinary chat turns require `store(true)` and meaningful user/source text.
 Binary input, image options, translation options, and continuation IDs on other
 operations are rejected before transport.
 
@@ -163,6 +163,20 @@ The interaction must finish as `completed` with a non-blank ID and usable text.
 Streams must include `interaction.completed` after all steps stop. Function calls,
 incomplete interactions, and malformed streams fail with `AiProviderException`.
 `AiClient` removes echoed input blocks and retains usage and the interaction ID.
+
+## Native function calling
+
+Use `executeToolStep("gemini", request, config)` with `CHAT`, `store(true)` and a
+model that supports Interactions functions. Offer the current functions through
+`AiRequest.Builder.tools(...)`. Each step returns either an answer or one
+`AiToolCall`. Validate and authorize the call in your application before executing it.
+The adapter asks for one function at a time and rejects parallel calls as a group.
+
+To continue, set `previousResponseId` to the returned interaction ID and supply
+`new AiToolResult(call.callId(), output)`. The adapter sends a `function_result`
+step. A result alone is sufficient. Offer tools again if the model can request
+another call. See the [shared API example](openai.md#native-function-calling)
+and [Gemini Interactions reference](https://aistudio.google.com/api-reference/interactions-api).
 
 ## Multimodal text request
 

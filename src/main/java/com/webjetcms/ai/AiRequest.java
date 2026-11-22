@@ -2,6 +2,8 @@ package com.webjetcms.ai;
 
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 
@@ -13,6 +15,8 @@ import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 /** Immutable request passed from a host application to an AI provider. */
 public final class AiRequest {
 
+    private final List<AiTool> tools;
+    private final AiToolResult toolResult;
     private final AiOperation operation;
     private final String model;
     private final String instructions;
@@ -41,6 +45,8 @@ public final class AiRequest {
         ProtectionResult userPromptProtection
     ) {
         operation = Objects.requireNonNullElse(builder.operation, AiOperation.TEXT);
+        tools = builder.tools;
+        toolResult = builder.toolResult;
         model = builder.model;
         instructions = builder.instructions;
         inputText = builder.inputText;
@@ -67,6 +73,7 @@ public final class AiRequest {
         Builder builder = new Builder()
             .operation(source.operation)
             .model(source.model)
+            .toolResult(source.toolResult)
             .instructions(preparedInstructions)
             .inputText(source.inputTextProtection.protectedText())
             .userPrompt(source.userPromptProtection.protectedText())
@@ -75,6 +82,7 @@ public final class AiRequest {
             .previousResponseId(source.previousResponseId)
             .translationOptions(source.translationOptions)
             .imageOptions(source.imageOptions);
+        builder.tools = source.tools;
         return new AiRequest(builder, source.inputTextProtection, source.userPromptProtection);
     }
 
@@ -179,9 +187,17 @@ public final class AiRequest {
         return Collections.unmodifiableSet(sources);
     }
 
+    /** {@return functions offered on this request, in caller order} */
+    public List<AiTool> tools() { return tools; }
+
+    /** {@return the previous function call's output, or null} */
+    public AiToolResult toolResult() { return toolResult; }
+
     /** Builds an immutable {@link AiRequest}. */
     public static final class Builder {
         private AiOperation operation = AiOperation.TEXT;
+        private List<AiTool> tools = List.of();
+        private AiToolResult toolResult;
         private String model;
         private String instructions;
         private String inputText;
@@ -193,6 +209,28 @@ public final class AiRequest {
         private ImageOptions imageOptions;
 
         private Builder() { }
+
+        /**
+         * Offers functions for this model step. An empty list requests no new calls.
+         * @param tools functions offered on this step
+         * @return this builder
+         */
+        public Builder tools(List<AiTool> tools) {
+            var selected = List.copyOf(tools);
+            var names = new HashSet<String>();
+            for (AiTool tool : selected) {
+                if (!names.add(tool.name())) throw new IllegalArgumentException("Duplicate tool name: " + tool.name());
+            }
+            this.tools = selected;
+            return this;
+        }
+
+        /**
+         * Supplies the previous call's output. Pair it with previousResponseId on a stored chat.
+         * @param toolResult output from the originating call
+         * @return this builder
+         */
+        public Builder toolResult(AiToolResult toolResult) { this.toolResult = toolResult; return this; }
 
         /**
          * Selects the operation to execute.

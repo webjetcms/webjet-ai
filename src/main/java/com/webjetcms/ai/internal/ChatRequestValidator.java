@@ -23,8 +23,30 @@ public final class ChatRequestValidator {
      * @throws AiProviderException when chat inputs or continuation fields are invalid
      */
     public static void validate(String providerId, AiRequest request) throws AiProviderException {
+        validate(providerId, request, false);
+    }
+
+    /**
+     * Checks operation, provider support and correlation requirements before tool-enabled calls.
+     * @param providerId registered provider identifier
+     * @param request stored chat request, including the selected tools or a previous result
+     * @param nativeChatTools whether this entry point accepts native chat tools
+     * @throws AiProviderException if the request cannot use this entry point
+     */
+    public static void validate(String providerId, AiRequest request, boolean nativeChatTools) throws AiProviderException {
         if (request == null) return;
+        if (nativeChatTools && request.operation() != AiOperation.CHAT) {
+            throw new AiProviderException(providerId, "Native tool steps require CHAT").withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
+        }
+        if (!nativeChatTools && (!request.tools().isEmpty() || request.toolResult() != null)) {
+            throw new AiProviderException(providerId, "Native tools require executeToolStep")
+                .withCategory(AiErrorCategory.UNSUPPORTED_OPERATION);
+        }
         String previousResponseId = request.previousResponseId();
+        if (request.toolResult() != null && previousResponseId == null) {
+            throw new AiProviderException(providerId, "Tool results require the originating response ID")
+                .withCategory(AiErrorCategory.INVALID_CONTINUATION);
+        }
         if (previousResponseId != null) {
             if (request.operation() != AiOperation.CHAT) {
                 throw new AiProviderException(providerId, "previousResponseId is supported only for CHAT requests");
@@ -41,7 +63,8 @@ public final class ChatRequestValidator {
         if (request.inputMedia() != null || request.imageOptions() != null || request.translationOptions() != null) {
             throw new AiProviderException(providerId, "CHAT accepts text only, without binary input, image or translation options");
         }
-        if (PromptInjectionDefense.hasUntrustedText(request.inputText(), UntrustedSource.INPUT_TEXT) == false
+        if (request.toolResult() == null
+            && PromptInjectionDefense.hasUntrustedText(request.inputText(), UntrustedSource.INPUT_TEXT) == false
             && PromptInjectionDefense.hasUntrustedText(request.userPrompt(), UntrustedSource.USER_PROMPT) == false) {
             throw new AiProviderException(providerId, "CHAT requires non-blank inputText or userPrompt");
         }
