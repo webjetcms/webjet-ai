@@ -49,6 +49,8 @@ import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiResponseDeletion;
 import com.webjetcms.ai.AiStreamListener;
+import com.webjetcms.ai.AiTool;
+import com.webjetcms.ai.AiToolStep;
 import com.webjetcms.ai.BinaryContent;
 import com.webjetcms.ai.EmbeddingOptions;
 import com.webjetcms.ai.EmbeddingRequest;
@@ -63,6 +65,7 @@ import com.webjetcms.ai.internal.LifecycleSupport;
 import com.webjetcms.ai.internal.ResponseDeletionSupport;
 import com.webjetcms.ai.internal.ChatRequestValidator;
 import com.webjetcms.ai.internal.ImageOptionValidator;
+import com.webjetcms.ai.internal.ToolJson;
 import com.webjetcms.ai.security.PromptInjectionDefense;
 import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 
@@ -84,6 +87,8 @@ public final class GeminiProvider implements AiProvider {
     private static final ContentType JSON_UTF_8 = ContentType.create("application/json", StandardCharsets.UTF_8);
     private static final int MAX_CONNECTIONS = 100;
     private static final int MAX_CONNECTIONS_PER_ROUTE = 20;
+
+    private enum ResponseMode { STANDARD, STREAM, TOOL_STEP }
 
     private final CloseableHttpClient httpClient;
 
@@ -269,6 +274,16 @@ public final class GeminiProvider implements AiProvider {
     }
 
     @Override
+    public boolean supportsToolCalling(String model) { return true; }
+
+    @Override
+    public AiToolStep executeToolStep(AiRequest request, AiProviderConfig config, AiCancellationToken token,
+            AiLifecycleListener listener) throws AiProviderException {
+        var lifecycle = new LifecycleSupport(PROVIDER_ID, listener);
+        return lifecycle.callStep(config, token, () -> generate(request, config, ResponseMode.TOOL_STEP, null, token, lifecycle));
+    }
+
+    @Override
     public AiResponse execute(AiRequest request, AiProviderConfig config) throws AiProviderException {
         return execute(request, config, AiCancellationToken.none());
     }
@@ -284,7 +299,7 @@ public final class GeminiProvider implements AiProvider {
         AiRequest request, AiProviderConfig config, AiCancellationToken token, AiLifecycleListener lifecycleListener
     ) throws AiProviderException {
         LifecycleSupport lifecycle = new LifecycleSupport(PROVIDER_ID, lifecycleListener);
-        return lifecycle.call(config, token, () -> generate(request, config, false, null, token, lifecycle));
+        return lifecycle.call(config, token, () -> generate(request, config, ResponseMode.STANDARD, null, token, lifecycle).response());
     }
 
     @Override
@@ -313,8 +328,8 @@ public final class GeminiProvider implements AiProvider {
     ) throws AiProviderException {
         LifecycleSupport lifecycle = new LifecycleSupport(PROVIDER_ID, lifecycleListener);
         return lifecycle.call(config, token, () -> generate(
-            request, config, true, CancellationSupport.listener(PROVIDER_ID, token, listener), token, lifecycle
-        ));
+            request, config, ResponseMode.STREAM, CancellationSupport.listener(PROVIDER_ID, token, listener), token, lifecycle
+        ).response());
     }
 
     /**
@@ -323,23 +338,24 @@ public final class GeminiProvider implements AiProvider {
      *
      * @param request generation or chat request to validate and send
      * @param config credentials, endpoint, and transport settings
-     * @param stream whether to request and parse streaming output
+     * @param mode response format and supported actions for this entry point
      * @param listener fragment recipient, required only for streaming
      * @param token non-null cancellation token for this call
      * @param lifecycle per-call lifecycle tracker
      * @return generated content and metadata, including a continuation ID for chat
      * @throws AiProviderException if validation, transport, parsing, or listener delivery fails
      */
-    private AiResponse generate(
+    private AiToolStep generate(
         AiRequest request,
         AiProviderConfig config,
-        boolean stream,
+        ResponseMode mode,
         AiStreamListener listener,
         AiCancellationToken token,
         LifecycleSupport lifecycle
     ) throws AiProviderException {
         requireConfigured(config);
-        validateRequest(request);
+        validateRequest(request, mode == ResponseMode.TOOL_STEP);
+        boolean stream = mode == ResponseMode.STREAM;
         if (stream && listener == null) {
             throw new AiProviderException(PROVIDER_ID, "Gemini stream listener is required.");
         }
@@ -371,7 +387,11 @@ public final class GeminiProvider implements AiProvider {
 
             try {
                 if (stream == false) {
-                    return chat ? GeminiInteractionsParser.parse(payload, lifecycle) : GeminiResponseParser.parse(payload);
+                    if (mode == ResponseMode.TOOL_STEP) {
+                        return GeminiInteractionsParser.parseStep(payload, lifecycle, request.tools(), request.reportRejectedToolCalls());
+                    }
+                    return chat ? GeminiInteractionsParser.parseChatStep(payload, lifecycle)
+                        : new AiToolStep(GeminiResponseParser.parse(payload), null);
                 }
                 HttpEntity entity = response.getEntity();
                 if (entity == null) {
@@ -380,9 +400,10 @@ public final class GeminiProvider implements AiProvider {
                 try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(entity.getContent(), StandardCharsets.UTF_8)
                 )) {
-                    return chat
+                    AiResponse streamed = chat
                         ? GeminiInteractionsParser.parseStream(reader, listener, lifecycle)
                         : GeminiResponseParser.parseStream(reader, listener);
+                    return new AiToolStep(streamed, null);
                 }
             } catch (IOException exception) {
                 throw new AiProviderException(
@@ -618,7 +639,7 @@ public final class GeminiProvider implements AiProvider {
     }
 
     /**
-     * Builds a text-only Interactions payload with protected inputs and explicit storage settings.
+     * Builds an Interactions payload with protected text, optional function calls and stored history.
      *
      * @param request validated chat request, optionally containing a previous interaction ID
      * @param stream whether to request streaming output
@@ -627,16 +648,35 @@ public final class GeminiProvider implements AiProvider {
     static ObjectNode buildChatRequestBody(AiRequest request, boolean stream) {
         ObjectNode root = MAPPER.createObjectNode();
         root.put("model", normalizeModelId(request.model()));
-        root.put("system_instruction", PromptInjectionDefense.hardenChatInstructions(request.instructions()));
+        String instructions = PromptInjectionDefense.hardenChatInstructions(request.instructions());
+        if (!request.tools().isEmpty()) {
+            instructions += "\nRequest at most one function per turn. Wait for its result before requesting another.";
+            ArrayNode tools = root.putArray("tools");
+            for (AiTool tool : request.tools()) {
+                ObjectNode declaration = tools.addObject().put("type", "function").put("name", tool.name());
+                if (tool.description() != null) declaration.put("description", tool.description());
+                declaration.set("parameters", ToolJson.object(tool.inputSchema()));
+            }
+        } else {
+            root.putArray("response_format").addObject().put("type", "text").put("mime_type", "text/plain");
+        }
+        root.put("system_instruction", instructions);
         root.put("store", request.store());
         root.put("stream", stream);
         if (request.previousResponseId() != null) {
             root.put("previous_interaction_id", request.previousResponseId());
         }
-        ArrayNode input = root.putArray("input");
-        addChatInput(input, request.inputText(), UntrustedSource.INPUT_TEXT);
-        addChatInput(input, request.userPrompt(), UntrustedSource.USER_PROMPT);
-        root.putArray("response_format").addObject().put("type", "text").put("mime_type", "text/plain");
+        ArrayNode text = MAPPER.createArrayNode();
+        addChatInput(text, request.inputText(), UntrustedSource.INPUT_TEXT);
+        addChatInput(text, request.userPrompt(), UntrustedSource.USER_PROMPT);
+        if (request.toolResult() == null) {
+            root.set("input", text);
+        } else {
+            ArrayNode input = root.putArray("input");
+            input.addObject().put("type", "function_result").put("call_id", request.toolResult().callId())
+                .put("result", request.toolResult().output());
+            if (!text.isEmpty()) input.addObject().put("type", "user_input").set("content", text);
+        }
         return root;
     }
 
@@ -839,13 +879,14 @@ public final class GeminiProvider implements AiProvider {
      * Validates the model, chat constraints, and operation-specific image requirements.
      *
      * @param request request to validate
+     * @param nativeTools whether the selected entry point accepts function calls
      * @throws AiProviderException if the request, prompt, media, or image options are invalid
      */
-    private static void validateRequest(AiRequest request) throws AiProviderException {
+    private static void validateRequest(AiRequest request, boolean nativeTools) throws AiProviderException {
         if (request == null) {
             throw new AiProviderException(PROVIDER_ID, "Gemini request is required.");
         }
-        ChatRequestValidator.validate(PROVIDER_ID, request);
+        ChatRequestValidator.validate(PROVIDER_ID, request, nativeTools);
         if (isNotBlank(normalizeModelId(request.model())) == false) {
             throw new AiProviderException(PROVIDER_ID, "Gemini model is required.");
         }

@@ -3,6 +3,7 @@ package com.webjetcms.ai.provider.openai;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -53,6 +54,8 @@ import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
+import com.webjetcms.ai.AiTool;
+import com.webjetcms.ai.AiToolResult;
 import com.webjetcms.ai.BinaryContent;
 import com.webjetcms.ai.EmbeddingOptions;
 import com.webjetcms.ai.EmbeddingRequest;
@@ -67,6 +70,13 @@ import com.webjetcms.ai.security.PromptInjectionDefense.UntrustedSource;
 class OpenAiProviderTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final AiRequest LOOKUP_REQUEST = AiRequest.builder().operation(AiOperation.CHAT).model("gpt-test")
+        .store(true).userPrompt("Look it up")
+        .tools(List.of(new AiTool("lookup", "Look up a record", "{\"type\":\"object\"}"))).build();
+    private static final String LOOKUP_RESPONSE = """
+        {"id":"resp_1","status":"completed","usage":{"total_tokens":9},
+         "output":[{"type":"function_call","name":"lookup","call_id":"call_1","arguments":"{}"}]}
+        """;
 
     @Test
     void classifiesOnlyStructuredErrorsForContinuingChat() throws Exception {
@@ -245,6 +255,111 @@ class OpenAiProviderTest {
             assertEquals(1, transport.calls);
             assertEquals(previousId, MAPPER.readTree(transport.requestBody).path("previous_response_id").textValue());
             return failure;
+        }
+    }
+
+    @Test
+    void nativeFunctionRoundTripUsesCallIdAndKeepsUsage() throws Exception {
+        var transport = new RecordingHttpClient(200, LOOKUP_RESPONSE);
+        var config = embeddingConfig("key", "trusted");
+        try (var client = AiClient.of(new OpenAiProvider(transport))) {
+            assertThrows(AiProviderException.class, () -> client.execute(LOOKUP_REQUEST, config));
+            assertThrows(AiProviderException.class, () -> client.stream(LOOKUP_REQUEST, config, delta -> { }));
+            assertEquals(0, transport.calls);
+            var response = client.executeToolStep("openai", LOOKUP_REQUEST, config);
+            var body = MAPPER.readTree(transport.requestBody);
+            assertEquals("function", body.at("/tools/0/type").textValue());
+            assertEquals("object", body.at("/tools/0/parameters/type").textValue());
+            assertFalse(body.required("parallel_tool_calls").booleanValue());
+            assertFalse(body.required("tools").get(0).required("strict").booleanValue());
+            assertEquals("call_1", response.toolCall().callId());
+            assertEquals("{}", response.toolCall().arguments());
+            assertEquals(9, response.response().usage().totalTokens());
+
+            transport.responseBody = completedChat("resp_2", "Found it");
+            var followUp = AiRequest.builder().operation(AiOperation.CHAT).model("gpt-test").store(true)
+                .previousResponseId(response.response().responseId()).toolResult(new AiToolResult(response.toolCall().callId(), "record 42")).build();
+            assertEquals("Found it", client.executeToolStep("openai", followUp, config).response().text());
+            body = MAPPER.readTree(transport.requestBody);
+            assertEquals("resp_1", body.required("previous_response_id").textValue());
+            assertEquals(MAPPER.readTree("""
+                [{"type":"function_call_output","call_id":"call_1","output":"record 42"}]
+                """), body.required("input"));
+            assertFalse(body.has("tools"));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "unknown", "malformed", "multiple", "incomplete"})
+    void rejectsUnusableNativeCalls(String problem) throws Exception {
+        var call = MAPPER.createObjectNode().put("type", "function_call").put("name", "lookup")
+            .put("call_id", "call_1").put("arguments", "{}");
+        var root = MAPPER.createObjectNode().put("id", "resp_1").put("status", "completed");
+        var output = root.putArray("output").add(call);
+        switch (problem) {
+            case "missing" -> call.remove("call_id");
+            case "unknown" -> call.put("name", "other");
+            case "malformed" -> call.put("arguments", "{} {}");
+            case "multiple" -> output.add(call);
+            case "incomplete" -> call.put("status", "in_progress");
+        }
+        assertToolStepRejected(LOOKUP_REQUEST, root.toString(), "resp_1");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void reportsOnlyAnUnambiguousCompletedRejectedCall(boolean missingId) throws Exception {
+        var request = AiRequest.builder().operation(AiOperation.CHAT).model("gpt-test").store(true)
+            .userPrompt("Look it up").tools(LOOKUP_REQUEST.tools()).reportRejectedToolCalls(true).build();
+        var root = (ObjectNode) MAPPER.readTree(LOOKUP_RESPONSE);
+        var output = root.withArray("output");
+        var call = (ObjectNode) output.get(0);
+        if (missingId) call.remove("call_id");
+        else call.put("arguments", "{} {}");
+        try (var client = AiClient.of(new OpenAiProvider(new RecordingHttpClient(200, root.toString())))) {
+            var step = client.executeToolStep("openai", request, embeddingConfig("key", "trusted"));
+            assertNull(step.toolCall());
+            assertNull(step.response().text());
+            assertEquals("resp_1", step.response().responseId());
+            assertEquals(9, step.response().usage().totalTokens());
+            assertEquals(missingId ? null : "call_1", step.rejectedCall().callId());
+        }
+        call.put("status", "in_progress");
+        assertToolStepRejected(request, root.toString(), "resp_1");
+        call.put("status", "completed");
+        output.add(call.deepCopy());
+        assertToolStepRejected(request, root.toString(), "resp_1");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"name", "call_id", "arguments"})
+    void rejectsDuplicateCallFields(String field) throws Exception {
+        String payload = """
+            {"id":"resp_1","status":"completed","output":[{"type":"function_call",
+             "%s":"other","name":"lookup","call_id":"call_1","arguments":"{}"}]}
+            """.formatted(field);
+        assertToolStepRejected(LOOKUP_REQUEST, payload, "resp_1");
+    }
+
+    @Test
+    void rejectsTrailingJsonAfterToolCall() throws Exception {
+        assertToolStepRejected(LOOKUP_REQUEST, LOOKUP_RESPONSE + "{}", null);
+    }
+
+    @Test
+    void rejectsTrailingJsonAfterToolResult() throws Exception {
+        var request = AiRequest.builder().operation(AiOperation.CHAT).model("gpt-test").store(true)
+            .previousResponseId("resp_1").toolResult(new AiToolResult("call_1", "42")).build();
+        assertToolStepRejected(request, completedChat("resp_2", "Done") + "{}", null);
+    }
+
+    private static void assertToolStepRejected(AiRequest request, String payload, String expectedResponseId) throws Exception {
+        var transport = new RecordingHttpClient(200, payload);
+        try (var client = AiClient.of(new OpenAiProvider(transport))) {
+            var failure = assertThrows(AiProviderException.class,
+                () -> client.executeToolStep("openai", request, embeddingConfig("key", "trusted")));
+            assertEquals(expectedResponseId, failure.lifecycle().responseId());
+            assertEquals(1, transport.calls);
         }
     }
 
@@ -1020,7 +1135,7 @@ class OpenAiProviderTest {
 
     private static final class RecordingHttpClient extends CloseableHttpClient {
         private final int responseStatus;
-        private final String responseBody;
+        private String responseBody;
         private final IOException failure;
         private final List<org.apache.http.Header> headers = new ArrayList<>();
         private int calls;

@@ -52,6 +52,9 @@ import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiResponse;
 import com.webjetcms.ai.AiResponseDeletion;
 import com.webjetcms.ai.AiStreamListener;
+import com.webjetcms.ai.AiTool;
+import com.webjetcms.ai.AiToolCall;
+import com.webjetcms.ai.AiToolStep;
 import com.webjetcms.ai.BinaryContent;
 import com.webjetcms.ai.EmbeddingOptions;
 import com.webjetcms.ai.EmbeddingRequest;
@@ -64,6 +67,7 @@ import com.webjetcms.ai.internal.CancellationSupport;
 import com.webjetcms.ai.internal.LifecycleSupport;
 import com.webjetcms.ai.internal.ResponseDeletionSupport;
 import com.webjetcms.ai.internal.ChatRequestValidator;
+import com.webjetcms.ai.internal.ToolJson;
 import com.webjetcms.ai.ModelInfo;
 import com.webjetcms.ai.TokenUsage;
 import com.webjetcms.ai.security.PromptInjectionDefense;
@@ -191,6 +195,22 @@ public final class OpenAiProvider implements AiProvider {
     }
 
     @Override
+    public boolean supportsToolCalling(String model) { return true; }
+
+    @Override
+    public AiToolStep executeToolStep(AiRequest request, AiProviderConfig config, AiCancellationToken token,
+            AiLifecycleListener listener) throws AiProviderException {
+        var lifecycle = new LifecycleSupport(PROVIDER_ID, listener);
+        return lifecycle.callStep(config, token, () -> {
+            requireRequest(request);
+            ChatRequestValidator.validate(PROVIDER_ID, request, true);
+            requireConfigured(config);
+            requireModel(request);
+            return executeText(request, config, token, lifecycle, true);
+        });
+    }
+
+    @Override
     public AiCapabilities capabilities(String model) {
         AiProvider.super.capabilities(model);
         Support generation = OpenAiImageOptions.definitions(model, AiOperation.GENERATE_IMAGE).isEmpty()
@@ -272,7 +292,7 @@ public final class OpenAiProvider implements AiProvider {
 
         try {
             return switch (request.operation()) {
-                case TEXT, CHAT -> executeText(request, config, token, lifecycle);
+                case TEXT, CHAT -> executeText(request, config, token, lifecycle, false).response();
                 case GENERATE_IMAGE -> generateImage(request, config, token, lifecycle);
                 case EDIT_IMAGE -> editImage(request, config, token, lifecycle);
             };
@@ -436,21 +456,27 @@ public final class OpenAiProvider implements AiProvider {
      * @param config credentials, endpoint, and transport settings
      * @param token cancellation token for the active HTTP request
      * @param lifecycle per-call lifecycle tracker
+     * @param toolStep whether to strictly decode a native tool-step response
      * @return generated text, usage, and completion metadata
      * @throws AiProviderException if transport or response validation fails
      */
-    private AiResponse executeText(
-        AiRequest request, AiProviderConfig config, AiCancellationToken token, LifecycleSupport lifecycle
+    private AiToolStep executeText(
+        AiRequest request, AiProviderConfig config, AiCancellationToken token, LifecycleSupport lifecycle, boolean toolStep
     ) throws AiProviderException {
         HttpPost post = jsonPost(endpoint(config, RESPONSES_PATH), buildTextBody(request));
         String response = executeForResult(post, config, token, isContinuation(request), lifecycle).body();
 
         try {
-            JsonNode root = MAPPER.readTree(response);
-            if (root != null && root.path("id").isTextual()) lifecycle.onResponseId(root.path("id").textValue());
+            JsonNode root;
+            if (toolStep) {
+                root = ToolJson.readResponse(response, lifecycle);
+            } else {
+                root = MAPPER.readTree(response);
+                if (root != null && root.path("id").isTextual()) lifecycle.onResponseId(root.path("id").textValue());
+            }
             return request.operation() == AiOperation.CHAT
-                ? parseChatResponse(root, response, isContinuation(request))
-                : parseTextResponse(root, response);
+                ? parseChatResponse(root, response, isContinuation(request), request.tools(), toolStep && request.reportRejectedToolCalls())
+                : new AiToolStep(parseTextResponse(root, response), null);
         } catch (IOException | RuntimeException exception) {
             throw invalidResponse("Could not parse the OpenAI text response", response, exception);
         }
@@ -660,6 +686,19 @@ public final class OpenAiProvider implements AiProvider {
                 PromptInjectionDefense.hardenSystemInstructions(request.instructions())
             );
         }
+        if (!request.tools().isEmpty()) {
+            ArrayNode tools = body.putArray("tools");
+            body.put("parallel_tool_calls", false);
+            for (AiTool definition : request.tools()) {
+                ObjectNode tool = tools.addObject().put("type", "function").put("name", definition.name()).put("strict", false);
+                if (definition.description() != null) tool.put("description", definition.description());
+                tool.set("parameters", ToolJson.object(definition.inputSchema()));
+            }
+        }
+        if (request.toolResult() != null) {
+            inputs.addObject().put("type", "function_call_output").put("call_id", request.toolResult().callId())
+                .put("output", request.toolResult().output());
+        }
         addProtectedInput(inputs, request.inputText(), UntrustedSource.INPUT_TEXT);
         addProtectedInput(inputs, request.userPrompt(), UntrustedSource.USER_PROMPT);
 
@@ -736,6 +775,12 @@ public final class OpenAiProvider implements AiProvider {
      * @throws AiProviderException if completion, output, or continuation validation fails
      */
     static AiResponse parseChatResponse(JsonNode root, String response, boolean continuation) throws AiProviderException {
+        return parseChatResponse(root, response, continuation, List.of(), false).response();
+    }
+
+    private static AiToolStep parseChatResponse(JsonNode root, String response, boolean continuation, List<AiTool> tools,
+            boolean reportRejectedCalls)
+            throws AiProviderException {
         ensureSuccessfulResponse(root, response, continuation);
         if ("completed".equals(textOrNull(root.get("status"))) == false || root.hasNonNull("error")) {
             throw classifyContinuationError(
@@ -751,9 +796,23 @@ public final class OpenAiProvider implements AiProvider {
         if (root.hasNonNull("output") && outputs.isArray() == false) {
             throw invalidResponse("OpenAI chat response contains invalid output", response, null);
         }
+        AiToolCall call = null;
+        AiToolStep.RejectedCall rejected = null;
         for (JsonNode output : outputs) {
             String type = textOrNull(output.get("type"));
-            if ("message".equals(type) == false && "reasoning".equals(type) == false) {
+            if ("function_call".equals(type)) {
+                String name = output.path("name").textValue();
+                if (call != null || rejected != null || tools.stream().noneMatch(tool -> tool.name().equals(name))) {
+                    throw invalidResponse("Unexpected OpenAI function call", response, null);
+                }
+                String callId = output.path("call_id").textValue();
+                try {
+                    call = new AiToolCall(callId, name, output.path("arguments").textValue());
+                } catch (IllegalArgumentException invalid) {
+                    if (!reportRejectedCalls) throw invalidResponse("Malformed OpenAI function call", response, invalid);
+                    rejected = new AiToolStep.RejectedCall(callId);
+                }
+            } else if ("message".equals(type) == false && "reasoning".equals(type) == false) {
                 throw invalidResponse("OpenAI chat response contains an unsupported output action", response, null);
             }
             if (output.hasNonNull("status")
@@ -762,11 +821,11 @@ public final class OpenAiProvider implements AiProvider {
             }
         }
 
-        String text = outputText(root, true);
-        if (isBlank(text)) {
+        String text = rejected == null ? outputText(root, true) : null;
+        if (rejected == null && call == null && isBlank(text)) {
             throw invalidResponse("OpenAI chat response does not contain usable output text", response, null);
         }
-        return new AiResponse(text, List.of(), parseUsage(root.path("usage")), "completed", id.textValue());
+        return new AiToolStep(new AiResponse(text, List.of(), parseUsage(root.path("usage")), "completed", id.textValue()), call, rejected);
     }
 
     /**

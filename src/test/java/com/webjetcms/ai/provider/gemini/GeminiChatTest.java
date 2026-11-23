@@ -2,6 +2,7 @@ package com.webjetcms.ai.provider.gemini;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -25,6 +26,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import com.webjetcms.ai.AiClient;
 import com.webjetcms.ai.AiErrorCategory;
+import com.webjetcms.ai.AiCancellationToken;
+import com.webjetcms.ai.AiLifecycleListener;
+import com.webjetcms.ai.AiTool;
+import com.webjetcms.ai.AiToolCall;
+import com.webjetcms.ai.AiToolResult;
 import com.webjetcms.ai.AiOperation;
 import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
@@ -42,6 +48,95 @@ class GeminiChatTest {
             {"type":"image","data":"AQID","mime_type":"image/png"}]}],
           "usage":{"total_input_tokens":11,"total_output_tokens":5,"total_tokens":20}}
         """;
+
+    private static final AiTool LOOKUP = new AiTool("lookup", "Find a record", "{\"type\":\"object\"}");
+    private static final String CALL = """
+        {"type":"function_call","id":"call-7","name":"lookup","arguments":{"key":7}}
+        """.strip();
+    private static String pending(String steps) {
+        return """
+            {"id":"turn-7","status":"requires_action","usage":{"total_tokens":12},"steps":[%s]}
+            """.formatted(steps);
+    }
+
+    @Test
+    void completesNativeCallUsingStoredInteractionAndCallId() throws Exception {
+        List<JsonNode> requests = new CopyOnWriteArrayList<>();
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/interactions", exchange -> {
+            requests.add(MAPPER.readTree(exchange.getRequestBody()));
+            byte[] bytes = (requests.size() == 1 ? pending(CALL) : RESPONSE).getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (var output = exchange.getResponseBody()) { output.write(bytes); }
+        });
+        server.start();
+        try (var client = AiClient.of(new GeminiProvider())) {
+            var config = AiProviderConfig.builder("key").allowInsecureHttpForLocalTesting()
+                .baseUri(URI.create("http://127.0.0.1:" + server.getAddress().getPort())).build();
+            assertTrue(client.supportsToolCalling("gemini", "gemini-test"));
+            var request = chat().tools(List.of(LOOKUP)).build();
+            var ids = new ArrayList<String>();
+            assertThrows(AiProviderException.class, () -> client.execute(request, config));
+            assertThrows(AiProviderException.class, () -> client.stream(request, config, text -> { }));
+            var step = client.executeToolStep("gemini", request, config, AiCancellationToken.none(), ids::add);
+            assertEquals(List.of("turn-7"), ids);
+            assertEquals(new AiToolCall("call-7", "lookup", "{\"key\":7}"), step.toolCall());
+            assertEquals("requires_action", step.response().finishReason());
+            assertEquals(12, step.response().usage().totalTokens());
+            var next = chat().previousResponseId(step.response().responseId()).userPrompt(null)
+                .toolResult(new AiToolResult(step.toolCall().callId(), "found")).build();
+            var answer = client.executeToolStep("gemini", next, config);
+            assertEquals("Hello", answer.response().text());
+            assertNull(answer.toolCall());
+            assertEquals(2, requests.size());
+            assertEquals(MAPPER.readTree("""
+                [{"type":"function","name":"lookup","description":"Find a record","parameters":{"type":"object"}}]
+                """), requests.get(0).required("tools"));
+            assertEquals("turn-7", requests.get(1).required("previous_interaction_id").textValue());
+            assertEquals(MAPPER.readTree("""
+                [{"type":"function_result","call_id":"call-7","result":"found"}]
+                """), requests.get(1).required("input"));
+        } finally { server.stop(0); }
+    }
+
+    @Test
+    void rejectsAmbiguousOrIncompleteToolSteps() {
+        for (String payload : List.of(pending(""), pending(CALL + "," + CALL), pending(CALL.replace("lookup", "other")),
+                pending(CALL.replace("call-7", "")), pending(CALL.replace("{\"key\":7}", "null")),
+                pending(CALL.replace("\"key\":7", "\"key\":7,\"key\":9")), pending(CALL).replace("requires_action", "failed"))) {
+            assertThrows(IOException.class, () -> GeminiInteractionsParser.parseStep(payload, AiLifecycleListener.none(), List.of(LOOKUP), false));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void reportsAnUnambiguousRejectedToolCall(boolean missingId) throws IOException {
+        String malformed = missingId ? CALL.replace("\"id\":\"call-7\",", "") : CALL.replace("{\"key\":7}", "[]");
+        var ids = new ArrayList<String>();
+        var rejected = GeminiInteractionsParser.parseStep(pending(malformed), ids::add, List.of(LOOKUP), true);
+        assertEquals(List.of("turn-7"), ids);
+        assertEquals("turn-7", rejected.response().responseId());
+        assertEquals(12, rejected.response().usage().totalTokens());
+        assertNull(rejected.response().text());
+        assertNull(rejected.toolCall());
+        assertEquals(missingId ? null : "call-7", rejected.rejectedCall().callId());
+        for (String payload : List.of(pending(malformed + "," + CALL), pending(CALL + "," + malformed),
+                pending(malformed.replace("lookup", "other")), pending(malformed).replace("requires_action", "completed"),
+                pending(CALL.replace("\"key\":7", "\"key\":7,\"key\":9")))) {
+            assertThrows(IOException.class, () -> GeminiInteractionsParser.parseStep(payload, ids::add, List.of(LOOKUP), true));
+        }
+    }
+
+    @Test
+    void rejectsFunctionCallInCompletedInteractionEvenWithAnswerText() {
+        String payload = """
+            {"id":"turn-1","status":"completed","steps":[%s,
+             {"type":"model_output","content":[{"type":"text","text":"Done"}]}]}
+            """.formatted(CALL);
+        var observed = new ArrayList<String>();
+        assertThrows(IOException.class, () -> GeminiInteractionsParser.parseStep(payload, observed::add, List.of(LOOKUP), true));
+        assertEquals(List.of("turn-1"), observed);
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})

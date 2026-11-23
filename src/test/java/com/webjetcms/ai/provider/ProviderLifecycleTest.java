@@ -38,6 +38,7 @@ import com.webjetcms.ai.AiProviderConfig;
 import com.webjetcms.ai.AiProviderException;
 import com.webjetcms.ai.AiRequest;
 import com.webjetcms.ai.AiRequestLifecycle.State;
+import com.webjetcms.ai.AiTool;
 import com.webjetcms.ai.provider.gemini.GeminiProvider;
 import com.webjetcms.ai.provider.openai.OpenAiProvider;
 
@@ -170,6 +171,30 @@ class ProviderLifecycleTest {
                 assertTrue(trace.toString().contains("Observer failed"));
                 assertFalse(trace.toString().contains("private-key"));
                 assertFalse(trace.toString().contains("header-secret"));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void geminiRejectsDuplicateArgumentsAndReportsOnlyAUniqueInteractionId(boolean duplicateId) throws Exception {
+        payload.set("""
+            {"status":"requires_action","steps":[{"type":"function_call","id":"call-1","name":"lookup",
+             "arguments":{"key":7,"key":9}}],%s"id":"turn-new"}
+            """.formatted(duplicateId ? "\"id\":\"other\"," : ""));
+        var request = AiRequest.builder().operation(AiOperation.CHAT).model("test-model").store(true)
+            .userPrompt("Look up the record").tools(List.of(new AiTool("lookup", null, "{}"))).build();
+        var observed = new ArrayList<String>();
+        try (AiClient client = client("gemini")) {
+            var failure = assertThrows(AiProviderException.class, () -> client.executeToolStep(
+                "gemini", request, config, AiCancellationToken.none(), observed::add));
+            if (duplicateId) {
+                assertEquals(List.of(), observed);
+                assertEquals(State.UNKNOWN, failure.lifecycle().state());
+                assertNull(failure.lifecycle().responseId());
+            } else {
+                assertEquals(List.of("turn-new"), observed);
+                assertObserved(failure);
             }
         }
     }

@@ -25,6 +25,44 @@ adapter restrictions. Metadata does not guarantee current model availability.
 | Edit an image | `AiRequest` with `EDIT_IMAGE` | `execute` | No | A non-empty `inputMedia`; DALL-E 3 is generation-only |
 | Create text embeddings | `EmbeddingRequest` | `embed` | No | A non-blank embedding model and at least one non-blank input |
 
+## Native function calling
+
+Use `client.supportsToolCalling("openai", model)` to check adapter support. The selected
+model and endpoint must support Responses functions. Use `executeToolStep` for one
+non-streaming, stored chat step. Supply the functions available to the current caller
+each time. The adapter requests at most one call and preserves optional schema fields
+with `strict: false`. Validate the arguments against the tool schema and the user's
+permissions before executing a function.
+
+```java
+AiTool lookup = new AiTool("lookup_order", "Find an order by number", """
+    {"type":"object","properties":{"number":{"type":"string"}},"required":["number"]}
+    """);
+AiRequest first = AiRequest.builder().operation(AiOperation.CHAT).model(model).store(true)
+    .userPrompt("Where is order 42?").tools(List.of(lookup)).build();
+AiToolStep step = client.executeToolStep("openai", first, config);
+if (step.toolCall() != null) {
+    AiToolCall call = step.toolCall();
+    String result = orderService.authorizeAndLookup(currentUser, call.arguments());
+    AiRequest next = AiRequest.builder().operation(AiOperation.CHAT).model(model).store(true)
+        .previousResponseId(step.response().responseId())
+        .toolResult(new AiToolResult(call.callId(), result)).build();
+    step = client.executeToolStep("openai", next, config);
+}
+String answer = step.response().text();
+```
+
+The continuation uses two different identifiers. The response ID selects the provider's
+conversation history, and the call ID associates the output with the requested function.
+A result-only request can finish without offering further tools. For additional steps,
+supply the current tool list again. The caller controls execution, retries and budgets.
+
+Set `reportRejectedToolCalls(true)` when the caller handles `step.rejectedCall()` before
+reading the answer. A rejection carries the completed response ID and usage. If the
+rejection has a call ID, return corrective feedback as its tool result. If the ID is
+missing, repeat the previous request with its existing input. Count both paths against
+the same attempt limit. A rejected call has no executable arguments.
+
 ## Configuration and client
 
 ```java

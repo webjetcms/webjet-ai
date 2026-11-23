@@ -3,6 +3,28 @@
 All notable changes to this project are documented in this file. The project
 uses [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+## [2.2.0]
+
+### Added
+
+- `AiClient.executeToolStep` supports caller-executed functions in non-streaming,
+  stored OpenAI Responses and Gemini Interactions chats. A step returns an
+  `AiResponse` and at most one function call. Applications use the call ID to
+  submit a result and the response ID to continue the conversation.
+- With `reportRejectedToolCalls(true)`, both providers report rejected calls and
+  preserve the response ID and token usage so the caller can request a correction.
+  Tool steps reject ambiguous JSON and retain a unique response ID for cleanup
+  when nested fields are duplicated. Gemini returns calls only for interactions
+  with status `requires_action`. Call and result diagnostics omit their payloads.
+- `AiToolArgumentValidator` validates arguments against a documented subset of
+  JSON Schema, resolves percent-encoded local references, and reports excessive
+  nesting as a validation failure.
+- `AiTextToolProtocol` provides instructions and a parser for text-only models.
+  Parsed calls contain an immutable snapshot of the arguments. Ordinary answers
+  can include inline JSON.
+
 ## [2.1.2]
 
 ### Fixed
@@ -236,6 +258,7 @@ uses [Semantic Versioning](https://semver.org/).
 - Prompt-injection defense utilities.
 - Java 17 build, tests, API documentation, and Maven Central publication.
 
+[2.2.0]: https://github.com/webjetcms/webjet-ai/compare/v2.1.2...v2.2.0
 [2.1.0]: https://github.com/webjetcms/webjet-ai/compare/v2.0.4...v2.1.0
 [2.0.4]: https://github.com/webjetcms/webjet-ai/releases/tag/v2.0.4
 [2.0.0]: https://github.com/webjetcms/webjet-ai/compare/v1.2.0...v2.0.0

@@ -22,7 +22,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.webjetcms:webjet-ai:2.1.0'
+    implementation 'com.webjetcms:webjet-ai:2.2.0'
 }
 ```
 
@@ -32,17 +32,25 @@ Maven:
 <dependency>
     <groupId>com.webjetcms</groupId>
     <artifactId>webjet-ai</artifactId>
-    <version>2.1.0</version>
+    <version>2.2.0</version>
 </dependency>
 ```
 
-Version `2.1.0` also publishes the optional local runtime as the separate
-`com.webjetcms:webjet-ai-local:2.1.0` artifact. Cloud-provider applications only
+The optional local runtime is available as the separate
+`com.webjetcms:webjet-ai-local:2.2.0` artifact. Cloud-provider applications only
 need the core `webjet-ai` dependency shown above.
+
+### Upgrading from 2.1.x
+
+Update the dependencies to `2.2.0`. Applications that use ordinary chat can
+continue using `execute` and `stream`. To offer functions in a stored OpenAI
+or Gemini chat, use `executeToolStep` and authorize each call before running
+it. Custom providers inherit a default implementation that reports
+`UNSUPPORTED_OPERATION`. See [Chat and conversation continuation](#chat-and-conversation-continuation).
 
 ### Upgrading from 2.0.x
 
-Update both artifacts to `2.1.0` when using the local runtime. Java 17 remains the
+Update both artifacts to `2.2.0` when using the local runtime. Java 17 remains the
 minimum version. Existing `execute`, `stream`, and exception constructors remain
 available; custom providers inherit defaults for capabilities, cancellation,
 lifecycle observation, and response deletion. The default deletion implementation
@@ -150,7 +158,7 @@ configuration. IDs are provider-specific and must not be reused across providers
 or unrelated conversations. Omit `previousResponseId` to start a new conversation.
 The client keeps no conversation history or current ID of its own.
 
-Every chat turn requires explicit `store(true)` and non-blank `inputText` or
+Ordinary chat turns require explicit `store(true)` and non-blank `inputText` or
 `userPrompt`; instructions alone are insufficient. Binary input, image options,
 translation options, and blank continuation IDs are rejected. `previousResponseId`
 is rejected on operations other than `CHAT`. OpenRouter and local providers do not
@@ -162,6 +170,41 @@ input blocks echoed by the model are removed by `AiClient`, including during
 streaming; response metadata is retained. See the [OpenAI](docs/providers/openai.md#chat)
 and [Gemini](docs/providers/gemini.md#chat) guides for protocol details and
 [stable error categories](#stable-error-categories) for continuation failures.
+
+For caller-executed functions, use `executeToolStep` with a stored chat request.
+Pass the returned call ID with the tool result and the response ID with the next
+request. Both [OpenAI Responses](docs/providers/openai.md#native-function-calling)
+and [Gemini Interactions](docs/providers/gemini.md#native-function-calling) implement
+this non-streaming API.
+
+### Validating tool arguments
+
+Call `AiToolArgumentValidator.validate(tool, call)` after selecting the offered function
+and before executing it. An `InvalidArguments` exception provides correction text
+using only fields and constraints from the registered schema. For already decoded JSON,
+use `validate(schema, arguments)`. Applications still authorize the operation.
+
+The validator supports `type` (including nullable unions), `enum`, `minimum`,
+`properties`, `required`, `additionalProperties`, `patternProperties`, `items`,
+`oneOf`, `anyOf`, boolean subschemas and local references to entries in `$defs`.
+It accepts the `description` and `default` annotations. Unsupported schema keywords
+raise `IllegalArgumentException`. Validation is opt-in for applications using this subset.
+Local references use URI fragment and JSON Pointer escaping. Recursive definitions may
+refer back to themselves through child properties or array items. A reference cycle
+that evaluates the same argument is a schema error. Arguments may be nested up to 80
+levels below the root. Beyond that limit, `validate` throws `InvalidArguments` and
+`matches` returns `false`.
+
+### Tools with text-only models
+
+Include `AiTextToolProtocol.instructions()` and the descriptions of the functions
+you offer in the request instructions. Pass the complete response to
+`AiTextToolProtocol.parse(text, maxChars)`. An `Answer` contains the final text,
+a `Call` contains the proposed name and a deeply immutable snapshot of its decoded arguments, and an `Invalid`
+contains correction feedback. Check the offered name, validate the arguments and
+authorize the call before dispatch. The application supplies the result as untrusted
+input on the next request and controls the maximum number of attempts. Use this
+parser only for turns where you supplied these text-protocol instructions.
 
 ## Response lifecycle and failed attempts
 
@@ -475,7 +518,7 @@ build prefix and run `./gradlew :webjet-ai-local:localModelTool --args='...'`.
 Prepare the portable FP32 bundle:
 
 ```shell
-java -jar webjet-ai-local-2.1.0.jar prepare \
+java -jar webjet-ai-local-2.2.0.jar prepare \
   --model multilingual-e5-base \
   --output /path/to/multilingual-e5-base-fp32.zip
 ```
@@ -488,7 +531,7 @@ unless `--overwrite` is specified.
 Use the same command for the smaller 384-value model:
 
 ```shell
-java -jar webjet-ai-local-2.1.0.jar prepare \
+java -jar webjet-ai-local-2.2.0.jar prepare \
   --model multilingual-e5-small
 ```
 
@@ -498,7 +541,7 @@ Its default FP32 output is `multilingual-e5-small-fp32.zip`; the canonical
 An explicitly selected quantized bundle is available for CPUs with AVX-512 VNNI:
 
 ```shell
-java -jar webjet-ai-local-2.1.0.jar prepare \
+java -jar webjet-ai-local-2.2.0.jar prepare \
   --model multilingual-e5-base \
   --variant int8-avx512-vnni
 ```
@@ -535,7 +578,7 @@ JAR version.
 Prepare the portable quantized M2M100 translation bundle in the same way:
 
 ```shell
-java -jar webjet-ai-local-2.1.0.jar prepare \
+java -jar webjet-ai-local-2.2.0.jar prepare \
   --model facebook/m2m100_418M \
   --variant int8
 ```
@@ -550,7 +593,7 @@ read from that tokenizer rather than hardcoded by the library.
 Prepare EuroLLM-1.7B-Instruct for local multilingual text generation:
 
 ```shell
-java -jar webjet-ai-local-2.1.0.jar prepare \
+java -jar webjet-ai-local-2.2.0.jar prepare \
   --model utter-project/EuroLLM-1.7B-Instruct
 ```
 
@@ -578,7 +621,7 @@ graph is resolved. Copying only `webjet-ai-local.jar` is not sufficient.
 
 ```gradle
 dependencies {
-    implementation 'com.webjetcms:webjet-ai-local:2.1.0'
+    implementation 'com.webjetcms:webjet-ai-local:2.2.0'
 }
 ```
 
@@ -948,11 +991,11 @@ The `checkStandaloneBoundary` verification rejects imports from WebJET CMS,
 Spring, servlet APIs, and JPA. Build outputs include the main, sources, and
 Javadoc JARs.
 
-Without a `releaseVersion` property, development artifacts use `2.1.0-SNAPSHOT`.
-Verify the release version and both modules' publication metadata explicitly:
+Both modules default to `2.2.0`. The release workflow supplies the version from
+the signed tag. The following command runs the same release checks locally.
 
 ```shell
-./gradlew clean check javadoc -PreleaseVersion=2.1.0
+./gradlew clean check javadoc -PreleaseVersion=2.2.0
 ```
 
 For simultaneous local development with a consuming Gradle project, use a
@@ -962,15 +1005,15 @@ composite build instead of publishing to `mavenLocal()`:
 ./gradlew --include-build ../webjet-ai test
 ```
 
-To test the `2.1.0` release candidate through a normal Maven dependency graph
+To test the `2.2.0` release candidate through a normal Maven dependency graph
 instead:
 
 ```shell
-./gradlew -PreleaseVersion=2.1.0 publishToMavenLocal
+./gradlew -PreleaseVersion=2.2.0 publishToMavenLocal
 ```
 
 Then add `mavenLocal()` and depend on
-`com.webjetcms:webjet-ai-local:2.1.0` in the consuming project.
+`com.webjetcms:webjet-ai-local:2.2.0` in the consuming project.
 
 The opt-in production-bundle smoke test performs no download:
 
@@ -1011,7 +1054,7 @@ keyring, matching traditional Maven `gpg:sign-and-deploy-file` usage. Keep
 these properties in `~/.gradle/gradle.properties` or CI secrets, for example:
 
 ```properties
-releaseVersion=2.1.0
+releaseVersion=2.2.0
 signingKeyId=0x36F2327F
 ```
 
@@ -1019,7 +1062,7 @@ If you sign with an in-memory exported private key instead, also provide
 `signingPassword`. To create the Central bundle locally, run:
 
 ```shell
-./gradlew centralBundle -PreleaseVersion=2.1.0 -PsigningKeyId=0x36F2327F
+./gradlew centralBundle -PreleaseVersion=2.2.0 -PsigningKeyId=0x36F2327F
 ```
 
 During a local interactive run, Gradle prints the resolved `releaseVersion` and
@@ -1032,7 +1075,7 @@ both stable and `-SNAPSHOT` semantic versions. Configure `githubUsername` and
 `GITHUB_TOKEN`, then run:
 
 ```shell
-./gradlew publishAllPublicationsToGitHubPackagesRepository -PreleaseVersion=2.1.0-SNAPSHOT
+./gradlew publishAllPublicationsToGitHubPackagesRepository -PreleaseVersion=2.2.0-SNAPSHOT
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development rules,
