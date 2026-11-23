@@ -44,7 +44,11 @@ public final class AiTextToolProtocol {
      * @param arguments immutable snapshot of decoded JSON fields, including nested maps, lists and null values
      */
     public record Call(String name, Map<String, Object> arguments) implements Decision {
-        /** Takes a snapshot of the supplied JSON object. */
+        /**
+         * Creates a proposed call with an immutable snapshot of its arguments.
+         * @param name tool name proposed by the model
+         * @param arguments fields of the decoded JSON argument object
+         */
         public Call {
             arguments = immutableObject(arguments);
         }

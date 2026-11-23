@@ -22,7 +22,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.webjetcms:webjet-ai:2.1.0'
+    implementation 'com.webjetcms:webjet-ai:2.2.0'
 }
 ```
 
@@ -32,17 +32,25 @@ Maven:
 <dependency>
     <groupId>com.webjetcms</groupId>
     <artifactId>webjet-ai</artifactId>
-    <version>2.1.0</version>
+    <version>2.2.0</version>
 </dependency>
 ```
 
-Version `2.1.0` also publishes the optional local runtime as the separate
-`com.webjetcms:webjet-ai-local:2.1.0` artifact. Cloud-provider applications only
+The optional local runtime is available as the separate
+`com.webjetcms:webjet-ai-local:2.2.0` artifact. Cloud-provider applications only
 need the core `webjet-ai` dependency shown above.
+
+### Upgrading from 2.1.x
+
+Update the dependencies to `2.2.0`. Applications that use ordinary chat can
+continue using `execute` and `stream`. To offer functions in a stored OpenAI
+or Gemini chat, use `executeToolStep` and authorize each call before running
+it. Custom providers inherit a default implementation that reports
+`UNSUPPORTED_OPERATION`. See [Chat and conversation continuation](#chat-and-conversation-continuation).
 
 ### Upgrading from 2.0.x
 
-Update both artifacts to `2.1.0` when using the local runtime. Java 17 remains the
+Update both artifacts to `2.2.0` when using the local runtime. Java 17 remains the
 minimum version. Existing `execute`, `stream`, and exception constructors remain
 available; custom providers inherit defaults for capabilities, cancellation,
 lifecycle observation, and response deletion. The default deletion implementation
@@ -510,7 +518,7 @@ build prefix and run `./gradlew :webjet-ai-local:localModelTool --args='...'`.
 Prepare the portable FP32 bundle:
 
 ```shell
-java -jar webjet-ai-local-2.1.0.jar prepare \
+java -jar webjet-ai-local-2.2.0.jar prepare \
   --model multilingual-e5-base \
   --output /path/to/multilingual-e5-base-fp32.zip
 ```
@@ -523,7 +531,7 @@ unless `--overwrite` is specified.
 Use the same command for the smaller 384-value model:
 
 ```shell
-java -jar webjet-ai-local-2.1.0.jar prepare \
+java -jar webjet-ai-local-2.2.0.jar prepare \
   --model multilingual-e5-small
 ```
 
@@ -533,7 +541,7 @@ Its default FP32 output is `multilingual-e5-small-fp32.zip`; the canonical
 An explicitly selected quantized bundle is available for CPUs with AVX-512 VNNI:
 
 ```shell
-java -jar webjet-ai-local-2.1.0.jar prepare \
+java -jar webjet-ai-local-2.2.0.jar prepare \
   --model multilingual-e5-base \
   --variant int8-avx512-vnni
 ```
@@ -570,7 +578,7 @@ JAR version.
 Prepare the portable quantized M2M100 translation bundle in the same way:
 
 ```shell
-java -jar webjet-ai-local-2.1.0.jar prepare \
+java -jar webjet-ai-local-2.2.0.jar prepare \
   --model facebook/m2m100_418M \
   --variant int8
 ```
@@ -585,7 +593,7 @@ read from that tokenizer rather than hardcoded by the library.
 Prepare EuroLLM-1.7B-Instruct for local multilingual text generation:
 
 ```shell
-java -jar webjet-ai-local-2.1.0.jar prepare \
+java -jar webjet-ai-local-2.2.0.jar prepare \
   --model utter-project/EuroLLM-1.7B-Instruct
 ```
 
@@ -613,7 +621,7 @@ graph is resolved. Copying only `webjet-ai-local.jar` is not sufficient.
 
 ```gradle
 dependencies {
-    implementation 'com.webjetcms:webjet-ai-local:2.1.0'
+    implementation 'com.webjetcms:webjet-ai-local:2.2.0'
 }
 ```
 
@@ -983,11 +991,11 @@ The `checkStandaloneBoundary` verification rejects imports from WebJET CMS,
 Spring, servlet APIs, and JPA. Build outputs include the main, sources, and
 Javadoc JARs.
 
-Without a `releaseVersion` property, development artifacts use `2.1.0-SNAPSHOT`.
-Verify the release version and both modules' publication metadata explicitly:
+Both modules default to `2.2.0`. The release workflow supplies the version from
+the signed tag. The following command runs the same release checks locally.
 
 ```shell
-./gradlew clean check javadoc -PreleaseVersion=2.1.0
+./gradlew clean check javadoc -PreleaseVersion=2.2.0
 ```
 
 For simultaneous local development with a consuming Gradle project, use a
@@ -997,15 +1005,15 @@ composite build instead of publishing to `mavenLocal()`:
 ./gradlew --include-build ../webjet-ai test
 ```
 
-To test the `2.1.0` release candidate through a normal Maven dependency graph
+To test the `2.2.0` release candidate through a normal Maven dependency graph
 instead:
 
 ```shell
-./gradlew -PreleaseVersion=2.1.0 publishToMavenLocal
+./gradlew -PreleaseVersion=2.2.0 publishToMavenLocal
 ```
 
 Then add `mavenLocal()` and depend on
-`com.webjetcms:webjet-ai-local:2.1.0` in the consuming project.
+`com.webjetcms:webjet-ai-local:2.2.0` in the consuming project.
 
 The opt-in production-bundle smoke test performs no download:
 
@@ -1046,7 +1054,7 @@ keyring, matching traditional Maven `gpg:sign-and-deploy-file` usage. Keep
 these properties in `~/.gradle/gradle.properties` or CI secrets, for example:
 
 ```properties
-releaseVersion=2.1.0
+releaseVersion=2.2.0
 signingKeyId=0x36F2327F
 ```
 
@@ -1054,7 +1062,7 @@ If you sign with an in-memory exported private key instead, also provide
 `signingPassword`. To create the Central bundle locally, run:
 
 ```shell
-./gradlew centralBundle -PreleaseVersion=2.1.0 -PsigningKeyId=0x36F2327F
+./gradlew centralBundle -PreleaseVersion=2.2.0 -PsigningKeyId=0x36F2327F
 ```
 
 During a local interactive run, Gradle prints the resolved `releaseVersion` and
@@ -1067,7 +1075,7 @@ both stable and `-SNAPSHOT` semantic versions. Configure `githubUsername` and
 `GITHUB_TOKEN`, then run:
 
 ```shell
-./gradlew publishAllPublicationsToGitHubPackagesRepository -PreleaseVersion=2.1.0-SNAPSHOT
+./gradlew publishAllPublicationsToGitHubPackagesRepository -PreleaseVersion=2.2.0-SNAPSHOT
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development rules,

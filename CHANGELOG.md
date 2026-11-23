@@ -5,14 +5,25 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-- Added opt-in tool argument validation for a documented JSON Schema subset and a prompt and parser for caller-executed tools on text-only models.
-- Text tool calls preserve an immutable argument snapshot. Answers can include ordinary inline JSON. Tool validation resolves percent-encoded local references and reports excessive argument depth through the normal validation result.
-- Gemini tool steps support the same opt-in rejected-call recovery as OpenAI, retaining the interaction ID and token usage.
+## [2.2.0]
 
-- OpenAI tool-step callers can opt in to receiving a rejected function call with its response ID and usage for bounded correction.
+### Added
 
-- OpenAI Responses and Gemini Interactions support optional caller-executed functions in non-streaming stored chat. Requests can declare functions and submit a correlated result. The new `executeToolStep` method returns the function call alongside the ordinary `AiResponse`.
-- Tool steps reject ambiguous JSON responses and retain a unique response ID for cleanup when nested fields are duplicated. Gemini returns a function call only for interactions with status `requires_action`. Tool call and result diagnostic strings omit their payloads.
+- `AiClient.executeToolStep` supports caller-executed functions in non-streaming,
+  stored OpenAI Responses and Gemini Interactions chats. A step returns an
+  `AiResponse` and at most one function call. Applications use the call ID to
+  submit a result and the response ID to continue the conversation.
+- With `reportRejectedToolCalls(true)`, both providers report rejected calls and
+  preserve the response ID and token usage so the caller can request a correction.
+  Tool steps reject ambiguous JSON and retain a unique response ID for cleanup
+  when nested fields are duplicated. Gemini returns calls only for interactions
+  with status `requires_action`. Call and result diagnostics omit their payloads.
+- `AiToolArgumentValidator` validates arguments against a documented subset of
+  JSON Schema, resolves percent-encoded local references, and reports excessive
+  nesting as a validation failure.
+- `AiTextToolProtocol` provides instructions and a parser for text-only models.
+  Parsed calls contain an immutable snapshot of the arguments. Ordinary answers
+  can include inline JSON.
 
 ## [2.1.2]
 
@@ -247,6 +258,7 @@ uses [Semantic Versioning](https://semver.org/).
 - Prompt-injection defense utilities.
 - Java 17 build, tests, API documentation, and Maven Central publication.
 
+[2.2.0]: https://github.com/webjetcms/webjet-ai/compare/v2.1.2...v2.2.0
 [2.1.0]: https://github.com/webjetcms/webjet-ai/compare/v2.0.4...v2.1.0
 [2.0.4]: https://github.com/webjetcms/webjet-ai/releases/tag/v2.0.4
 [2.0.0]: https://github.com/webjetcms/webjet-ai/compare/v1.2.0...v2.0.0

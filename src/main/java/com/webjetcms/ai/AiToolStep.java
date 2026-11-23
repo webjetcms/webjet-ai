@@ -18,7 +18,12 @@ public record AiToolStep(AiResponse response, AiToolCall toolCall, RejectedCall 
         this(response, toolCall, null);
     }
 
-    /** Requires completed response metadata and mutually exclusive call outcomes. */
+    /**
+     * Creates a completed step with at most one call outcome.
+     * @param response provider response for this step
+     * @param toolCall requested function, or {@code null} for an answer or rejection
+     * @param rejectedCall rejected function call, or {@code null} for an answer or executable call
+     */
     public AiToolStep {
         if (toolCall != null && rejectedCall != null) throw new IllegalArgumentException("A rejected call cannot execute");
         Objects.requireNonNull(response, "response");
@@ -29,7 +34,10 @@ public record AiToolStep(AiResponse response, AiToolCall toolCall, RejectedCall 
      * @param callId provider ID for returning corrective feedback, or null when the call had no usable ID
      */
     public record RejectedCall(String callId) {
-        /** Normalizes a blank correlation ID to a missing ID. */
+        /**
+         * Normalizes a blank correlation ID to a missing ID.
+         * @param callId provider call ID, or {@code null} if none was supplied
+         */
         public RejectedCall {
             if (callId != null && callId.isBlank()) callId = null;
         }
